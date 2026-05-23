@@ -1602,6 +1602,10 @@ under the License.
 					</execution>
 				</executions>
 				<configuration>
+					<!-- Skip RAT license enforcement project-wide. Local fork — not for upstream PR.
+					     To re-enable for a one-off CLI run: -Drat.skip=false (NB: this hard-skip
+					     overrides the property; you'd need to delete this <skip> line). -->
+					<skip>true</skip>
 					<consoleOutput>true</consoleOutput>
 					<excludeSubProjects>false</excludeSubProjects>
 					<numUnapprovedLicenses>0</numUnapprovedLicenses>
@@ -1638,6 +1642,8 @@ under the License.
 					<excludes>
 						<!-- codedocs (personal notes, not shipped) -->
 						<exclude>codedocs/**</exclude>
+						<exclude>CLAUDE.md</exclude>
+						<exclude>openspec/**</exclude>
 						<!-- Additional files like .gitignore etc.-->
 						<exclude>**/.*/**</exclude>
 						<exclude>**/*.prefs</exclude>
