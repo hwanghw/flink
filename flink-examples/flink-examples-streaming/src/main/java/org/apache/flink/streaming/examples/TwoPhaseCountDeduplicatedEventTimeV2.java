@@ -1,3 +1,20 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package org.apache.flink.streaming.examples;
 
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
@@ -7,17 +24,18 @@ import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.tuple.Tuple4;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.triggers.EventTimeTrigger;
+import org.apache.flink.streaming.api.windowing.triggers.PurgingTrigger;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
-
-import org.apache.flink.configuration.Configuration;
 
 import java.time.Duration;
 import java.util.HashMap;
@@ -37,9 +55,9 @@ public class TwoPhaseCountDeduplicatedEventTimeV2 {
     public static void main(String[] args) throws Exception {
 
         Configuration configuration = new Configuration();
-        configuration.setString("taskmanager.memory.network.min", "256mb");
-        configuration.setString("taskmanager.memory.network.max", "256mb");
-        configuration.setString("taskmanager.memory.network.fraction", "0.2");
+//        configuration.setString("taskmanager.memory.network.min", "256mb");
+//        configuration.setString("taskmanager.memory.network.max", "256mb");
+//        configuration.setString("taskmanager.memory.network.fraction", "0.2");
 
         final StreamExecutionEnvironment env =
                 StreamExecutionEnvironment.createLocalEnvironment(configuration);
@@ -85,6 +103,11 @@ public class TwoPhaseCountDeduplicatedEventTimeV2 {
                 })
                 .keyBy(t -> t.f0 + "_" + t.f1)
                 .window(TumblingEventTimeWindows.of(Duration.ofMinutes(1)))
+                // The global dedup logic relies on ACCUMULATING behavior
+                // (previous partial counts remain available so re-fires can overwrite stale counts).
+                // Using a PurgingTrigger would remove earlier partial counts on the initial fire,
+                // breaking that deduplication approach and changing correctness.
+//                .trigger(PurgingTrigger.of(EventTimeTrigger.create()))
                 .allowedLateness(Duration.ofSeconds(30))
                 .sideOutputLateData(LOCAL_LATE_TAG)
                 .aggregate(new LocalCountAggregate());
@@ -191,6 +214,42 @@ public class TwoPhaseCountDeduplicatedEventTimeV2 {
             String,
             TimeWindow> {
 
+        /**
+         * Computes the deduplicated total count across all subtasks for one window.
+         *
+         * <p><b>Why iterating elements in order works (and its risk):</b>
+         *
+         * <p>Without a {@link org.apache.flink.api.common.functions.AggregateFunction}, Flink stores
+         * all elements in {@code ListState} inside {@code WindowOperator}:
+         *
+         * <pre>
+         *   // WindowOperator.java (simplified)
+         *   windowState.add(value);          // on each record — appends to ListState
+         *   windowState.get() → elements     // on window fire — iterates in insertion order
+         * </pre>
+         *
+         * <p>Both the Heap and RocksDB state backends append to the end of the list and iterate
+         * FIFO. So for a subtask that fired twice (initial + re-fire on late data):
+         *
+         * <pre>
+         *   windowState after re-fire: [("group1", 0, 3),  ("group1", 0, 4)]
+         *                                ↑ initial fire       ↑ re-fire
+         *   put(0, 3) → put(0, 4) → map = {0: 4}  ✓ correct latest value
+         * </pre>
+         *
+         * <p><b>Risk:</b> FIFO ordering of {@code ListState.get()} is an <em>implementation
+         * detail</em>, not a documented API contract. If element order is ever non-deterministic,
+         * {@code put(0, 4)} could arrive before {@code put(0, 3)}, leaving the map with the stale
+         * value.
+         *
+         * <p><b>Safer alternative</b> — use {@code merge} with {@code Math::max} instead of
+         * {@code put}, which is correct regardless of iteration order since a re-fire always
+         * produces a count &ge; the initial fire (more events have been counted):
+         *
+         * <pre>{@code
+         * subtaskCounts.merge(element.f1, element.f2, Math::max);
+         * }</pre>
+         */
         @Override
         public void process(
                 String key,
@@ -262,7 +321,7 @@ public class TwoPhaseCountDeduplicatedEventTimeV2 {
             ctx.collect(Tuple3.of("group2", "event", 3000L));
 
             // Events that push the watermark past 60000
-            // watermark = 70000 - 5000 = 65000 > 60000 → window fires
+            // watermark = 70000 - 5000 = 65000 > 60000 -> window fires
             ctx.collect(Tuple3.of("group1", "event", 70000L));
             ctx.collect(Tuple3.of("group2", "event", 70000L));
 
@@ -276,7 +335,7 @@ public class TwoPhaseCountDeduplicatedEventTimeV2 {
                 return;
             }
 
-            // Batch 2: Late events — still within allowedLateness
+            // Batch 2: Late events -- still within allowedLateness
             // (watermark ~65000 < 60000 + 30000 = 90000)
             ctx.collect(Tuple3.of("group1", "event", 500L));
             ctx.collect(Tuple3.of("group2", "event", 200L));
@@ -291,3 +350,4 @@ public class TwoPhaseCountDeduplicatedEventTimeV2 {
         }
     }
 }
+

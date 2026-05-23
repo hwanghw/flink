@@ -1636,6 +1636,8 @@ under the License.
 						</licenseFamily>
 					</licenseFamilies>
 					<excludes>
+						<!-- codedocs (personal notes, not shipped) -->
+						<exclude>codedocs/**</exclude>
 						<!-- Additional files like .gitignore etc.-->
 						<exclude>**/.*/**</exclude>
 						<exclude>**/*.prefs</exclude>
