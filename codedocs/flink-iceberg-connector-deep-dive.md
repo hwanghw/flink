@@ -144,25 +144,43 @@ S3/HDFS. There is no staging area or temporary location — files land where rea
 
 ## From WriteResult to Iceberg Snapshot
 
-WriteResults are serialized into **DeltaManifests** — compact manifest files that list
-which data/delete files belong to this checkpoint:
+`WriteResult`s flow as **in-memory records** from each writer subtask to the
+parallelism-1 aggregator (Sink V2) or committer (legacy). That single downstream
+operator is the one that serializes them into **DeltaManifests** — compact Avro
+manifest files listing which data/delete files belong to this checkpoint:
 
 ```
-WriteResult (per writer subtask)
-    │
-    │  FlinkManifestUtil.writeDataFiles() → manifest file on S3
-    │  FlinkManifestUtil.writeDeleteFiles() → manifest file on S3
-    ▼
+Writer subtask 0 ──── WriteResult (in-memory) ──┐
+Writer subtask 1 ──── WriteResult (in-memory) ──┤
+Writer subtask N ──── WriteResult (in-memory) ──┤
+                                                ▼
+       ┌──────────────────────────────────────────────────────┐
+       │  Sink V2:  IcebergWriteAggregator   (parallelism 1)   │
+       │  Legacy:   IcebergFilesCommitter    (parallelism 1)   │
+       │                                                       │
+       │  At checkpoint barrier:                               │
+       │    FlinkManifestUtil.writeCompletedFiles(             │
+       │       WriteResult.builder().addAll(received).build(), │
+       │       () -> manifestOutputFileFactory.create(ckptId), │
+       │       table.spec(), formatVersion)                    │
+       │    → one Avro file on object storage for DataFiles    │
+       │    → optionally a second Avro file for DeleteFiles    │
+       └──────────────────────┬───────────────────────────────┘
+                              ▼
 DeltaManifests {
-    ManifestFile dataManifest;     // points to manifest listing DataFiles
-    ManifestFile deleteManifest;   // points to manifest listing DeleteFiles
+    ManifestFile dataManifest;     // points to Avro listing DataFiles
+    ManifestFile deleteManifest;   // points to Avro listing DeleteFiles
     ReferencedDataFile[];          // for DV (deletion vector) support
 }
     │
-    │  serialized to byte[] → stored in operator state (checkpoint)
+    │  serialized to byte[]:
+    │    Sink V2  → carried in IcebergCommittable, held by Flink Sink V2
+    │               runtime as a pending committable
+    │    Legacy   → stored in IcebergFilesCommitter's
+    │               ListState<SortedMap<Long, byte[]>> dataFilesPerCheckpoint
     ▼
-On commit:
-    Read manifests back → extract DataFile[] and DeleteFile[]
+On commit (notifyCheckpointComplete):
+    Read Avro manifests back via table.io() → extract DataFile[] and DeleteFile[]
     │
     ├── Append-only (no deletes):
     │     AppendFiles operation = table.newAppend();
@@ -177,7 +195,8 @@ On commit:
 ```
 
 Source: `RowDataTaskWriterFactory.java`, `BaseDeltaTaskWriter.java`,
-`FlinkManifestUtil.java`, `DeltaManifests.java`
+`FlinkManifestUtil.java`, `DeltaManifests.java`,
+`IcebergWriteAggregator.java`, `IcebergFilesCommitter.java`
 
 ---
 
@@ -907,17 +926,28 @@ commit** protocol combined with Iceberg's **atomic snapshot commits**.
 │  │ complete() │    │ complete() │    │ complete() │                  │
 │  │ → Write-   │    │ → Write-   │    │ → Write-   │                  │
 │  │   Result   │    │   Result   │    │   Result   │                  │
+│  │ (in-mem)   │    │ (in-mem)   │    │ (in-mem)   │                  │
 │  └─────┬──────┘    └─────┬──────┘    └─────┬──────┘                  │
 │        │                 │                 │                          │
 │        │  At this point: data files exist on S3                      │
 │        │  but are NOT in any Iceberg snapshot.                        │
 │        │  They are "orphan" files until committed.                    │
 │        ▼                 ▼                 ▼                          │
-│  ┌─────────────────────────────────────────────┐                     │
-│  │  Committer (parallelism=1)                   │                     │
-│  │  Stores DeltaManifests in operator state     │                     │
-│  │  → checkpointed by Flink                     │                     │
-│  └─────────────────────────────────────────────┘                     │
+│  ┌─────────────────────────────────────────────────┐                 │
+│  │  Aggregator / Committer (parallelism=1)          │                 │
+│  │                                                  │                 │
+│  │  V2  IcebergWriteAggregator (prepareSnapshot-    │                 │
+│  │      PreBarrier):                                │                 │
+│  │      writes staging Avro manifest → emits        │                 │
+│  │      IcebergCommittable; Sink V2 runtime holds   │                 │
+│  │      it as a pending committable until Phase 2.  │                 │
+│  │                                                  │                 │
+│  │  Legacy  IcebergFilesCommitter (snapshotState):  │                 │
+│  │      writes staging Avro manifest → stores the   │                 │
+│  │      bytes in ListState<SortedMap<Long, byte[]>> │                 │
+│  │      dataFilesPerCheckpoint; checkpointed        │                 │
+│  │      directly.                                   │                 │
+│  └─────────────────────────────────────────────────┘                 │
 │                                                                       │
 │  PHASE 2: COMMIT (on notifyCheckpointComplete)                        │
 │  ═════════════════════════════════════════════                         │
@@ -929,7 +959,7 @@ commit** protocol combined with Iceberg's **atomic snapshot commits**.
 │  │  2. Extract DataFile[] and DeleteFile[]       │                     │
 │  │  3. Create AppendFiles or RowDelta            │                     │
 │  │  4. Set snapshot properties:                  │                     │
-│  │     flink.max-committed-checkpoint-id = 42    │                     │
+│  │     flink.max-committed-checkpoint-id = 99    │                     │
 │  │     flink.job-id = abc-def                    │                     │
 │  │  5. operation.commit()                        │                     │
 │  │     → ATOMIC: new Iceberg snapshot visible    │                     │
@@ -1022,6 +1052,384 @@ On restart from checkpoint 87:
 
 Result: Checkpoint 87 committed exactly once.
 ```
+
+### Tier 2 at Code Level: Why Walk Backward Instead of Just Reading the Latest Snapshot?
+
+The natural question is: if the snapshot summary records `flink.max-committed-checkpoint-id`,
+why doesn't `SinkUtil.getMaxCommittedCheckpointId(...)` just read it off the **current**
+snapshot? The whole `while (snapshot != null)` loop seems excessive.
+
+The reason: **the latest snapshot is often not from this Flink writer.** Iceberg tables
+get snapshots from many sources, and most carry no `flink.job-id` at all:
+
+| Snapshot producer | Sets `flink.job-id`? | Sets `flink.max-committed-checkpoint-id`? |
+|---|---|---|
+| This Flink job's `IcebergCommitter` | ✓ | ✓ |
+| A different Flink job writing the same table | ✓ (but different value) | ✓ (but for that job's checkpoints) |
+| A Spark batch insert | ✗ | ✗ |
+| Manual `INSERT INTO` from a SQL gateway | ✗ | ✗ |
+| `RewriteDataFiles` (compaction) | ✗ | ✗ |
+| `RewriteManifests` | ✗ | ✗ |
+| `expireSnapshots` | ✗ (`Replace` op only updates snapshot pointer) | ✗ |
+| Branch / tag manipulation | ✗ | ✗ |
+| Schema or partition-spec evolution | ✗ | ✗ |
+| Another `IcebergSink` operator in the same job | ✓ (same jobId) | ✓ (but for a *different* operatorId) |
+
+Any of these can produce the current "latest" snapshot. If the committer just read the
+top of the chain, in those cases it would find `null` for `flink.max-committed-checkpoint-id`
+and conclude the watermark is `-1` — meaning **re-commit everything**, including
+checkpoints already committed. That's a duplicate-data bug.
+
+### The Code (`SinkUtil.getMaxCommittedCheckpointId`)
+
+```java
+// SinkUtil.java:83-105
+static long getMaxCommittedCheckpointId(
+    Table table, String flinkJobId, String operatorId, String branch) {
+  Snapshot snapshot = table.snapshot(branch);          // start at branch head
+  long lastCommittedCheckpointId = INITIAL_CHECKPOINT_ID;  // -1
+
+  while (snapshot != null) {
+    Map<String, String> summary = snapshot.summary();
+    String snapshotFlinkJobId = summary.get(FLINK_JOB_ID);       // "flink.job-id"
+    String snapshotOperatorId = summary.get(OPERATOR_ID);        // "flink.operator-id"
+    if (flinkJobId.equals(snapshotFlinkJobId)
+        && (snapshotOperatorId == null || snapshotOperatorId.equals(operatorId))) {
+      String value = summary.get(MAX_COMMITTED_CHECKPOINT_ID);   // "flink.max-committed-checkpoint-id"
+      if (value != null) {
+        lastCommittedCheckpointId = Long.parseLong(value);
+        break;                                          // first match wins — chain is in commit order
+      }
+    }
+    Long parentSnapshotId = snapshot.parentId();
+    snapshot = parentSnapshotId != null ? table.snapshot(parentSnapshotId) : null;
+  }
+
+  return lastCommittedCheckpointId;
+}
+```
+
+Three things to notice in the matcher:
+
+1. **`flinkJobId.equals(snapshotFlinkJobId)`** — must be **this** job's id (or in legacy
+   recovery, the *restored* prior job's id pulled from `jobIdState`, see Part 4.5).
+2. **`snapshotOperatorId == null || snapshotOperatorId.equals(operatorId)`** — the `null`
+   branch is a backward-compatibility clause for snapshots written by older Iceberg-Flink
+   versions that didn't set `flink.operator-id`. Current code always sets it.
+3. **First match wins (`break`)** — because the snapshot chain is in commit order, the
+   first matching snapshot encountered while walking newest → oldest is the latest commit
+   from this writer.
+
+### Concrete Walk Example
+
+```
+Time →
+
+  snapshot #1001  (Spark MERGE)              ← branch head (table.snapshot(branch))
+       │                                       summary: {spark.app-id=...}
+       │                                       no flink.job-id  → SKIP, go to parent
+       ▼
+  snapshot #1000  (RewriteDataFiles)
+       │                                       summary: {operation=replace, ...}
+       │                                       no flink.job-id  → SKIP, go to parent
+       ▼
+  snapshot #999   (this Flink job, ckpt 87)
+       │                                       summary: {flink.job-id=jobA,
+       │                                                  flink.operator-id=opAGG,
+       │                                                  flink.max-committed-checkpoint-id=87}
+       │                                       MATCH → return 87, break
+       ▼
+  snapshot #998   (other Flink job, ckpt 50)
+       │                                       summary: {flink.job-id=jobB, ...}
+       │                                       (never reached)
+       ▼
+  ...
+```
+
+Without the walk, the committer reading snapshot #1001 would see no Flink properties,
+return `-1`, and the restored committables for checkpoints ≤ 87 would be re-committed —
+duplicating data that's already in snapshot #999.
+
+### When Can `flink.max-committed-checkpoint-id` Be Null?
+
+The matcher in `getMaxCommittedCheckpointId` has two stages: first match the
+`(flink.job-id, flink.operator-id)` pair, then check whether
+`flink.max-committed-checkpoint-id` is set on that matched snapshot. **The break
+only fires when the value is non-null.** If it's null, the walk falls through to
+the parent and keeps looking.
+
+Now look at how the Flink sink writes these properties (`IcebergCommitter.java:289-294`):
+
+```java
+snapshotProperties.forEach(operation::set);             // user-supplied first
+// custom snapshot metadata properties will be overridden if they conflict with
+// internal ones used by the sink.
+operation.set(SinkUtil.MAX_COMMITTED_CHECKPOINT_ID, Long.toString(checkpointId));
+operation.set(SinkUtil.FLINK_JOB_ID, newFlinkJobId);
+operation.set(SinkUtil.OPERATOR_ID, operatorId);
+```
+
+All three properties are set **together** on every Flink commit, **after** user-supplied
+`snapshotProperties` (so users can't accidentally suppress them). In a normally-operating
+Flink-Iceberg sink, you should never see a snapshot with `flink.job-id` set but
+`flink.max-committed-checkpoint-id` missing.
+
+That leaves only abnormal producers:
+
+| Source | How it lands a snapshot with `flink.job-id` set but `flink.max-committed-checkpoint-id` missing |
+|---|---|
+| **Pre-2.x Iceberg-Flink versions** | Very old releases set the `flink.job-id` property without `flink.max-committed-checkpoint-id`. A long-lived table that was first written by such a version can have these in its history. |
+| **Manual `Table.updateProperties()` with a `flink.*` tag** | Someone called `table.updateProperties().set("flink.job-id", "...").commit()` for tagging/auditing — this commits a no-op snapshot summary containing `flink.job-id` but never goes through the sink path that sets the checkpoint id. |
+| **Maintenance actions with a custom summary** | `RewriteDataFiles`, `RewriteManifests`, `expireSnapshots`, or a generic `Actions` call with `.option("flink.job-id", "...")` injecting a spurious property. Unusual, but possible. |
+| **Snapshot summary tampering** | A migration tool or tabular operation that re-wrote summary keys (e.g., for catalog migration) and dropped the checkpoint id. |
+| **Concurrent commit conflict followed by a partial summary** | Iceberg's optimistic retry re-applies the commit on top of fresher metadata, but the summary is rebuilt from the operation, not from the lost snapshot's summary — so theoretically a retry layer that suppresses the `set(...)` calls could land here. Not observed in current code paths but called out for completeness. |
+| **Empty-string `""`** | Not `null`, but worth noting — if someone manually wrote `flink.max-committed-checkpoint-id = ""`, the `value != null` check passes and `Long.parseLong("")` throws `NumberFormatException`, **crashing the restart** rather than falling through. Only happens from external tampering since the sink only calls `Long.toString(long)`. |
+
+### What If the Watermark Is `-1`? — A Code-Level Trace
+
+If the walk exhausts the chain without finding any snapshot from this writer with the
+checkpoint id set, `getMaxCommittedCheckpointId` returns
+`INITIAL_CHECKPOINT_ID = -1L` (`SinkUtil.java:46`). Here is exactly what each
+committer does with that:
+
+#### Sink V2 — `IcebergCommitter.commit(...)`
+
+```java
+// IcebergCommitter.java:113-138
+public void commit(Collection<CommitRequest<IcebergCommittable>> commitRequests) {
+  if (commitRequests.isEmpty()) return;
+
+  NavigableMap<Long, CommitRequest<IcebergCommittable>> commitRequestMap = Maps.newTreeMap();
+  for (CommitRequest<IcebergCommittable> request : commitRequests) {
+    commitRequestMap.put(request.getCommittable().checkpointId(), request);
+  }
+
+  IcebergCommittable last = commitRequestMap.lastEntry().getValue().getCommittable();
+  long maxCommittedCheckpointId =
+      SinkUtil.getMaxCommittedCheckpointId(table, last.jobId(), last.operatorId(), branch);
+  // suppose maxCommittedCheckpointId == -1L
+
+  commitRequestMap
+      .headMap(maxCommittedCheckpointId, true)        // headMap(-1L, true)
+      .values()
+      .forEach(CommitRequest::signalAlreadyCommitted);
+  //  Flink checkpointIds start at 1, so headMap(-1L, true) is EMPTY.
+  //  signalAlreadyCommitted fires on ZERO requests.
+
+  NavigableMap<Long, CommitRequest<IcebergCommittable>> uncommitted =
+      commitRequestMap.tailMap(maxCommittedCheckpointId, false);   // tailMap(-1L, false)
+  //  strictly > -1 → contains ALL pending requests.
+
+  if (!uncommitted.isEmpty()) {
+    commitPendingRequests(uncommitted, last.jobId(), last.operatorId());
+  }
+}
+```
+
+Inside `commitPendingRequests` (`IcebergCommitter.java:152-183`), every entry is
+deserialized and committed:
+
+```java
+for (Map.Entry<Long, CommitRequest<IcebergCommittable>> e : commitRequestMap.entrySet()) {
+  if (Arrays.equals(EMPTY_MANIFEST_DATA, e.getValue().getCommittable().manifest())) {
+    pendingResults.put(e.getKey(), EMPTY_WRITE_RESULT);
+  } else {
+    DeltaManifests deltaManifests =
+        SimpleVersionedSerialization.readVersionAndDeSerialize(
+            DeltaManifestsSerializer.INSTANCE, e.getValue().getCommittable().manifest());
+    pendingResults.put(
+        e.getKey(),
+        FlinkManifestUtil.readCompletedFiles(deltaManifests, table.io(), table.specs()));
+    //  ← reads each staging Avro back. If any was GC'd by a prior successful
+    //    commit (snapshot existed but the property was null/missing), this
+    //    is where FileNotFoundException would surface.
+    manifests.addAll(deltaManifests.manifests());
+  }
+}
+commitPendingResult(pendingResults, summary, newFlinkJobId, operatorId);
+//   → either AppendFiles.commit() (append-only) or per-checkpoint RowDelta.commit()
+//     (V2/upsert). Each commit() sets flink.max-committed-checkpoint-id = <that ckpt>.
+if (!compactMode) {
+  FlinkManifestUtil.deleteCommittedManifests(table, manifests, newFlinkJobId, checkpointId);
+}
+```
+
+#### Legacy — `IcebergFilesCommitter`
+
+Called once in `initializeState` on restore (`IcebergFilesCommitter.java:166-203`):
+
+```java
+this.maxCommittedCheckpointId = INITIAL_CHECKPOINT_ID;   // -1L
+...
+if (context.isRestored()) {
+  String restoredFlinkJobId = jobIdIterable.iterator().next();
+  this.maxCommittedCheckpointId =
+      SinkUtil.getMaxCommittedCheckpointId(table, restoredFlinkJobId, operatorUniqueId, branch);
+  //  suppose returns -1
+
+  NavigableMap<Long, byte[]> uncommittedDataFiles =
+      Maps.newTreeMap(checkpointsState.get().iterator().next())
+          .tailMap(maxCommittedCheckpointId, false);   // tailMap(-1L, false)
+  //  → all restored entries (checkpointIds ≥ 1)
+  if (!uncommittedDataFiles.isEmpty()) {
+    long maxUncommittedCheckpointId = uncommittedDataFiles.lastKey();
+    commitUpToCheckpoint(uncommittedDataFiles, restoredFlinkJobId, operatorUniqueId,
+                         maxUncommittedCheckpointId);
+    //  → re-commits every restored pending checkpoint
+  }
+}
+```
+
+And every `notifyCheckpointComplete` uses the same field as a local re-commit guard
+(`IcebergFilesCommitter.java:241-244`):
+
+```java
+if (checkpointId > maxCommittedCheckpointId) {
+  commitUpToCheckpoint(dataFilesPerCheckpoint, flinkJobId, operatorUniqueId, checkpointId);
+  this.maxCommittedCheckpointId = checkpointId;        // bump local watermark
+}
+```
+
+Note the legacy field is a **local in-memory watermark**, only guarding against
+duplicate commits within the running operator's lifetime. The Tier-2 query against
+Iceberg only happens once at restore. So a `-1` at restore time taints the operator's
+whole subsequent run from a deduplication standpoint, until the next restart loads a
+fresh value.
+
+#### Net Consequence on the Table
+
+In **both** pipelines, watermark `-1` causes the committer to re-commit every pending
+committable as if from scratch:
+
+1. **`signalAlreadyCommitted` fires on zero requests** — Flink does not drop anything
+   from its pending list.
+2. **Every pending committable** is deserialized, the staging Avro is read, the data
+   and delete files are committed via `AppendFiles` (append-only) or `RowDelta`
+   (V2/upsert).
+3. **Each fresh commit sets `flink.max-committed-checkpoint-id` correctly** on its new
+   snapshot, so the table is *self-healing for future restarts* — `getMaxCommittedCheckpointId`
+   will find the correct watermark next time.
+4. **The immediate result is duplicate data files** in the table if the replayed
+   committables had already been committed under a snapshot that didn't carry the
+   property. The original commit's data files and the new commit's data files both
+   appear in scans, both contribute to row counts, both consume storage.
+
+There is **no defensive check inside the committer** against this — Iceberg's
+optimistic concurrency won't catch it because `AppendFiles` doesn't conflict on
+appending the same data file path twice (and equality-delete semantics for
+`RowDelta` are sequence-number-based, so duplicate adds are silently accepted).
+
+This is why the class-level comment on `IcebergCommitter.java:50-58` is explicit about
+its assumptions:
+
+> The implementation builds on the following assumptions:
+> - There is a single `IcebergCommittable` for every checkpoint
+> - There is no late checkpoint
+> - **There is no other writer which would generate another commit to the same branch
+>   with the same `jobId-operatorId-checkpointId` triplet**
+
+A snapshot from this writer's `(jobId, operatorId)` that's missing the checkpoint id is
+effectively a violation of assumption (3) — something committed on this writer's
+identity outside the sink's normal commit path. The committer has no way to detect
+that the data was already there.
+
+**Practical mitigation:** before deploying any tool (a custom action, a tagging script,
+a migration utility) that calls `commit()` on the same table, make sure it either
+(a) doesn't set `flink.job-id` at all, or (b) sets all three properties correctly
+including `flink.max-committed-checkpoint-id`.
+
+### How Tier 2 Plugs into the Restart Path
+
+The two pipelines call `getMaxCommittedCheckpointId` at different moments:
+
+**Sink V2 — `IcebergCommitter.commit(...)`** (per replay batch from the Sink V2 runtime):
+
+```java
+// IcebergCommitter.java:113-138
+public void commit(Collection<CommitRequest<IcebergCommittable>> commitRequests) {
+  if (commitRequests.isEmpty()) return;
+
+  // Group restored + fresh requests by checkpointId
+  NavigableMap<Long, CommitRequest<IcebergCommittable>> commitRequestMap = Maps.newTreeMap();
+  for (CommitRequest<IcebergCommittable> request : commitRequests) {
+    commitRequestMap.put(request.getCommittable().checkpointId(), request);
+  }
+
+  // Tier 2: durable watermark from Iceberg snapshot chain
+  IcebergCommittable last = commitRequestMap.lastEntry().getValue().getCommittable();
+  long maxCommittedCheckpointId =
+      SinkUtil.getMaxCommittedCheckpointId(table, last.jobId(), last.operatorId(), branch);
+
+  // Tier 3a: anything ≤ watermark is already in Iceberg — tell the runtime to drop it
+  commitRequestMap
+      .headMap(maxCommittedCheckpointId, true)            // inclusive
+      .values()
+      .forEach(CommitRequest::signalAlreadyCommitted);
+
+  // Tier 3b: strictly greater than watermark → actually commit
+  NavigableMap<Long, CommitRequest<IcebergCommittable>> uncommitted =
+      commitRequestMap.tailMap(maxCommittedCheckpointId, false);
+  if (!uncommitted.isEmpty()) {
+    commitPendingRequests(uncommitted, last.jobId(), last.operatorId());
+  }
+}
+```
+
+`signalAlreadyCommitted()` tells Flink's Sink V2 runtime to garbage-collect the pending
+committable without re-running its commit logic. The staged Avro file is **never read**
+for the skipped checkpoints — which is what protects against the "Avro already GC'd"
+`FileNotFoundException` failure mode from the earlier question.
+
+**Legacy — `IcebergFilesCommitter.initializeState(...)`** (once at operator open):
+
+```java
+// IcebergFilesCommitter.java:170-203
+if (context.isRestored()) {
+  Iterable<String> jobIdIterable = jobIdState.get();
+  if (jobIdIterable == null || !jobIdIterable.iterator().hasNext()) {
+    LOG.warn("Failed to restore committer state ... operator uid may have changed");
+    return;
+  }
+
+  String restoredFlinkJobId = jobIdIterable.iterator().next();
+  // Use the OLD jobId (from prior run) to find this writer's commits — the *new* jobId
+  // may differ if pipeline.job-id wasn't pinned.
+  this.maxCommittedCheckpointId =
+      SinkUtil.getMaxCommittedCheckpointId(table, restoredFlinkJobId, operatorUniqueId, branch);
+
+  // Strictly-greater pending entries get committed now (catch up); the rest are dropped
+  NavigableMap<Long, byte[]> uncommittedDataFiles =
+      Maps.newTreeMap(checkpointsState.get().iterator().next())
+          .tailMap(maxCommittedCheckpointId, false);
+  if (!uncommittedDataFiles.isEmpty()) {
+    long maxUncommittedCheckpointId = uncommittedDataFiles.lastKey();
+    commitUpToCheckpoint(uncommittedDataFiles, restoredFlinkJobId, operatorUniqueId,
+                         maxUncommittedCheckpointId);
+  }
+}
+```
+
+Note the legacy operator persists the **prior job's** id in `jobIdState`. This is what
+lets a savepoint-restored job (with a freshly-generated `pipeline.job-id`) still find
+its own prior commits — `getMaxCommittedCheckpointId` is called with the *restored*
+jobId, not the current one. Sink V2 has no equivalent — pin `pipeline.job-id` or rely
+on Flink's job-id being stable across the restart.
+
+### One More Subtle Bug It Defends Against
+
+Even within a *single* Flink job that always commits cleanly, two writers can interleave:
+
+```
+Ckpt 100 committed by job's Iceberg sink #1   → snapshot #500 (flink.operator-id=sink1, ckpt=100)
+Ckpt 100 committed by job's Iceberg sink #2   → snapshot #501 (flink.operator-id=sink2, ckpt=100)
+Ckpt 101 committed by sink #1                 → snapshot #502 (flink.operator-id=sink1, ckpt=101)
+                                              ← branch head
+```
+
+Sink #2 restarting and reading just the head would see `flink.operator-id=sink1` and
+mistakenly conclude its own watermark is whatever sink1 had. The walk's
+`snapshotOperatorId.equals(operatorId)` filter rejects #502 and #500, finds #501, and
+returns `100` — sink #2's correct watermark.
 
 ### Two Subtleties That Bite in Production
 
@@ -1415,17 +1823,37 @@ It shares the same TaskWriter and commit logic but wires them differently.
 │  │  IcebergFilesCommitter  (parallelism = 1)             │            │
 │  │  extends AbstractStreamOperator                       │            │
 │  │                                                       │            │
-│  │  Collects: Map<checkpointId, DeltaManifests>         │            │
-│  │  State: ListState<SortedMap<Long, byte[]>>           │            │
+│  │  processElement: appends incoming FlinkWriteResult    │            │
+│  │    into in-memory map writeResultsSinceLastSnapshot:  │            │
+│  │      Map<Long, List<WriteResult>>                     │            │
+│  │                                                       │            │
+│  │  On snapshotState(checkpointId):                      │            │
+│  │    writeToManifestUptoLatestCheckpoint(checkpointId)  │            │
+│  │      → FlinkManifestUtil.writeCompletedFiles(...)     │            │
+│  │        writes Avro manifest at                        │            │
+│  │        <table>/metadata/<jobId>-<opId>-00000-<att>-   │            │
+│  │        <ckpt>-<count>.avro                            │            │
+│  │      → serialized DeltaManifests bytes stored in      │            │
+│  │        dataFilesPerCheckpoint: NavigableMap<Long,     │            │
+│  │        byte[]>                                         │            │
+│  │    Then ListState<SortedMap<Long, byte[]>> is         │            │
+│  │    flushed → checkpointed by Flink.                   │            │
 │  │                                                       │            │
 │  │  On notifyCheckpointComplete(id):                     │            │
-│  │    for each checkpoint ≤ id:                          │
-│  │      read manifest files                              │            │
-│  │      table.newAppend() or table.newRowDelta()         │            │
-│  │      set snapshot properties:                         │            │
-│  │        flink.max-committed-checkpoint-id = id         │            │
-│  │        flink.job-id = <uuid>                          │            │
-│  │      operation.commit()  → new Iceberg snapshot       │            │
+│  │    commitUpToCheckpoint(id):                          │            │
+│  │      for each checkpoint ≤ id in dataFilesPerCkpt:    │            │
+│  │        deserialize byte[] → DeltaManifests            │            │
+│  │        FlinkManifestUtil.readCompletedFiles(          │            │
+│  │            dm, table.io(), table.specs())             │            │
+│  │          ← reads the Avro back from object storage    │            │
+│  │        table.newAppend() or table.newRowDelta()       │            │
+│  │        set snapshot properties:                       │            │
+│  │          flink.max-committed-checkpoint-id = id       │            │
+│  │          flink.job-id = <uuid>                        │            │
+│  │          flink.operator-id = <opId>                   │            │
+│  │        operation.commit()  → new Iceberg snapshot     │            │
+│  │      FlinkManifestUtil.deleteCommittedManifests(...)  │            │
+│  │        ← best-effort GC of the staging Avros          │            │
 │  └──────────────────────────────────────────────────────┘            │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -1492,5 +1920,5 @@ If no matching snapshot found → return -1 (commit everything)
 |-------|------|
 | `FlinkSink` | Entry point — builds operator pipeline |
 | `IcebergStreamWriter` | Writer operator — wraps TaskWriter, emits FlinkWriteResult |
-| `IcebergFilesCommitter` | Committer operator — collects manifests, commits on checkpoint complete |
+| `IcebergFilesCommitter` | Committer operator — writes Avro staging manifests at `snapshotState`, commits to Iceberg at `notifyCheckpointComplete` |
 | `FlinkWriteResult` | Wrapper: checkpointId + WriteResult |
