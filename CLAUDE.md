@@ -448,9 +448,11 @@ Linked from many of the module CLAUDE.md files. These are working / explanatory 
 | `flink-autoscaler-deep-dive.md` | `flink-kubernetes` |
 | `flink-memory-configuration.md` | `flink-clients`, `flink-runtime`, `flink-dist` |
 | `flink-kafka-connector-source-sink-architecture.md` | external Kafka connector + `flink-connectors` framework |
-| `flink-iceberg-connector-deep-dive.md` | external Iceberg + `flink-connectors` framework |
+| `flink-iceberg-sink-connector-deep-dive.md` | external Iceberg sink + `flink-connectors` framework |
+| `flink-iceberg-source-connector-deep-dive.md` | external Iceberg source (FLIP-27) + `flink-connectors` framework |
 | `flink-cassandra-connector-wal-exactly-once-architecture.md` | external Cassandra + `flink-connectors` framework |
 | `flink-sink-patterns-comparison.md` | sinks across `flink-streaming-java`, `flink-connectors` |
+| `flink-sink-v2-vs-legacy-architecture-deep-dive.md` | Sink V2 (`SinkWriterOperator` / `CommitterOperator` / `Committer.commit` call chain) vs legacy chain-of-operators; uses Iceberg v2.1 and v1.20 as worked example |
 | `flink-window-event-assignment-and-state-lifecycle.md` | `flink-runtime` window machinery |
 | `flink-accumulating-vs-purging-and-allowed-lateness.md` | windowing semantics |
 | `flink-blacklist-filtering-solutions.md` | `flink-runtime` blocked-node tracking |

@@ -276,8 +276,10 @@ Deep dives in `codedocs/`:
 
 - `codedocs/flink-kafka-connector-source-sink-architecture.md` — externalized
   Kafka connector internals (still uses the framework here).
-- `codedocs/flink-iceberg-connector-deep-dive.md` — Iceberg sink architecture,
+- `codedocs/flink-iceberg-sink-connector-deep-dive.md` — Iceberg sink architecture,
   reusing `flink-file-sink-common` primitives.
+- `codedocs/flink-iceberg-source-connector-deep-dive.md` — Iceberg source
+  (FLIP-27 enumerator + readers, incremental append scan, MOR read-time deletes).
 - `codedocs/flink-cassandra-connector-wal-exactly-once-architecture.md` —
   Cassandra connector exactly-once via WAL.
 - `codedocs/flink-sink-patterns-comparison.md` — full sink-pattern comparison

@@ -416,7 +416,7 @@ The sink determines whether "exactly-once" is achievable end-to-end:
 ```
 
 Ref: `flink-sink-patterns-comparison.md`, `flink-kafka-connector-source-sink-architecture.md`,
-`flink-iceberg-connector-deep-dive.md`, `flink-cassandra-connector-wal-exactly-once-architecture.md`
+`flink-iceberg-sink-connector-deep-dive.md`, `flink-cassandra-connector-wal-exactly-once-architecture.md`
 
 ### Decision 7: Failure Recovery & Availability
 
@@ -548,7 +548,7 @@ interviewer drills into a specific area.
 | 16 | Autoscaling | Vertex-level parallelism adjustment based on busy time + backlog | `flink-autoscaler-deep-dive.md` |
 | 17 | Pipeline upgrade path | Savepoint → stop → deploy → restore. Requires uid() on all operators. | — |
 | 18 | Rescaling & max-parallelism | max-parallelism frozen at first deploy; use composite number (720) | `flink-autoscaler-deep-dive.md` |
-| 19 | Sink-specific tuning (Iceberg/Kafka/JDBC) | Batch size, commit frequency, 2PC vs idempotent | `flink-iceberg-connector-deep-dive.md` |
+| 19 | Sink-specific tuning (Iceberg/Kafka/JDBC) | Batch size, commit frequency, 2PC vs idempotent | `flink-iceberg-sink-connector-deep-dive.md` |
 | 20 | Cost optimization | Spot for TMs, reserved for JM, right-size managed memory | `flink-memory-configuration.md` |
 | 21 | Multi-tenancy & isolation | Separate jobs vs keyBy with tenant prefix | — |
 ---
@@ -557,7 +557,7 @@ interviewer drills into a specific area.
 
 - `flink-exactly-once-checkpointing-deep-dive.md` — checkpoint barriers, exactly-once vs end-to-end
 - `flink-kafka-connector-source-sink-architecture.md` — Kafka source/sink architecture, 2PC
-- `flink-iceberg-connector-deep-dive.md` — Iceberg sink, snapshot commit, MOR/COW
+- `flink-iceberg-sink-connector-deep-dive.md` — Iceberg sink, snapshot commit, MOR/COW
 - `flink-cassandra-connector-wal-exactly-once-architecture.md` — Cassandra WAL-based exactly-once
 - `flink-sink-patterns-comparison.md` — sink delivery guarantees comparison
 - `flink-rocksdb-state-backend-tuning.md` — RocksDB memory, compaction, checkpoints

@@ -181,7 +181,7 @@ from Kafka sink's 2PC.
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-Ref: `flink-iceberg-connector-deep-dive.md`
+Ref: `flink-iceberg-sink-connector-deep-dive.md`
 
 ### Decision 2: Upsert Mode (MOR) for CDC Updates
 
@@ -213,7 +213,7 @@ Iceberg Format V2 + upsert-enabled = true
     Schedule: every 10 minutes or when delete file ratio > 20%
 ```
 
-Ref: `flink-iceberg-connector-deep-dive.md` (Part 8: MOR vs COW)
+Ref: `flink-iceberg-sink-connector-deep-dive.md` (Part 8: MOR vs COW)
 
 ### Decision 3: Schema Evolution Without Pipeline Restart
 
@@ -294,7 +294,7 @@ CONCURRENT WRITE SAFETY:
   → Automatic retry with exponential backoff (up to 4 attempts).
 ```
 
-Ref: `flink-iceberg-connector-deep-dive.md` (Part 7: Concurrent Update Handling)
+Ref: `flink-iceberg-sink-connector-deep-dive.md` (Part 7: Concurrent Update Handling)
 
 ---
 

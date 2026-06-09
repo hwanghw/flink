@@ -1,4 +1,4 @@
-# Flink Iceberg Connector Deep Dive
+# Flink Iceberg Sink Connector Deep Dive
 
 How the Flink Iceberg connector writes data files directly to object storage, commits them
 atomically to Iceberg tables, achieves end-to-end exactly-once semantics, and handles

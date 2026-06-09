@@ -354,7 +354,7 @@ default.
   `s5cmd` integration above is for it.
 - `codedocs/flink-exactly-once-checkpointing-deep-dive.md` — explains
   the persist/commit dance from the sink side.
-- `codedocs/flink-iceberg-connector-deep-dive.md` — references
+- `codedocs/flink-iceberg-sink-connector-deep-dive.md` — references
   `s3://bucket/db/table/...` paths whose backing FS is provided
   here.
 - `codedocs/flink-rocksdb-state-backend-tuning.md` — RocksDB
