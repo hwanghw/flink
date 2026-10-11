@@ -116,10 +116,11 @@ class Table(object):
 
             >>> tab.select(tab.a)
         """
-        if name not in self.get_schema().get_field_names():
+        column_names = self.get_resolved_schema().get_column_names()
+        if name not in column_names:
             raise AttributeError(
                 "The current table has no column named '%s', available columns: [%s]"
-                % (name, ', '.join(self.get_schema().get_field_names())))
+                % (name, ', '.join(column_names)))
         return col(name)
 
     def select(self, *fields: Expression) -> 'Table':
@@ -943,27 +944,26 @@ class Table(object):
             .get(gateway.jvm.org.apache.flink.python.PythonOptions.MAX_ARROW_BATCH_SIZE)
         batches_iterator = gateway.jvm.org.apache.flink.table.runtime.arrow.ArrowUtils\
             .collectAsPandasDataFrame(self._j_table, max_arrow_batch_size)
+        schema = self.get_schema()
         if batches_iterator.hasNext():
             import pytz
             timezone = pytz.timezone(
                 self._j_table.getTableEnvironment().getConfig().getLocalTimeZone().getId())
             serializer = ArrowSerializer(
-                create_arrow_schema(self.get_schema().get_field_names(),
-                                    self.get_schema().get_field_data_types()),
-                self.get_schema().to_row_data_type(),
+                create_arrow_schema(schema.get_field_names(), schema.get_field_data_types()),
+                schema.to_row_data_type(),
                 timezone)
             import pyarrow as pa
             table = pa.Table.from_batches(serializer.load_from_iterator(batches_iterator))
             pdf = table.to_pandas()
 
-            schema = self.get_schema()
             for field_name in schema.get_field_names():
                 pdf[field_name] = tz_convert_from_internal(
                     pdf[field_name], schema.get_field_data_type(field_name), timezone)
             return pdf
         else:
             import pandas as pd
-            return pd.DataFrame.from_records([], columns=self.get_schema().get_field_names())
+            return pd.DataFrame.from_records([], columns=schema.get_field_names())
 
     @Deprecated(since="2.1.0", detail="Use :func:`Table.get_resolved_schema` instead.")
     def get_schema(self) -> TableSchema:
@@ -1186,6 +1186,104 @@ class Table(object):
                 ),
                 t_env=self._t_env,
             )
+
+    def to_changelog(self, *arguments: Expression) -> 'Table':
+        """
+        Converts this table into an append-only table with an explicit operation code
+        column using the built-in ``TO_CHANGELOG`` process table function.
+
+        Each input row - regardless of its original change operation - is emitted as an
+        INSERT-only row with a string ``op`` column indicating the original operation
+        (INSERT, UPDATE_BEFORE, UPDATE_AFTER, DELETE).
+
+        The optional ``produces_full_deletes`` boolean controls how DELETE rows are
+        emitted. When ``True`` (default), the planner inserts a ``ChangelogNormalize``
+        operator for upsert sources that emit key-only deletes so the function emits
+        fully populated DELETE rows downstream. When ``False``, the function emits
+        partial DELETE rows: row semantics preserves the planner-derived upsert key
+        columns and nulls the rest, set semantics (``PARTITION BY``) preserves the
+        partition key and nulls the rest. Requires an upsert key or ``PARTITION BY``;
+        otherwise the call is rejected.
+
+        Example:
+        ::
+
+            >>> from pyflink.table.expressions import descriptor, map_, lit, col
+            >>> # Default: adds 'op' column with standard change operation names
+            >>> result = table.to_changelog()
+            >>> # Custom op column name and mapping
+            >>> result = table.to_changelog(
+            ...     descriptor("op_code").as_argument("op"),
+            ...     map_("INSERT", "I", "UPDATE_AFTER", "U").as_argument("op_mapping")
+            ... )
+            >>> # Deletion flag pattern
+            >>> result = table.to_changelog(
+            ...     descriptor("deleted").as_argument("op"),
+            ...     map_("INSERT, UPDATE_AFTER", "false",
+            ...          "DELETE", "true").as_argument("op_mapping")
+            ... )
+            >>> # Opt out of full-delete semantics to emit partial DELETE rows.
+            >>> # Requires an upsert key or PARTITION BY; otherwise rejected.
+            >>> result = table.to_changelog(
+            ...     lit(False).as_argument("produces_full_deletes")
+            ... )
+
+        :param arguments: Optional named arguments for ``op``, ``op_mapping``, and
+                          ``produces_full_deletes``.
+        :return: An append-only :class:`~pyflink.table.Table` with an ``op`` column prepended
+                 to the input columns.
+        """
+        return Table(self._j_table.toChangelog(to_expression_jarray(arguments)), self._t_env)
+
+    def from_changelog(self, *arguments: Expression) -> 'Table':
+        """
+        Converts this append-only table with an explicit operation code column into a
+        (potentially updating) dynamic table. Each input row is expected to have a string
+        column that indicates the change operation. The operation column is interpreted by
+        the engine and removed from the output.
+
+        The operation code column defaults to ``op``. By default, the codes ``INSERT``,
+        ``UPDATE_BEFORE``, ``UPDATE_AFTER``, and ``DELETE`` are recognized; pass
+        ``op_mapping`` to use custom codes. By default, the job fails at runtime with a
+        ``TableRuntimeException`` when an input row's op code is ``NULL`` or not present
+        in the mapping; pass ``error_handling => 'SKIP'`` to silently drop those
+        rows instead.
+
+        The output is a retract changelog. To emit an upsert changelog instead, combine
+        ``PARTITION BY`` (set semantics on the table argument) with an ``op_mapping`` that
+        maps to ``UPDATE_AFTER`` without ``UPDATE_BEFORE``. The partition key becomes the
+        upsert key. An upsert mapping without ``PARTITION BY`` is rejected at validation
+        time, since upsert mode requires a key.
+
+        Example:
+        ::
+
+            >>> from pyflink.table.expressions import descriptor, lit, map_
+            >>> # Default: reads 'op' column with standard change operation names
+            >>> result = cdc_stream.from_changelog()
+            >>> # With custom op column name
+            >>> result = cdc_stream.from_changelog(
+            ...     descriptor("operation").as_argument("op")
+            ... )
+            >>> # With custom op_mapping
+            >>> result = cdc_stream.from_changelog(
+            ...     descriptor("op").as_argument("op"),
+            ...     map_("c, r", "INSERT",
+            ...          "ub", "UPDATE_BEFORE",
+            ...          "ua", "UPDATE_AFTER",
+            ...          "d", "DELETE").as_argument("op_mapping")
+            ... )
+            >>> # Silently skip rows with NULL or unmapped op codes instead of failing
+            >>> result = cdc_stream.from_changelog(
+            ...     lit("SKIP").as_argument("error_handling")
+            ... )
+
+        :param arguments: Optional named arguments for ``op``, ``op_mapping``, and
+                          ``error_handling``.
+        :return: A dynamic :class:`~pyflink.table.Table` with the ``op`` column removed and
+                 proper change operation semantics.
+        """
+        return Table(self._j_table.fromChangelog(to_expression_jarray(arguments)), self._t_env)
 
 
 @PublicEvolving()

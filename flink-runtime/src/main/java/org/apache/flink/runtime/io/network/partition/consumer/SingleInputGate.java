@@ -321,9 +321,7 @@ public class SingleInputGate extends IndexedInputGate {
         synchronized (requestLock) {
             List<CompletableFuture<?>> futures = new ArrayList<>(numberOfInputChannels);
             for (InputChannel inputChannel : inputChannels()) {
-                if (inputChannel instanceof RecoveredInputChannel) {
-                    futures.add(((RecoveredInputChannel) inputChannel).getStateConsumedFuture());
-                }
+                futures.add(inputChannel.getStateConsumedFuture());
             }
             return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
         }
@@ -331,6 +329,11 @@ public class SingleInputGate extends IndexedInputGate {
 
     @Override
     public void requestPartitions() {
+        requestPartitions(false);
+    }
+
+    @Override
+    public void requestPartitions(boolean needsRecovery) {
         synchronized (requestLock) {
             if (!requestedPartitionsFlag) {
                 if (closeFuture.isDone()) {
@@ -349,7 +352,7 @@ public class SingleInputGate extends IndexedInputGate {
                                     numInputChannels, numberOfInputChannels));
                 }
 
-                convertRecoveredInputChannels();
+                convertRecoveredInputChannels(needsRecovery);
                 internalRequestPartitions();
             }
 
@@ -365,6 +368,16 @@ public class SingleInputGate extends IndexedInputGate {
 
     @VisibleForTesting
     public void convertRecoveredInputChannels() {
+        convertRecoveredInputChannels(false);
+    }
+
+    /**
+     * Converts all {@link RecoveredInputChannel}s to their real channel types ({@link
+     * LocalInputChannel} or {@link RemoteInputChannel}). {@code needsRecovery} controls whether the
+     * converted physical channels start in recovery.
+     */
+    @VisibleForTesting
+    public void convertRecoveredInputChannels(boolean needsRecovery) {
         LOG.debug("Converting recovered input channels ({} channels)", getNumberOfInputChannels());
         for (Map<InputChannelInfo, InputChannel> inputChannelsForCurrentPartition :
                 inputChannels.values()) {
@@ -372,19 +385,40 @@ public class SingleInputGate extends IndexedInputGate {
                     new HashSet<>(inputChannelsForCurrentPartition.keySet());
             for (InputChannelInfo inputChannelInfo : oldInputChannelInfos) {
                 InputChannel inputChannel = inputChannelsForCurrentPartition.get(inputChannelInfo);
-                if (inputChannel instanceof RecoveredInputChannel) {
-                    try {
-                        InputChannel realInputChannel =
-                                ((RecoveredInputChannel) inputChannel).toInputChannel();
-                        inputChannel.releaseAllResources();
+                if (!(inputChannel instanceof RecoveredInputChannel)) {
+                    continue;
+                }
+                try {
+                    // Phase 1: Convert channel and release resources outside the lock.
+                    // These calls may acquire the receivedBuffers lock internally, so they
+                    // run outside inputChannelsWithData lock to maintain a consistent lock
+                    // order with onRecoveredStateBuffer() which acquires receivedBuffers
+                    // first and then inputChannelsWithData.
+                    InputChannel realInputChannel =
+                            ((RecoveredInputChannel) inputChannel).toInputChannel(needsRecovery);
+                    inputChannel.releaseAllResources();
+                    int buffersInUseCount = realInputChannel.getBuffersInUseCount();
+
+                    // Phase 2: Atomically update data structures under the lock.
+                    synchronized (inputChannelsWithData) {
+                        if (inputChannelsWithData.contains(inputChannel)) {
+                            inputChannelsWithData.getAndRemove(ch -> ch == inputChannel);
+                        }
+                        enqueuedInputChannelsWithData.clear(inputChannel.getChannelIndex());
+
                         inputChannelsForCurrentPartition.remove(inputChannelInfo);
                         inputChannelsForCurrentPartition.put(
                                 realInputChannel.getChannelInfo(), realInputChannel);
                         channels[inputChannel.getChannelIndex()] = realInputChannel;
-                    } catch (Throwable t) {
-                        inputChannel.setError(t);
-                        return;
+
+                        if (buffersInUseCount > 0) {
+                            inputChannelsWithData.add(realInputChannel);
+                            enqueuedInputChannelsWithData.set(realInputChannel.getChannelIndex());
+                        }
                     }
+                } catch (Throwable t) {
+                    inputChannel.setError(t);
+                    return;
                 }
             }
         }
@@ -541,6 +575,11 @@ public class SingleInputGate extends IndexedInputGate {
     @Override
     public InputChannel getChannel(int channelIndex) {
         return channels[channelIndex];
+    }
+
+    @Override
+    public InputChannel getChannel(InputChannelInfo channelInfo) {
+        return channels[channelInfo.getInputChannelIdx()];
     }
 
     // ------------------------------------------------------------------------
@@ -905,7 +944,7 @@ public class SingleInputGate extends IndexedInputGate {
         // Firstly, read the buffers from the recovered channel
         if (inputChannel instanceof RecoveredInputChannel && !inputChannel.isReleased()) {
             Optional<Buffer> buffer = readBufferFromInputChannel(inputChannel);
-            if (!((RecoveredInputChannel) inputChannel).getStateConsumedFuture().isDone()) {
+            if (!inputChannel.getStateConsumedFuture().isDone()) {
                 return buffer;
             }
         }

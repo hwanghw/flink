@@ -42,6 +42,7 @@ import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.functions.TableFunction;
 import org.apache.flink.table.functions.TableFunctionDefinition;
+import org.apache.flink.table.functions.TableSemantics.SortDirection;
 import org.apache.flink.table.legacy.sources.LookupableTableSource;
 import org.apache.flink.table.legacy.sources.TableSource;
 import org.apache.flink.table.operations.AggregateQueryOperation;
@@ -64,16 +65,20 @@ import org.apache.flink.table.operations.TableSourceQueryOperation;
 import org.apache.flink.table.operations.ValuesQueryOperation;
 import org.apache.flink.table.operations.WindowAggregateQueryOperation;
 import org.apache.flink.table.operations.WindowAggregateQueryOperation.ResolvedGroupWindow;
+import org.apache.flink.table.operations.WindowTableFunctionQueryOperation;
 import org.apache.flink.table.operations.utils.QueryOperationDefaultVisitor;
 import org.apache.flink.table.planner.calcite.FlinkContext;
 import org.apache.flink.table.planner.calcite.FlinkRelBuilder;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.calcite.RexTableArgCall;
+import org.apache.flink.table.planner.calcite.RexTableArgCall.SortOrder;
 import org.apache.flink.table.planner.connectors.DynamicSourceUtils;
 import org.apache.flink.table.planner.expressions.RexNodeExpression;
 import org.apache.flink.table.planner.expressions.SqlAggFunctionVisitor;
 import org.apache.flink.table.planner.expressions.converter.ExpressionConverter;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
+import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
+import org.apache.flink.table.planner.functions.sql.SqlWindowTableFunction;
 import org.apache.flink.table.planner.functions.utils.TableSqlFunction;
 import org.apache.flink.table.planner.operations.InternalDataStreamQueryOperation;
 import org.apache.flink.table.planner.operations.PlannerQueryOperation;
@@ -88,6 +93,7 @@ import org.apache.flink.table.planner.plan.schema.DataStreamTable$;
 import org.apache.flink.table.planner.plan.schema.LegacyTableSourceTable;
 import org.apache.flink.table.planner.plan.schema.TypedFlinkTableFunction;
 import org.apache.flink.table.planner.plan.stats.FlinkStatistic;
+import org.apache.flink.table.planner.plan.utils.LateralSnapshotJoinUtil;
 import org.apache.flink.table.planner.sources.TableSourceUtil;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.runtime.groupwindow.NamedWindowProperty;
@@ -102,21 +108,29 @@ import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.utils.DataTypeUtils;
 import org.apache.flink.util.Preconditions;
 
+import org.apache.calcite.avatica.util.TimeUnit;
 import org.apache.calcite.plan.ViewExpanders;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.CorrelationId;
 import org.apache.calcite.rel.core.JoinRelType;
+import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.logical.LogicalTableFunctionScan;
 import org.apache.calcite.rel.logical.LogicalTableScan;
 import org.apache.calcite.rel.logical.LogicalValues;
 import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlAggFunction;
+import org.apache.calcite.sql.SqlFunction;
+import org.apache.calcite.sql.SqlIntervalQualifier;
+import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.tools.RelBuilder.AggCall;
 import org.apache.calcite.tools.RelBuilder.GroupKey;
 
+import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -149,10 +163,22 @@ public class QueryOperationConverter extends QueryOperationDefaultVisitor<RelNod
     private final JoinExpressionVisitor joinExpressionVisitor = new JoinExpressionVisitor();
     private final boolean isBatchMode;
 
+    // Root of the operation tree currently being converted; used to keep a top-level ORDER BY
+    // while dropping fetch-less sorts elsewhere (mirrors SqlToRelConverter#removeSortInSubQuery).
+    private QueryOperation rootOperation;
+
     public QueryOperationConverter(FlinkRelBuilder relBuilder, boolean isBatchMode) {
         this.relBuilder = relBuilder;
         this.expressionConverter = new ExpressionConverter(relBuilder);
         this.isBatchMode = isBatchMode;
+    }
+
+    public void setRootOperation(QueryOperation rootOperation) {
+        this.rootOperation = rootOperation;
+    }
+
+    public QueryOperation getRootOperation() {
+        return rootOperation;
     }
 
     @Override
@@ -174,6 +200,14 @@ public class QueryOperationConverter extends QueryOperationDefaultVisitor<RelNod
 
         @Override
         public RelNode visit(AggregateQueryOperation aggregate) {
+            // Project the input off a sort (as SqlToRelConverter does) so the sort's collation is
+            // not required on the aggregate output, avoiding an IOOBE in rules like e.g.
+            // FlinkExpandConversionRule.
+            final RelNode input = relBuilder.peek();
+            if (input instanceof Sort) {
+                relBuilder.project(relBuilder.fields(), input.getRowType().getFieldNames(), true);
+            }
+
             List<AggCall> aggregations =
                     aggregate.getAggregateExpressions().stream()
                             .map(this::getAggCall)
@@ -202,6 +236,11 @@ public class QueryOperationConverter extends QueryOperationDefaultVisitor<RelNod
             return relBuilder
                     .windowAggregate(logicalWindow, groupKey, windowProperties, aggregations)
                     .build();
+        }
+
+        @Override
+        public RelNode visit(WindowTableFunctionQueryOperation windowTableFunction) {
+            return convertWindowTableFunction(windowTableFunction);
         }
 
         private NamedWindowProperty convertToWindowProperty(
@@ -246,7 +285,17 @@ public class QueryOperationConverter extends QueryOperationDefaultVisitor<RelNod
         @Override
         public RelNode visit(JoinQueryOperation join) {
             final Set<CorrelationId> corSet;
-            if (join.isCorrelated()) {
+            // Check if this is a LATERAL SNAPSHOT join. The SNAPSHOT function never references the
+            // outer row. Emit a plain LogicalJoin instead of a Correlate, so that
+            // LogicalJoinToLateralSnapshotJoinRule matches.
+            final QueryOperation right = join.getChildren().get(1);
+            final boolean isLateralSnapshotJoin =
+                    right instanceof CorrelatedFunctionQueryOperation
+                            && LateralSnapshotJoinUtil.isSnapshotFunction(
+                                    ((CorrelatedFunctionQueryOperation) right)
+                                            .getResolvedFunction()
+                                            .getDefinition());
+            if (join.isCorrelated() && !isLateralSnapshotJoin) {
                 corSet = Collections.singleton(relBuilder.peek().getCluster().createCorrel());
             } else {
                 corSet = Collections.emptySet();
@@ -289,7 +338,13 @@ public class QueryOperationConverter extends QueryOperationDefaultVisitor<RelNod
 
         @Override
         public RelNode visit(SortQueryOperation sort) {
-            List<RexNode> rexNodes = convertToRexNodes(sort.getOrder());
+            // A non-root sort with neither FETCH nor a non-zero OFFSET has no observable effect,
+            // so drop it (mirrors SqlToRelConverter#removeSortInSubQuery; -1 means "unset").
+            final boolean isRoot = sort == rootOperation;
+            if (!isRoot && sort.getFetch() < 0 && sort.getOffset() <= 0) {
+                return relBuilder.build();
+            }
+            final List<RexNode> rexNodes = convertToRexNodes(sort.getOrder());
             return relBuilder.sortLimit(sort.getOffset(), sort.getFetch(), rexNodes).build();
         }
 
@@ -308,30 +363,11 @@ public class QueryOperationConverter extends QueryOperationDefaultVisitor<RelNod
                             .map(
                                     resolvedArg -> {
                                         if (resolvedArg instanceof TableReferenceExpression) {
-                                            final TableReferenceExpression tableRef =
-                                                    (TableReferenceExpression) resolvedArg;
-                                            final LogicalType tableArgType =
-                                                    tableRef.getOutputDataType().getLogicalType();
-                                            final RelDataType rowType =
-                                                    typeFactory.buildRelNodeRowType(
-                                                            (RowType) tableArgType);
-                                            final int[] partitionKeys;
-                                            if (tableRef.getQueryOperation()
-                                                    instanceof PartitionQueryOperation) {
-                                                final PartitionQueryOperation partitionOperation =
-                                                        (PartitionQueryOperation)
-                                                                tableRef.getQueryOperation();
-                                                partitionKeys =
-                                                        partitionOperation.getPartitionKeys();
-                                            } else {
-                                                partitionKeys = new int[0];
-                                            }
                                             final RexTableArgCall tableArgCall =
-                                                    new RexTableArgCall(
-                                                            rowType,
+                                                    buildTableArgCall(
+                                                            (TableReferenceExpression) resolvedArg,
                                                             inputStack.size(),
-                                                            partitionKeys,
-                                                            new int[0]);
+                                                            typeFactory);
                                             inputStack.add(relBuilder.build());
                                             return tableArgCall;
                                         }
@@ -342,22 +378,9 @@ public class QueryOperationConverter extends QueryOperationDefaultVisitor<RelNod
             // relBuilder.build() works in LIFO fashion, this restores the original input order
             Collections.reverse(inputStack);
 
-            final BridgingSqlFunction sqlFunction =
-                    BridgingSqlFunction.of(relBuilder.getCluster(), contextFunction);
-
-            final RexNode call =
-                    relBuilder
-                            .getRexBuilder()
-                            .makeCall(outputRelDataType, sqlFunction, rexNodeArgs);
-            final RelNode functionScan =
-                    LogicalTableFunctionScan.create(
-                            relBuilder.getCluster(),
-                            inputStack,
-                            call,
-                            null,
-                            outputRelDataType,
-                            Collections.emptySet());
-            relBuilder.push(functionScan);
+            relBuilder.push(
+                    createTableFunctionScan(
+                            contextFunction, rexNodeArgs, inputStack, outputRelDataType));
             return relBuilder.build();
         }
 
@@ -372,6 +395,11 @@ public class QueryOperationConverter extends QueryOperationDefaultVisitor<RelNod
         public RelNode visit(CorrelatedFunctionQueryOperation correlatedFunction) {
             final ContextResolvedFunction contextFunction =
                     correlatedFunction.getResolvedFunction();
+            // SNAPSHOT is currently the only PTF valid in a lateral join and hence the only
+            // function accepting table args.
+            if (LateralSnapshotJoinUtil.isSnapshotFunction(contextFunction.getDefinition())) {
+                return convertCorrelatedFunctionWithTableArgs(correlatedFunction);
+            }
             final List<RexNode> parameters = convertToRexNodes(correlatedFunction.getArguments());
 
             final FunctionDefinition functionDefinition = contextFunction.getDefinition();
@@ -395,6 +423,81 @@ public class QueryOperationConverter extends QueryOperationDefaultVisitor<RelNod
                     correlatedFunction.getResolvedSchema().getColumnNames());
 
             return relBuilder.build();
+        }
+
+        private RelNode convertCorrelatedFunctionWithTableArgs(
+                CorrelatedFunctionQueryOperation correlatedFunction) {
+            final FlinkTypeFactory typeFactory = ShortcutUtils.unwrapTypeFactory(relBuilder);
+            final List<RelNode> inputs = new ArrayList<>();
+            final List<RexNode> args = new ArrayList<>();
+            for (ResolvedExpression arg : correlatedFunction.getArguments()) {
+                if (arg instanceof TableReferenceExpression) {
+                    final TableReferenceExpression tableRef = (TableReferenceExpression) arg;
+                    args.add(buildTableArgCall(tableRef, inputs.size(), typeFactory));
+                    inputs.add(tableRef.getQueryOperation().accept(QueryOperationConverter.this));
+                } else {
+                    args.add(convertExprToRexNode(arg));
+                }
+            }
+            // Derive the output row type like the FROM-clause PTF path
+            // (FunctionQueryOperation#getOutputDataType).
+            final RelDataType outputType =
+                    typeFactory.buildRelNodeRowType(
+                            (RowType)
+                                    DataTypeUtils.fromResolvedSchemaPreservingTimeAttributes(
+                                                    correlatedFunction.getResolvedSchema())
+                                            .getLogicalType());
+            return createTableFunctionScan(
+                    correlatedFunction.getResolvedFunction(), args, inputs, outputType);
+        }
+
+        /**
+         * Converts a {@link TableReferenceExpression} table argument into a {@link
+         * RexTableArgCall}, carrying PARTITION BY / ORDER BY keys when the referenced operation is
+         * a {@link PartitionQueryOperation}.
+         */
+        private RexTableArgCall buildTableArgCall(
+                TableReferenceExpression tableRef, int inputIndex, FlinkTypeFactory typeFactory) {
+            final RelDataType rowType =
+                    typeFactory.buildRelNodeRowType(
+                            (RowType) tableRef.getOutputDataType().getLogicalType());
+            final int[] partitionKeys;
+            final int[] orderKeys;
+            final SortOrder[] sortOrders;
+            if (tableRef.getQueryOperation() instanceof PartitionQueryOperation) {
+                final PartitionQueryOperation partitionOperation =
+                        (PartitionQueryOperation) tableRef.getQueryOperation();
+                partitionKeys = partitionOperation.getPartitionKeys();
+                orderKeys = partitionOperation.getOrderKeys();
+                final SortDirection[] directions = partitionOperation.getOrderDirections();
+                sortOrders = new SortOrder[directions.length];
+                for (int i = 0; i < directions.length; i++) {
+                    sortOrders[i] = SortOrder.fromSortDirection(directions[i]);
+                }
+            } else {
+                partitionKeys = new int[0];
+                orderKeys = new int[0];
+                sortOrders = new SortOrder[0];
+            }
+            return new RexTableArgCall(rowType, inputIndex, partitionKeys, orderKeys, sortOrders);
+        }
+
+        /** Builds a {@link LogicalTableFunctionScan} for a function call with table arguments. */
+        private RelNode createTableFunctionScan(
+                ContextResolvedFunction function,
+                List<RexNode> args,
+                List<RelNode> inputs,
+                RelDataType outputType) {
+            final BridgingSqlFunction sqlFunction =
+                    BridgingSqlFunction.of(relBuilder.getCluster(), function);
+            final RexNode call = relBuilder.getRexBuilder().makeCall(outputType, sqlFunction, args);
+            return LogicalTableFunctionScan.create(
+                    relBuilder.getCluster(),
+                    inputs,
+                    call,
+                    null,
+                    outputType,
+                    Collections.emptySet());
         }
 
         private RelNode convertLegacyTableFunction(
@@ -548,6 +651,65 @@ public class QueryOperationConverter extends QueryOperationDefaultVisitor<RelNod
                         dataStreamQueryOperation.getIdentifier());
             }
             throw new TableException("Unknown table operation: " + other);
+        }
+
+        private RelNode convertWindowTableFunction(WindowTableFunctionQueryOperation windowOp) {
+            final RexBuilder rexBuilder = relBuilder.getRexBuilder();
+
+            final RelNode input = relBuilder.build();
+            final RelDataType inputRowType = input.getRowType();
+
+            final String timeColumn = windowOp.getTimeColumn();
+            final RelDataType timeAttributeType =
+                    inputRowType.getField(timeColumn, true, false).getType();
+            final RelDataType outputRowType =
+                    SqlWindowTableFunction.inferRowType(
+                            relBuilder.getTypeFactory(), inputRowType, timeAttributeType);
+
+            final int[] partitionIndices =
+                    windowOp.getPartitionKeys().stream()
+                            .mapToInt(name -> inputRowType.getField(name, true, false).getIndex())
+                            .toArray();
+
+            final SqlFunction operator = windowOperator(windowOp.getWindowKind());
+            final List<RexNode> operands = new ArrayList<>();
+            operands.add(
+                    new RexTableArgCall(
+                            inputRowType, 0, partitionIndices, new int[0], new SortOrder[0]));
+            operands.add(
+                    rexBuilder.makeCall(
+                            FlinkSqlOperatorTable.DESCRIPTOR, rexBuilder.makeLiteral(timeColumn)));
+            for (Duration interval : windowOp.getIntervals()) {
+                operands.add(
+                        rexBuilder.makeIntervalLiteral(
+                                BigDecimal.valueOf(interval.toMillis()),
+                                new SqlIntervalQualifier(
+                                        TimeUnit.MILLISECOND, null, SqlParserPos.ZERO)));
+            }
+
+            final RexNode call = rexBuilder.makeCall(outputRowType, operator, operands);
+            return LogicalTableFunctionScan.create(
+                    relBuilder.getCluster(),
+                    new ArrayList<>(Collections.singletonList(input)),
+                    call,
+                    null,
+                    outputRowType,
+                    Set.of());
+        }
+
+        private SqlFunction windowOperator(WindowTableFunctionQueryOperation.WindowKind kind) {
+            switch (kind) {
+                case TUMBLE:
+                    return FlinkSqlOperatorTable.TUMBLE;
+                case HOP:
+                    return FlinkSqlOperatorTable.HOP;
+                case CUMULATE:
+                    return FlinkSqlOperatorTable.CUMULATE;
+                case SESSION:
+                    return FlinkSqlOperatorTable.SESSION;
+                default:
+                    throw new TableException("Unsupported window kind: " + kind);
+            }
         }
 
         @Override

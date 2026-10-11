@@ -27,12 +27,16 @@ import org.apache.flink.table.api.config.TableConfigOptions.ColumnExpansionStrat
 import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.data.TimestampData;
+import org.apache.flink.table.functions.FunctionKind;
 import org.apache.flink.table.planner.catalog.CatalogSchemaModel;
 import org.apache.flink.table.planner.catalog.CatalogSchemaTable;
-import org.apache.flink.table.planner.functions.sql.ml.SqlMLTableFunction;
+import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.plan.FlinkCalciteCatalogReader;
 import org.apache.flink.table.planner.plan.utils.FlinkRexUtil;
 import org.apache.flink.table.planner.utils.ShortcutUtils;
+import org.apache.flink.table.types.inference.StaticArgument;
+import org.apache.flink.table.types.inference.SystemTypeInference;
+import org.apache.flink.table.types.inference.TypeInference;
 import org.apache.flink.table.types.logical.DecimalType;
 
 import org.apache.calcite.plan.RelOptCluster;
@@ -65,6 +69,9 @@ import org.apache.calcite.sql.SqlTableFunction;
 import org.apache.calcite.sql.SqlUtil;
 import org.apache.calcite.sql.SqlWindowTableFunction;
 import org.apache.calcite.sql.parser.SqlParserPos;
+import org.apache.calcite.sql.type.SqlOperandMetadata;
+import org.apache.calcite.sql.type.SqlOperandTypeChecker;
+import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.type.SqlTypeUtil;
 import org.apache.calcite.sql.validate.DelegatingScope;
 import org.apache.calcite.sql.validate.IdentifierNamespace;
@@ -86,13 +93,13 @@ import java.math.BigDecimal;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static org.apache.calcite.sql.type.SqlTypeName.DECIMAL;
 import static org.apache.flink.table.expressions.resolver.lookups.FieldReferenceLookup.includeExpandedColumn;
@@ -272,6 +279,7 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
             sqlSnapshot.setOperand(
                     1,
                     SqlLiteral.createTimestamp(
+                            SqlTypeName.TIMESTAMP,
                             timestampString,
                             rexLiteral.getType().getPrecision(),
                             sqlSnapshot.getPeriod().getParserPosition()));
@@ -343,7 +351,7 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
                 final Column column = resolvedSchema.getColumn(columnName).orElse(null);
                 if (qualified.suffix().size() == 1 && column != null) {
                     if (includeExpandedColumn(column, columnExpansionStrategies)
-                            || declaredDescriptorColumn(scope, column)) {
+                            || isDeclaredOnTimeColumn(scope, column)) {
                         super.addToSelectList(
                                 list, aliases, fieldList, exp, scope, includeSystemVars);
                     }
@@ -360,15 +368,16 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
     protected @PolyNull SqlNode performUnconditionalRewrites(
             @PolyNull SqlNode node, boolean underFrom) {
 
-        // Special case for window TVFs like:
-        // TUMBLE(TABLE t, DESCRIPTOR(metadata_virtual), INTERVAL '1' MINUTE)) or
-        // SESSION(TABLE t PARTITION BY a, DESCRIPTOR(metadata_virtual), INTERVAL '1' MINUTE))
+        // Capture table arguments early:
+        // TUMBLE(TABLE t, DESCRIPTOR(metadata_virtual), INTERVAL '1' MINUTE) or
+        // SESSION(TABLE t PARTITION BY a, DESCRIPTOR(metadata_virtual), INTERVAL '1' MINUTE)
+        // MyPtf(in => TABLE t PARTITION BY a, on_time => DESCRIPTOR(metadata_virtual))
         //
         // "TABLE t" is translated into an implicit "SELECT * FROM t". This would ignore columns
-        // that are not expanded by default. However, the descriptor explicitly states the need
-        // for this column. Therefore, explicit table expressions (for window TVFs at most one)
-        // are captured before rewriting and replaced with a "marker" SqlSelect that contains the
-        // descriptor information. The "marker" SqlSelect is considered during column expansion.
+        // that are not expanded by default. However, the on_time descriptor explicitly states the
+        // need for time columns. Therefore, explicit table expressions are captured before
+        // rewriting and replaced with a "marker" SqlSelect that contains the descriptor
+        // information. The "marker" SqlSelect is considered during column expansion.
         final List<SqlIdentifier> tableArgs = getTableOperands(node);
 
         final SqlNode rewritten = super.performUnconditionalRewrites(node, underFrom);
@@ -376,64 +385,130 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
         if (!(node instanceof SqlBasicCall)) {
             return rewritten;
         }
-        final SqlBasicCall call = (SqlBasicCall) node;
-        final SqlOperator operator = call.getOperator();
 
+        final SqlBasicCall call = (SqlBasicCall) node;
+        checkNoNamedAndPositionalMixedArgs(call);
+        checkDisabledSystemArgs(call);
+
+        // Special case for MODEL
         if (node instanceof SqlExplicitModelCall) {
             // Convert it so that model can be accessed in planner. SqlExplicitModelCall
             // from parser can't access model.
-            SqlExplicitModelCall modelCall = (SqlExplicitModelCall) node;
-            SqlIdentifier modelIdentifier = modelCall.getModelIdentifier();
-            FlinkCalciteCatalogReader catalogReader =
+            final SqlExplicitModelCall modelCall = (SqlExplicitModelCall) node;
+            final SqlIdentifier modelIdentifier = modelCall.getModelIdentifier();
+            final FlinkCalciteCatalogReader catalogReader =
                     (FlinkCalciteCatalogReader) getCatalogReader();
-            CatalogSchemaModel model = catalogReader.getModel(modelIdentifier.names);
+            final CatalogSchemaModel model = catalogReader.getModel(modelIdentifier.names);
             if (model != null) {
                 return new SqlModelCall(modelCall, model);
             }
         }
 
-        // TODO (FLINK-37819): add test for SqlMLTableFunction
-        if (operator instanceof SqlWindowTableFunction || operator instanceof SqlMLTableFunction) {
-            if (tableArgs.stream().allMatch(Objects::isNull)) {
-                return rewritten;
-            }
-
-            final List<SqlIdentifier> descriptors =
-                    call.getOperandList().stream()
-                            .flatMap(FlinkCalciteSqlValidator::extractDescriptors)
-                            .collect(Collectors.toList());
-
+        // Mark rewritten "TABLE t" with on_time columns
+        if (tableArgs == null || tableArgs.stream().allMatch(Objects::isNull)) {
+            return rewritten;
+        }
+        final List<SqlIdentifier> onTimeColumns = extractOnTime(call);
+        if (onTimeColumns != null) {
             for (int i = 0; i < call.operandCount(); i++) {
                 final SqlIdentifier tableArg = tableArgs.get(i);
                 if (tableArg != null) {
-                    final SqlNode opReplacement = new ExplicitTableSqlSelect(tableArg, descriptors);
+                    final SqlNode opReplacement =
+                            new ExplicitTableSqlSelect(tableArg, onTimeColumns);
+                    // for f(TABLE t PARTITION BY c, ...)
                     if (call.operand(i).getKind() == SqlKind.SET_SEMANTICS_TABLE) {
                         final SqlCall setSemanticsTable = call.operand(i);
                         setSemanticsTable.setOperand(0, opReplacement);
                     } else if (call.operand(i).getKind() == SqlKind.ARGUMENT_ASSIGNMENT) {
-                        // for TUMBLE(DATA => TABLE t3, ...)
                         final SqlCall assignment = call.operand(i);
+                        // for f(in => TABLE t PARTITION BY c, ...)
                         if (assignment.operand(0).getKind() == SqlKind.SET_SEMANTICS_TABLE) {
-                            final SqlCall setSemanticsTable = assignment.operand(i);
+                            final SqlCall setSemanticsTable = assignment.operand(0);
                             setSemanticsTable.setOperand(0, opReplacement);
                         } else {
+                            // for f(in => TABLE t, ...)
                             assignment.setOperand(0, opReplacement);
                         }
                     } else {
-                        // for TUMBLE(TABLE t3, ...)
+                        // for f(TABLE t, ...)
                         call.setOperand(i, opReplacement);
                     }
                 }
-                // for TUMBLE([DATA =>] SELECT ..., ...)
+                // for f([in =>] SELECT ..., ...)
             }
         }
 
         return rewritten;
     }
 
+    /** Mixing positional and named arguments is not supported and crashes operand permutation. */
+    private static void checkNoNamedAndPositionalMixedArgs(SqlBasicCall call) {
+        if (!(call.getOperator() instanceof SqlFunction)) {
+            return;
+        }
+        final List<SqlNode> operands = call.getOperandList();
+        final boolean anyNamed =
+                operands.stream()
+                        .anyMatch(op -> op != null && op.getKind() == SqlKind.ARGUMENT_ASSIGNMENT);
+        final boolean anyPositional =
+                operands.stream()
+                        .anyMatch(op -> op != null && op.getKind() != SqlKind.ARGUMENT_ASSIGNMENT);
+        if (anyNamed && anyPositional) {
+            throw new ValidationException(
+                    "Cannot mix positional and named arguments when calling function '"
+                            + call.getOperator().getName()
+                            + "'. Use either all positional arguments or all named arguments "
+                            + "(e.g. arg => value).");
+        }
+    }
+
+    /**
+     * Rejects the implicit PTF system arguments (on_time, uid) for functions that disable them.
+     *
+     * <p>This must happen before Calcite permutes named arguments, because unknown named arguments
+     * are silently dropped during permutation and would otherwise be lost. The actual rule and
+     * error message live in {@link SystemTypeInference#checkNoSystemArguments} so that the Table
+     * API path (which resolves calls without this validator) enforces it identically.
+     */
+    private static void checkDisabledSystemArgs(SqlBasicCall call) {
+        final SqlOperator operator = call.getOperator();
+        if (!(operator instanceof BridgingSqlFunction)) {
+            return;
+        }
+        final TypeInference typeInference = ((BridgingSqlFunction) operator).getTypeInference();
+        if (!typeInference.disableSystemArguments()) {
+            return;
+        }
+        final Set<String> suppliedArgNames = new HashSet<>();
+        for (SqlNode operand : call.getOperandList()) {
+            if (operand != null && operand.getKind() == SqlKind.ARGUMENT_ASSIGNMENT) {
+                final SqlNode nameNode = ((SqlCall) operand).operand(1);
+                if (nameNode instanceof SqlIdentifier) {
+                    suppliedArgNames.add(((SqlIdentifier) nameNode).getSimple());
+                }
+            }
+        }
+        // A function that disabled the automatic system arguments may still declare an argument
+        // with a reserved name (e.g. SNAPSHOT declares `on_time`); such declared names are allowed.
+        final Set<String> declaredArgNames =
+                typeInference.getStaticArguments().orElse(List.of()).stream()
+                        .map(StaticArgument::getName)
+                        .collect(Collectors.toSet());
+        SystemTypeInference.checkNoSystemArguments(
+                true, suppliedArgNames, declaredArgNames, operator.getName());
+    }
+
     @Override
     public SqlNode maybeCast(SqlNode node, RelDataType currentType, RelDataType desiredType) {
         return super.maybeCast(node, currentType, desiredType);
+    }
+
+    @Override
+    public @Nullable SqlCall makeNullaryCall(SqlIdentifier id) {
+        if (id.names.size() == 1 && !id.isComponentQuoted(0)) {
+            return super.makeNullaryCall(id);
+        }
+        return null;
     }
 
     // --------------------------------------------------------------------------------------------
@@ -446,9 +521,9 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
      */
     static class ExplicitTableSqlSelect extends SqlSelect {
 
-        private final List<SqlIdentifier> descriptors;
+        private final List<SqlIdentifier> onTimeColumns;
 
-        public ExplicitTableSqlSelect(SqlIdentifier table, List<SqlIdentifier> descriptors) {
+        public ExplicitTableSqlSelect(SqlIdentifier table, List<SqlIdentifier> onTimeColumns) {
             super(
                     SqlParserPos.ZERO,
                     null,
@@ -462,7 +537,7 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
                     null,
                     null,
                     null);
-            this.descriptors = descriptors;
+            this.onTimeColumns = onTimeColumns;
         }
     }
 
@@ -470,30 +545,32 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
      * Returns whether the given column has been declared in a {@link SqlKind#DESCRIPTOR} next to a
      * {@link SqlKind#EXPLICIT_TABLE} within TVF operands.
      */
-    private static boolean declaredDescriptorColumn(SelectScope scope, Column column) {
+    private static boolean isDeclaredOnTimeColumn(SelectScope scope, Column column) {
         if (!(scope.getNode() instanceof ExplicitTableSqlSelect)) {
             return false;
         }
         final ExplicitTableSqlSelect select = (ExplicitTableSqlSelect) scope.getNode();
-        return select.descriptors.stream()
+        return select.onTimeColumns.stream()
                 .map(SqlIdentifier::getSimple)
                 .anyMatch(id -> id.equals(column.getName()));
     }
 
     /**
      * Returns all {@link SqlKind#EXPLICIT_TABLE} and {@link SqlKind#SET_SEMANTICS_TABLE} operands
-     * within TVF operands. A list entry is {@code null} if the operand is not an {@link
+     * within PTF operands. A list entry is {@code null} if the operand is not an {@link
      * SqlKind#EXPLICIT_TABLE} or {@link SqlKind#SET_SEMANTICS_TABLE}.
      */
     private static List<SqlIdentifier> getTableOperands(SqlNode node) {
         if (!(node instanceof SqlBasicCall)) {
             return null;
         }
+
         final SqlBasicCall call = (SqlBasicCall) node;
 
         if (!(call.getOperator() instanceof SqlFunction)) {
             return null;
         }
+
         final SqlFunction function = (SqlFunction) call.getOperator();
 
         if (!isTableFunction(function)) {
@@ -501,52 +578,109 @@ public final class FlinkCalciteSqlValidator extends FlinkSqlParsingValidator {
         }
 
         return call.getOperandList().stream()
-                .map(FlinkCalciteSqlValidator::extractTableOperand)
+                .map(FlinkCalciteSqlValidator::extractExplicitTables)
                 .collect(Collectors.toList());
     }
 
-    private static @Nullable SqlIdentifier extractTableOperand(SqlNode op) {
+    /** Extracts "TABLE t" nodes before they get rewritten into "SELECT * FROM t". */
+    private static @Nullable SqlIdentifier extractExplicitTables(SqlNode op) {
         if (op.getKind() == SqlKind.EXPLICIT_TABLE) {
             final SqlBasicCall opCall = (SqlBasicCall) op;
             if (opCall.operandCount() == 1 && opCall.operand(0) instanceof SqlIdentifier) {
-                // for TUMBLE(TABLE t3, ...)
+                // for f(TABLE t, ...)
                 return opCall.operand(0);
             }
         } else if (op.getKind() == SqlKind.SET_SEMANTICS_TABLE) {
-            // for SESSION windows
+            // for f(TABLE t PARTITION BY x)
             final SqlBasicCall opCall = (SqlBasicCall) op;
-            final SqlCall setSemanticsTable = opCall.operand(0);
-            if (setSemanticsTable.operand(0) instanceof SqlIdentifier) {
-                return setSemanticsTable.operand(0);
-            }
+            return extractExplicitTables(opCall.operand(0));
         } else if (op.getKind() == SqlKind.ARGUMENT_ASSIGNMENT) {
-            // for TUMBLE(DATA => TABLE t3, ...)
+            // for f(in => TABLE t, ...)
             final SqlBasicCall opCall = (SqlBasicCall) op;
-            return extractTableOperand(opCall.operand(0));
+            return extractExplicitTables(opCall.operand(0));
         }
         return null;
     }
 
-    private static Stream<SqlIdentifier> extractDescriptors(SqlNode op) {
+    /** Extracts the on_time argument of a PTF (or TIMECOL for window PTFs for legacy reasons). */
+    private static @Nullable List<SqlIdentifier> extractOnTime(SqlBasicCall call) {
+        // Extract from operand from PTF
+        final SqlNode onTimeOperand;
+        if (call.getOperator() instanceof SqlWindowTableFunction) {
+            onTimeOperand = extractOperandByArgName(call, "TIMECOL");
+        } else if (ShortcutUtils.isFunctionKind(call.getOperator(), FunctionKind.PROCESS_TABLE)) {
+            onTimeOperand = extractOperandByArgName(call, "on_time");
+        } else {
+            onTimeOperand = null;
+        }
+
+        // No operand found
+        if (onTimeOperand == null) {
+            return null;
+        }
+
+        return extractDescriptors(onTimeOperand);
+    }
+
+    private static List<SqlIdentifier> extractDescriptors(SqlNode op) {
         if (op.getKind() == SqlKind.DESCRIPTOR) {
-            // for TUMBLE(..., DESCRIPTOR(col), ...)
             final SqlBasicCall opCall = (SqlBasicCall) op;
             return opCall.getOperandList().stream()
                     .filter(SqlIdentifier.class::isInstance)
-                    .map(SqlIdentifier.class::cast);
-        } else if (op.getKind() == SqlKind.SET_SEMANTICS_TABLE) {
-            // for SESSION windows
-            final SqlBasicCall opCall = (SqlBasicCall) op;
-            return ((SqlNodeList) opCall.operand(1))
-                    .stream()
-                            .filter(SqlIdentifier.class::isInstance)
-                            .map(SqlIdentifier.class::cast);
-        } else if (op.getKind() == SqlKind.ARGUMENT_ASSIGNMENT) {
-            // for TUMBLE(..., TIMECOL => DESCRIPTOR(col), ...)
-            final SqlBasicCall opCall = (SqlBasicCall) op;
-            return extractDescriptors(opCall.operand(0));
+                    .map(SqlIdentifier.class::cast)
+                    .collect(Collectors.toList());
         }
-        return Stream.empty();
+        return List.of();
+    }
+
+    /**
+     * Returns the operand for a given argument name from a BasicSqlCall. Supports both positional
+     * and named arguments. If at least one ARGUMENT_ASSIGNMENT is used, named lookup is performed.
+     * Otherwise, positional lookup using SqlOperandMetadata is used.
+     *
+     * @param call the SQL call to extract the operand from
+     * @param argumentName the name of the argument to retrieve
+     * @return the SqlNode for the operand, or null if not found or not supported
+     */
+    private static @Nullable SqlNode extractOperandByArgName(
+            SqlBasicCall call, String argumentName) {
+        // Check if operator supports SqlOperandMetadata
+        final SqlOperator operator = call.getOperator();
+        final SqlOperandTypeChecker typeChecker = operator.getOperandTypeChecker();
+        if (!(typeChecker instanceof SqlOperandMetadata)) {
+            return null;
+        }
+
+        final SqlOperandMetadata operandMetadata = (SqlOperandMetadata) typeChecker;
+
+        // Detect if named arguments are used by checking for ARGUMENT_ASSIGNMENT
+        final List<SqlNode> operands = call.getOperandList();
+        final boolean hasNamedArguments =
+                operands.stream().anyMatch(op -> op.getKind() == SqlKind.ARGUMENT_ASSIGNMENT);
+
+        if (hasNamedArguments) {
+            // Named mode: search through ARGUMENT_ASSIGNMENT nodes
+            for (SqlNode operand : operands) {
+                if (operand.getKind() == SqlKind.ARGUMENT_ASSIGNMENT) {
+                    final SqlBasicCall assignment = (SqlBasicCall) operand;
+                    // operand(1) contains the parameter name as SqlIdentifier
+                    final SqlIdentifier paramName = assignment.operand(1);
+                    if (paramName.getSimple().equals(argumentName)) {
+                        // operand(0) contains the actual value
+                        return assignment.operand(0);
+                    }
+                }
+            }
+            return null;
+        } else {
+            // Positional mode: use SqlOperandMetadata to map name to position
+            final List<String> paramNames = operandMetadata.paramNames();
+            final int index = paramNames.indexOf(argumentName);
+            if (index == -1 || index >= call.operandCount()) {
+                return null;
+            }
+            return call.operand(index);
+        }
     }
 
     private static boolean isTableFunction(SqlFunction function) {

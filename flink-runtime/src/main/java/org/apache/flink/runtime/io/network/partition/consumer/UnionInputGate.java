@@ -177,6 +177,13 @@ public class UnionInputGate extends InputGate {
     }
 
     @Override
+    public InputChannel getChannel(InputChannelInfo channelInfo) {
+        // The member gate's local channel index is carried directly in channelInfo, so resolve
+        // through the owning gate instead of the gate-global getChannel(int) addressing.
+        return inputGatesByGateIndex.get(channelInfo.getGateIdx()).getChannel(channelInfo);
+    }
+
+    @Override
     public boolean isFinished() {
         return inputGatesWithRemainingData.isEmpty();
     }
@@ -352,8 +359,13 @@ public class UnionInputGate extends InputGate {
 
     @Override
     public void requestPartitions() throws IOException {
+        requestPartitions(false);
+    }
+
+    @Override
+    public void requestPartitions(boolean needsRecovery) throws IOException {
         for (InputGate inputGate : inputGatesByGateIndex.values()) {
-            inputGate.requestPartitions();
+            inputGate.requestPartitions(needsRecovery);
         }
     }
 

@@ -21,6 +21,7 @@ package org.apache.flink.table.catalog;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.table.api.CatalogNotExistException;
 import org.apache.flink.table.api.EnvironmentSettings;
@@ -31,7 +32,10 @@ import org.apache.flink.table.api.config.MaterializedTableConfigOptions;
 import org.apache.flink.table.api.internal.TableEnvironmentImpl;
 import org.apache.flink.table.catalog.CatalogBaseTable.TableKind;
 import org.apache.flink.table.catalog.CatalogMaterializedTable.RefreshMode;
+import org.apache.flink.table.catalog.StartMode.StartModeKind;
 import org.apache.flink.table.catalog.exceptions.CatalogException;
+import org.apache.flink.table.catalog.exceptions.ConnectionAlreadyExistException;
+import org.apache.flink.table.catalog.exceptions.ConnectionNotExistException;
 import org.apache.flink.table.catalog.exceptions.DatabaseAlreadyExistException;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotEmptyException;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotExistException;
@@ -40,14 +44,17 @@ import org.apache.flink.table.catalog.exceptions.ModelNotExistException;
 import org.apache.flink.table.catalog.exceptions.PartitionNotExistException;
 import org.apache.flink.table.catalog.exceptions.TableAlreadyExistException;
 import org.apache.flink.table.catalog.exceptions.TableNotExistException;
+import org.apache.flink.table.catalog.listener.AlterConnectionEvent;
 import org.apache.flink.table.catalog.listener.AlterDatabaseEvent;
 import org.apache.flink.table.catalog.listener.AlterModelEvent;
 import org.apache.flink.table.catalog.listener.AlterTableEvent;
 import org.apache.flink.table.catalog.listener.CatalogContext;
 import org.apache.flink.table.catalog.listener.CatalogModificationListener;
+import org.apache.flink.table.catalog.listener.CreateConnectionEvent;
 import org.apache.flink.table.catalog.listener.CreateDatabaseEvent;
 import org.apache.flink.table.catalog.listener.CreateModelEvent;
 import org.apache.flink.table.catalog.listener.CreateTableEvent;
+import org.apache.flink.table.catalog.listener.DropConnectionEvent;
 import org.apache.flink.table.catalog.listener.DropDatabaseEvent;
 import org.apache.flink.table.catalog.listener.DropModelEvent;
 import org.apache.flink.table.catalog.listener.DropTableEvent;
@@ -56,9 +63,14 @@ import org.apache.flink.table.delegation.Planner;
 import org.apache.flink.table.expressions.DefaultSqlFactory;
 import org.apache.flink.table.expressions.SqlFactory;
 import org.apache.flink.table.expressions.resolver.ExpressionResolver.ExpressionResolverBuilder;
+import org.apache.flink.table.factories.ConnectionFactory;
+import org.apache.flink.table.factories.DefaultConnectionFactory;
 import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.operations.Operation;
 import org.apache.flink.table.operations.QueryOperation;
+import org.apache.flink.table.secret.GenericInMemorySecretStore;
+import org.apache.flink.table.secret.WritableSecretStore;
+import org.apache.flink.table.secret.exceptions.SecretException;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.StringUtils;
 
@@ -86,6 +98,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static java.lang.String.format;
+import static org.apache.flink.table.api.config.MaterializedTableConfigOptions.MATERIALIZED_TABLE_DEFAULT_START_MODE;
 import static org.apache.flink.table.api.config.MaterializedTableConfigOptions.MATERIALIZED_TABLE_FRESHNESS_THRESHOLD;
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -96,6 +109,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  */
 @Internal
 public final class CatalogManager implements CatalogRegistry, AutoCloseable {
+
     private static final Logger LOG = LoggerFactory.getLogger(CatalogManager.class);
 
     // A map between names and catalogs.
@@ -108,6 +122,15 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
     // Those models take precedence over corresponding permanent models, thus they shadow
     // models coming from catalogs.
     private final Map<ObjectIdentifier, CatalogModel> temporaryModels;
+
+    // Those connections take precedence over corresponding permanent connections, thus they shadow
+    // connections coming from catalogs.
+    private final Map<ObjectIdentifier, CatalogConnection> temporaryConnections;
+
+    // Backing store for secrets of temporary connections. Lifetime is tied to this
+    // CatalogManager — temporary connections are session-scoped, so their secrets should not
+    // be persisted in the configured (potentially persistent) writableSecretStore.
+    private final WritableSecretStore temporarySecretStore;
 
     // The name of the current catalog and database
     private @Nullable String currentCatalogName;
@@ -130,6 +153,10 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
 
     private final MaterializedTableEnricher materializedTableEnricher;
 
+    private final ClassLoader userClassLoader;
+
+    @Nullable private final WritableSecretStore writableSecretStore;
+
     private CatalogManager(
             String defaultCatalogName,
             Catalog defaultCatalog,
@@ -137,7 +164,9 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
             List<CatalogModificationListener> catalogModificationListeners,
             CatalogStoreHolder catalogStoreHolder,
             SqlFactory sqlFactory,
-            MaterializedTableEnricher materializedTableEnricher) {
+            MaterializedTableEnricher materializedTableEnricher,
+            ClassLoader userClassLoader,
+            @Nullable WritableSecretStore writableSecretStore) {
         checkArgument(
                 !StringUtils.isNullOrWhitespaceOnly(defaultCatalogName),
                 "Default catalog name cannot be null or empty");
@@ -150,6 +179,8 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
 
         temporaryTables = new HashMap<>();
         temporaryModels = new HashMap<>();
+        temporaryConnections = new HashMap<>();
+        temporarySecretStore = new GenericInMemorySecretStore();
 
         // right now the default catalog is always the built-in one
         builtInCatalogName = defaultCatalogName;
@@ -162,6 +193,21 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         this.sqlFactory = sqlFactory;
         this.materializedTableEnricher =
                 checkNotNull(materializedTableEnricher, "MaterializedTableEnricher cannot be null");
+        this.userClassLoader = checkNotNull(userClassLoader, "User class loader cannot be null");
+        this.writableSecretStore = writableSecretStore;
+    }
+
+    /**
+     * Discovers the {@link ConnectionFactory} for the given connection options via SPI, using the
+     * {@link FactoryUtil#CONNECTION_TYPE} option as the factory identifier. Falls back to {@link
+     * DefaultConnectionFactory} via the option's default value when {@code type} is absent.
+     *
+     * @param options the options of the connection being created / altered / dropped
+     * @return the discovered factory
+     */
+    private ConnectionFactory discoverConnectionFactory(Map<String, String> options) {
+        final String identifier = Configuration.fromMap(options).get(FactoryUtil.CONNECTION_TYPE);
+        return FactoryUtil.discoverFactory(userClassLoader, ConnectionFactory.class, identifier);
     }
 
     @VisibleForTesting
@@ -200,6 +246,8 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         private SqlFactory sqlFactory = DefaultSqlFactory.INSTANCE;
 
         private MaterializedTableEnricher materializedTableEnricher;
+
+        private @Nullable WritableSecretStore writableSecretStore;
 
         public Builder classLoader(ClassLoader classLoader) {
             this.classLoader = classLoader;
@@ -249,6 +297,11 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
             return this;
         }
 
+        public Builder writableSecretStore(@Nullable WritableSecretStore writableSecretStore) {
+            this.writableSecretStore = writableSecretStore;
+            return this;
+        }
+
         public CatalogManager build() {
             checkNotNull(classLoader, "Class loader cannot be null");
             checkNotNull(config, "Config cannot be null");
@@ -269,7 +322,9 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                     sqlFactory,
                     materializedTableEnricher != null
                             ? materializedTableEnricher
-                            : createDefaultMaterializedTableEnricher());
+                            : createDefaultMaterializedTableEnricher(),
+                    classLoader,
+                    writableSecretStore);
         }
 
         private MaterializedTableEnricher createDefaultMaterializedTableEnricher() {
@@ -287,8 +342,18 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                                             .MATERIALIZED_TABLE_DEFAULT_FRESHNESS_FULL);
             final Duration freshnessThreshold =
                     catalogStoreHolder.config().get(MATERIALIZED_TABLE_FRESHNESS_THRESHOLD);
+            final StartModeKind startModeKind =
+                    catalogStoreHolder.config().get(MATERIALIZED_TABLE_DEFAULT_START_MODE);
+            if (StartMode.requiresParameters(startModeKind)) {
+                throw new ValidationException(
+                        String.format(
+                                "Invalid default start mode '%s'. "
+                                        + "Only parameterless start modes are supported as defaults."));
+            }
+
+            final StartMode startMode = StartMode.of(startModeKind);
             return DefaultMaterializedTableEnricher.create(
-                    defaultDurationContinuous, defaultDurationFull, freshnessThreshold);
+                    defaultDurationContinuous, defaultDurationFull, freshnessThreshold, startMode);
         }
     }
 
@@ -684,7 +749,7 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         CatalogBaseTable temporaryTable = temporaryTables.get(objectIdentifier);
         if (temporaryTable != null) {
             final ResolvedCatalogBaseTable<?> resolvedTable =
-                    resolveCatalogBaseTable(temporaryTable);
+                    resolveCatalogBaseTable(temporaryTable, objectIdentifier);
             return Optional.of(ContextResolvedTable.temporary(objectIdentifier, resolvedTable));
         } else {
             return getPermanentTable(objectIdentifier, null);
@@ -705,7 +770,7 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         CatalogBaseTable temporaryTable = temporaryTables.get(objectIdentifier);
         if (temporaryTable != null) {
             final ResolvedCatalogBaseTable<?> resolvedTable =
-                    resolveCatalogBaseTable(temporaryTable);
+                    resolveCatalogBaseTable(temporaryTable, objectIdentifier);
             return Optional.of(ContextResolvedTable.temporary(objectIdentifier, resolvedTable));
         } else {
             return getPermanentTable(objectIdentifier, timestamp);
@@ -795,7 +860,8 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                 } else {
                     table = currentCatalog.getTable(objectPath);
                 }
-                final ResolvedCatalogBaseTable<?> resolvedTable = resolveCatalogBaseTable(table);
+                final ResolvedCatalogBaseTable<?> resolvedTable =
+                        resolveCatalogBaseTable(table, objectIdentifier);
                 return Optional.of(
                         ContextResolvedTable.permanent(
                                 objectIdentifier, currentCatalog, resolvedTable));
@@ -1049,7 +1115,21 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
     }
 
     private boolean permanentDatabaseExists(String catalogName, String databaseName) {
-        return getCatalog(catalogName).map(c -> c.databaseExists(databaseName)).orElse(false);
+        return getCatalog(catalogName)
+                .map(
+                        c -> {
+                            try {
+                                return c.databaseExists(databaseName);
+                            } catch (CatalogException e) {
+                                LOG.warn(
+                                        "Unable to check whether database '{}' exists in catalog '{}'.",
+                                        databaseName,
+                                        catalogName,
+                                        e);
+                                return false;
+                            }
+                        })
+                .orElse(false);
     }
 
     /**
@@ -1337,6 +1417,44 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                 objectIdentifier,
                 ignoreIfNotExists,
                 "AlterTable");
+    }
+
+    /**
+     * Converts an existing regular table to a materialized table in place. Identity and storage are
+     * preserved; only the kind and the materialized-table specific metadata change.
+     *
+     * @param originalTable the existing regular table
+     * @param materializedTable the new materialized table definition
+     * @param changes describe the modification from originalTable to materializedTable
+     * @param objectIdentifier fully qualified path of the table being converted
+     */
+    public void convertTableToMaterializedTable(
+            CatalogTable originalTable,
+            CatalogMaterializedTable materializedTable,
+            List<TableChange> changes,
+            ObjectIdentifier objectIdentifier) {
+        execute(
+                (catalog, path) -> {
+                    final CatalogTable resolvedOriginal =
+                            (CatalogTable) resolveCatalogBaseTable(originalTable);
+                    final CatalogMaterializedTable resolvedMt =
+                            (CatalogMaterializedTable) resolveCatalogBaseTable(materializedTable);
+                    catalog.convertTableToMaterializedTable(
+                            path, resolvedOriginal, resolvedMt, changes);
+                    catalogModificationListeners.forEach(
+                            listener ->
+                                    listener.onEvent(
+                                            AlterTableEvent.createEvent(
+                                                    CatalogContext.createContext(
+                                                            objectIdentifier.getCatalogName(),
+                                                            catalog),
+                                                    objectIdentifier,
+                                                    resolvedMt,
+                                                    false)));
+                },
+                objectIdentifier,
+                false,
+                "ConvertTableToMaterializedTable");
     }
 
     /**
@@ -1779,6 +1897,342 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         return ResolvedCatalogModel.of(model, resolvedInputSchema, resolvedOutputSchema);
     }
 
+    // ------ connections ------
+
+    /**
+     * Get a connection from the catalog with the given object identifier.
+     *
+     * @param objectIdentifier The fully qualified path of the connection.
+     * @return The requested connection wrapped in Optional.
+     */
+    public Optional<CatalogConnection> getConnection(ObjectIdentifier objectIdentifier) {
+        CatalogConnection temporaryConnection = temporaryConnections.get(objectIdentifier);
+        if (temporaryConnection != null) {
+            return Optional.of(temporaryConnection);
+        }
+
+        Optional<Catalog> catalog = getCatalog(objectIdentifier.getCatalogName());
+        if (catalog.isPresent()) {
+            try {
+                return Optional.of(catalog.get().getConnection(objectIdentifier.toObjectPath()));
+            } catch (ConnectionNotExistException | UnsupportedOperationException e) {
+                // ConnectionNotExistException: connection does not exist in this catalog.
+                // UnsupportedOperationException: catalog does not support connections.
+                return Optional.empty();
+            }
+        } else {
+            return Optional.empty();
+        }
+    }
+
+    /** Get a connection from the catalog with contextual metadata. */
+    public Optional<ContextResolvedConnection> getResolvedConnection(
+            ObjectIdentifier objectIdentifier) {
+        return getConnection(objectIdentifier)
+                .map(
+                        connection ->
+                                ContextResolvedConnection.of(
+                                        objectIdentifier,
+                                        connection,
+                                        temporaryConnections.containsKey(objectIdentifier)));
+    }
+
+    /**
+     * List all connections in the given catalog and database.
+     *
+     * @param catalogName The name of the catalog.
+     * @param databaseName The name of the database.
+     * @return A set of connection names.
+     */
+    public Set<String> listConnections(String catalogName, String databaseName) {
+        Catalog catalog = getCatalogOrError(catalogName);
+        try {
+            Set<String> connections = new HashSet<>(catalog.listConnections(databaseName));
+
+            // Add temporary connections for this catalog and database
+            temporaryConnections.keySet().stream()
+                    .filter(
+                            identifier ->
+                                    identifier.getCatalogName().equals(catalogName)
+                                            && identifier.getDatabaseName().equals(databaseName))
+                    .map(ObjectIdentifier::getObjectName)
+                    .forEach(connections::add);
+
+            return connections;
+        } catch (DatabaseNotExistException e) {
+            throw new ValidationException(
+                    String.format(
+                            "Database '%s' does not exist in catalog '%s'.",
+                            databaseName, catalogName),
+                    e);
+        } catch (CatalogException e) {
+            throw new TableException(
+                    String.format(
+                            "Failed to list connections in catalog '%s' and database '%s'.",
+                            catalogName, databaseName),
+                    e);
+        }
+    }
+
+    /**
+     * Create a permanent connection in the given fully qualified path.
+     *
+     * <p>The {@link ConnectionFactory} is discovered from the connection's {@code type} option (see
+     * FLIP-529). If a {@link WritableSecretStore} is configured, sensitive fields are extracted
+     * from the connection and stored in the secret store before persisting the non-sensitive {@link
+     * CatalogConnection} to the catalog.
+     *
+     * @param connection The connection with all options including sensitive fields.
+     * @param objectIdentifier The fully qualified path where to create the connection.
+     * @param ignoreIfExists If false exception will be thrown if the connection already exists.
+     */
+    public void createConnection(
+            SensitiveConnection connection,
+            ObjectIdentifier objectIdentifier,
+            boolean ignoreIfExists) {
+        if (writableSecretStore == null) {
+            throw new ValidationException(
+                    "WritableSecretStore must be configured to create connections.");
+        }
+        if (getConnection(objectIdentifier).isPresent()) {
+            if (ignoreIfExists) {
+                return;
+            }
+            throw new ValidationException(
+                    String.format(
+                            "Connection with identifier '%s' already exists.",
+                            objectIdentifier.asSummaryString()));
+        }
+        final ConnectionFactory connectionFactory =
+                discoverConnectionFactory(connection.getOptions());
+        final CatalogConnection catalogConnection =
+                connectionFactory.createConnection(connection, writableSecretStore);
+        boolean persisted = false;
+        try {
+            execute(
+                    (catalog, path) -> {
+                        catalog.createConnection(path, catalogConnection, ignoreIfExists);
+                        catalogModificationListeners.forEach(
+                                listener ->
+                                        listener.onEvent(
+                                                CreateConnectionEvent.createEvent(
+                                                        CatalogContext.createContext(
+                                                                objectIdentifier.getCatalogName(),
+                                                                catalog),
+                                                        objectIdentifier,
+                                                        catalogConnection,
+                                                        ignoreIfExists,
+                                                        false)));
+                    },
+                    objectIdentifier,
+                    ignoreIfExists,
+                    "CreateConnection");
+            persisted = true;
+        } finally {
+            if (!persisted) {
+                tryDeleteSecrets(
+                        catalogConnection,
+                        writableSecretStore,
+                        "rollback createConnection " + objectIdentifier);
+            }
+        }
+    }
+
+    /**
+     * Create a temporary connection in the given fully qualified path.
+     *
+     * @param connection The connection with all options including sensitive fields.
+     * @param objectIdentifier The fully qualified path where to create the connection.
+     * @param ignoreIfExists If false exception will be thrown if the connection already exists.
+     */
+    public void createTemporaryConnection(
+            SensitiveConnection connection,
+            ObjectIdentifier objectIdentifier,
+            boolean ignoreIfExists) {
+        if (temporaryConnections.containsKey(objectIdentifier)) {
+            if (ignoreIfExists) {
+                return;
+            }
+            throw new ValidationException(
+                    String.format("Temporary connection '%s' already exists.", objectIdentifier));
+        }
+        // Temporary connections are session-scoped; store secrets in an in-memory store rather
+        // than the configured (potentially persistent) writableSecretStore.
+        final ConnectionFactory connectionFactory =
+                discoverConnectionFactory(connection.getOptions());
+        final CatalogConnection catalogConnection =
+                connectionFactory.createConnection(connection, temporarySecretStore);
+        temporaryConnections.put(objectIdentifier, catalogConnection);
+        Catalog catalog = getCatalog(objectIdentifier.getCatalogName()).orElse(null);
+        catalogModificationListeners.forEach(
+                listener ->
+                        listener.onEvent(
+                                CreateConnectionEvent.createEvent(
+                                        CatalogContext.createContext(
+                                                objectIdentifier.getCatalogName(), catalog),
+                                        objectIdentifier,
+                                        catalogConnection,
+                                        ignoreIfExists,
+                                        true)));
+    }
+
+    /**
+     * Alter a connection in the given fully qualified path.
+     *
+     * @param newConnection The new connection containing changes.
+     * @param objectIdentifier The fully qualified path where to alter the connection.
+     * @param ignoreIfNotExists If false exception will be thrown if the connection to be altered
+     *     does not exist.
+     */
+    public void alterConnection(
+            SensitiveConnection newConnection,
+            ObjectIdentifier objectIdentifier,
+            boolean ignoreIfNotExists) {
+        if (writableSecretStore == null) {
+            throw new ValidationException(
+                    "WritableSecretStore must be configured to alter connections.");
+        }
+        Optional<CatalogConnection> existingOpt = getConnection(objectIdentifier);
+        if (!existingOpt.isPresent()) {
+            if (ignoreIfNotExists) {
+                return;
+            }
+            throw new ValidationException(
+                    String.format(
+                            "Connection with identifier '%s' does not exist.",
+                            objectIdentifier.asSummaryString()));
+        }
+        final CatalogConnection existing = existingOpt.get();
+        final ConnectionFactory connectionFactory =
+                discoverConnectionFactory(newConnection.getOptions());
+        final CatalogConnection newCatalogConnection =
+                connectionFactory.createConnection(newConnection, writableSecretStore);
+        boolean persisted = false;
+        try {
+            execute(
+                    (catalog, path) -> {
+                        catalog.alterConnection(path, newCatalogConnection, ignoreIfNotExists);
+                        catalogModificationListeners.forEach(
+                                listener ->
+                                        listener.onEvent(
+                                                AlterConnectionEvent.createEvent(
+                                                        CatalogContext.createContext(
+                                                                objectIdentifier.getCatalogName(),
+                                                                catalog),
+                                                        objectIdentifier,
+                                                        newCatalogConnection,
+                                                        ignoreIfNotExists)));
+                    },
+                    objectIdentifier,
+                    ignoreIfNotExists,
+                    "AlterConnection");
+            persisted = true;
+        } finally {
+            // On success: drop the OLD secret. On failure: drop the freshly-stored NEW secret.
+            tryDeleteSecrets(
+                    persisted ? existing : newCatalogConnection,
+                    writableSecretStore,
+                    persisted
+                            ? "post-alter cleanup of old secret for " + objectIdentifier
+                            : "rollback alterConnection " + objectIdentifier);
+        }
+    }
+
+    /**
+     * Drop a permanent connection from the given fully qualified path.
+     *
+     * @param objectIdentifier The fully qualified path of the connection to be dropped.
+     * @param ignoreIfNotExists If false exception will be thrown if the connection to be dropped
+     *     does not exist.
+     */
+    public void dropConnection(ObjectIdentifier objectIdentifier, boolean ignoreIfNotExists) {
+        Optional<CatalogConnection> existingOpt = getConnection(objectIdentifier);
+        if (!existingOpt.isPresent()) {
+            if (ignoreIfNotExists) {
+                return;
+            }
+            throw new ValidationException(
+                    String.format(
+                            "Connection with identifier '%s' does not exist.",
+                            objectIdentifier.asSummaryString()));
+        }
+        final CatalogConnection existing = existingOpt.get();
+        execute(
+                (catalog, path) -> {
+                    catalog.dropConnection(path, ignoreIfNotExists);
+                    catalogModificationListeners.forEach(
+                            listener ->
+                                    listener.onEvent(
+                                            DropConnectionEvent.createEvent(
+                                                    CatalogContext.createContext(
+                                                            objectIdentifier.getCatalogName(),
+                                                            catalog),
+                                                    objectIdentifier,
+                                                    existing,
+                                                    ignoreIfNotExists,
+                                                    false)));
+                },
+                objectIdentifier,
+                ignoreIfNotExists,
+                "DropConnection");
+        if (writableSecretStore != null) {
+            tryDeleteSecrets(
+                    existing, writableSecretStore, "post-drop cleanup for " + objectIdentifier);
+        }
+    }
+
+    /**
+     * Drop a temporary connection from the given fully qualified path.
+     *
+     * @param objectIdentifier The fully qualified path of the connection to be dropped.
+     * @param ignoreIfNotExists If false exception will be thrown if the connection to be dropped
+     *     does not exist.
+     */
+    public void dropTemporaryConnection(
+            ObjectIdentifier objectIdentifier, boolean ignoreIfNotExists) {
+        CatalogConnection connection = temporaryConnections.get(objectIdentifier);
+        if (connection != null) {
+            temporaryConnections.remove(objectIdentifier);
+            Catalog catalog = getCatalog(objectIdentifier.getCatalogName()).orElse(null);
+            catalogModificationListeners.forEach(
+                    listener ->
+                            listener.onEvent(
+                                    DropConnectionEvent.createEvent(
+                                            CatalogContext.createContext(
+                                                    objectIdentifier.getCatalogName(), catalog),
+                                            objectIdentifier,
+                                            connection,
+                                            ignoreIfNotExists,
+                                            true)));
+            tryDeleteSecrets(
+                    connection,
+                    temporarySecretStore,
+                    "post-drop cleanup of temporary " + objectIdentifier);
+        } else if (!ignoreIfNotExists) {
+            throw new ValidationException(
+                    String.format(
+                            "Temporary connection with identifier '%s' does not exist.",
+                            objectIdentifier.asSummaryString()));
+        }
+    }
+
+    /**
+     * Best-effort cleanup of a connection's secrets. The catalog state has already been mutated (or
+     * failed); a cleanup failure should not mask the user-visible result. Logs the failure (which
+     * may indicate an orphaned secret in the underlying store) and swallows the exception.
+     */
+    private void tryDeleteSecrets(
+            CatalogConnection connection, WritableSecretStore store, String context) {
+        try {
+            discoverConnectionFactory(connection.getOptions()).deleteSecrets(connection, store);
+        } catch (SecretException | ValidationException e) {
+            LOG.warn(
+                    "Failed to delete connection secrets during {}; the catalog state is correct, but the secret may be orphaned in the secret store.",
+                    context,
+                    e);
+        }
+    }
+
     /**
      * A command that modifies given {@link Catalog} in an {@link ObjectPath}. This unifies error
      * handling across different commands.
@@ -1801,6 +2255,8 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                     | TableNotExistException
                     | ModelNotExistException
                     | ModelAlreadyExistException
+                    | ConnectionNotExistException
+                    | ConnectionAlreadyExistException
                     | DatabaseNotExistException e) {
                 throw new ValidationException(getErrorMessage(objectIdentifier, commandName), e);
             } catch (Exception e) {
@@ -1818,13 +2274,27 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
 
     /** Resolves a {@link CatalogBaseTable} to a validated {@link ResolvedCatalogBaseTable}. */
     public ResolvedCatalogBaseTable<?> resolveCatalogBaseTable(CatalogBaseTable baseTable) {
+        return resolveCatalogBaseTable(baseTable, null);
+    }
+
+    /**
+     * Resolves a {@link CatalogBaseTable} to a validated {@link ResolvedCatalogBaseTable}.
+     *
+     * @param baseTable the table to resolve
+     * @param objectIdentifier the identifier the table is stored under, used to resolve unqualified
+     *     references in a {@link CatalogView}'s expanded query against the view's own
+     *     catalog/database; may be {@code null} when unknown, in which case the current session
+     *     catalog/database is used
+     */
+    public ResolvedCatalogBaseTable<?> resolveCatalogBaseTable(
+            CatalogBaseTable baseTable, @Nullable ObjectIdentifier objectIdentifier) {
         Preconditions.checkNotNull(schemaResolver, "Schema resolver is not initialized.");
         if (baseTable instanceof CatalogTable) {
             return resolveCatalogTable((CatalogTable) baseTable);
         } else if (baseTable instanceof CatalogMaterializedTable) {
             return resolveCatalogMaterializedTable((CatalogMaterializedTable) baseTable);
         } else if (baseTable instanceof CatalogView) {
-            return resolveCatalogView((CatalogView) baseTable);
+            return resolveCatalogView((CatalogView) baseTable, objectIdentifier);
         }
         throw new IllegalArgumentException(
                 "Unknown kind of catalog base table: " + baseTable.getClass());
@@ -1912,6 +2382,7 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                 this.materializedTableEnricher.enrich(table);
         IntervalFreshness freshness = enrichmentResult.getFreshness();
         RefreshMode resolvedRefreshMode = enrichmentResult.getRefreshMode();
+        StartMode startMode = enrichmentResult.getStartMode();
 
         // Validate partition keys are included in physical columns
         final List<String> physicalColumns =
@@ -1933,11 +2404,26 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                         });
 
         return new ResolvedCatalogMaterializedTable(
-                table, resolvedSchema, resolvedRefreshMode, freshness);
+                table, resolvedSchema, resolvedRefreshMode, freshness, startMode);
     }
 
     /** Resolves a {@link CatalogView} to a validated {@link ResolvedCatalogView}. */
     public ResolvedCatalogView resolveCatalogView(CatalogView view) {
+        return resolveCatalogView(view, null);
+    }
+
+    /**
+     * Resolves a {@link CatalogView} to a validated {@link ResolvedCatalogView}.
+     *
+     * @param view the view to resolve
+     * @param viewIdentifier the identifier the view is stored under. When non-{@code null}, the
+     *     view's expanded query is parsed against the view's own catalog/database so that
+     *     unqualified references resolve hermetically (see FLIP-71) instead of falling back to the
+     *     current session database. When {@code null}, the current session catalog/database is
+     *     used.
+     */
+    public ResolvedCatalogView resolveCatalogView(
+            CatalogView view, @Nullable ObjectIdentifier viewIdentifier) {
         Preconditions.checkNotNull(schemaResolver, "Schema resolver is not initialized.");
         if (view instanceof ResolvedCatalogView) {
             return (ResolvedCatalogView) view;
@@ -1952,7 +2438,7 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
         final ResolvedSchema resolvedSchema = view.getUnresolvedSchema().resolve(schemaResolver);
         final List<Operation> parse;
         try {
-            parse = parser.parse(view.getExpandedQuery());
+            parse = parseViewQuery(view.getExpandedQuery(), viewIdentifier);
         } catch (Throwable e) {
             // in case of a failure during parsing, let the lower layers fail
             return new ResolvedCatalogView(view, resolvedSchema);
@@ -1984,11 +2470,37 @@ public final class CatalogManager implements CatalogRegistry, AutoCloseable {
                                     .collect(Collectors.toList()),
                             resolvedSchema.getWatermarkSpecs(),
                             resolvedSchema.getPrimaryKey().orElse(null),
-                            resolvedSchema.getIndexes());
+                            resolvedSchema.getIndexes(),
+                            resolvedSchema.getImmutableColumns().orElse(null));
             return new ResolvedCatalogView(
                     // pass a view that has the query parsed and
                     // validated already
                     new QueryOperationCatalogView(operation, view), renamedQuerySchema);
+        }
+    }
+
+    /**
+     * Parses a view's expanded query. When {@code viewIdentifier} is non-{@code null}, parsing
+     * happens with the current catalog/database temporarily switched to the view's own
+     * catalog/database, so that unqualified references in the query resolve hermetically against
+     * the view rather than falling back to the current session database (FLIP-71). External
+     * catalogs (e.g. Iceberg) may return portable, unqualified SQL from {@link
+     * CatalogView#getExpandedQuery()} for which this matters.
+     */
+    private List<Operation> parseViewQuery(
+            String expandedQuery, @Nullable ObjectIdentifier viewIdentifier) {
+        if (viewIdentifier == null) {
+            return parser.parse(expandedQuery);
+        }
+        final String savedCurrentCatalog = currentCatalogName;
+        final String savedCurrentDatabase = currentDatabaseName;
+        try {
+            currentCatalogName = viewIdentifier.getCatalogName();
+            currentDatabaseName = viewIdentifier.getDatabaseName();
+            return parser.parse(expandedQuery);
+        } finally {
+            currentCatalogName = savedCurrentCatalog;
+            currentDatabaseName = savedCurrentDatabase;
         }
     }
 

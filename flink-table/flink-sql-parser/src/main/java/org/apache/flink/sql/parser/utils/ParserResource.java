@@ -54,11 +54,16 @@ public interface ParserResource {
     Resources.ExInst<ParseException> explainCreateOrReplaceStatementUnsupported();
 
     @Resources.BaseMessage(
+            "Unsupported ALTER MATERIALIZED TABLE statement for EXPLAIN. The statement must define a query using the AS clause.")
+    Resources.ExInst<ParseException> explainAlterMaterializedTableUnsupported();
+
+    @Resources.BaseMessage(
             "Columns identifiers without types in the schema are supported on CTAS/RTAS statements only.")
     Resources.ExInst<ParseException> columnsIdentifiersUnsupported();
 
-    @Resources.BaseMessage("CREATE FUNCTION USING JAR syntax is not applicable to {0} language.")
-    Resources.ExInst<ParseException> createFunctionUsingJar(String language);
+    @Resources.BaseMessage(
+            "CREATE FUNCTION USING JAR/ARTIFACT syntax is not applicable to {0} language.")
+    Resources.ExInst<ParseException> createFunction(String language);
 
     @Resources.BaseMessage("WITH DRAIN could only be used after WITH SAVEPOINT.")
     Resources.ExInst<ParseException> withDrainOnlyUsedWithSavepoint();
@@ -70,6 +75,10 @@ public interface ParserResource {
             "MATERIALIZED TABLE only supports define interval type FRESHNESS, please refer to the materialized table document.")
     Resources.ExInst<ParseException> unsupportedFreshnessType();
 
+    @Resources.BaseMessage(
+            "START_MODE literal must be an interval for FROM_NOW and RESUME_OR_FROM_NOW modes.")
+    Resources.ExInst<ParseException> unsupportedStartModeType();
+
     @Resources.BaseMessage("CREATE TEMPORARY MATERIALIZED TABLE is not supported.")
     Resources.ExInst<ParseException> createTemporaryMaterializedTableUnsupported();
 
@@ -78,4 +87,8 @@ public interface ParserResource {
 
     @Resources.BaseMessage("DROP TEMPORARY MATERIALIZED TABLE is not supported.")
     Resources.ExInst<ParseException> dropTemporaryMaterializedTableUnsupported();
+
+    @Resources.BaseMessage(
+            "USING CONNECTION clause is not supported with CREATE TABLE AS SELECT or REPLACE TABLE AS SELECT statements.")
+    Resources.ExInst<ParseException> usingConnectionWithAsUnsupported();
 }

@@ -38,6 +38,7 @@ import org.apache.flink.runtime.rpc.RpcService;
 import org.apache.flink.runtime.rpc.RpcSystem;
 import org.apache.flink.runtime.taskexecutor.slot.SlotNotFoundException;
 import org.apache.flink.runtime.taskexecutor.slot.TaskSlotTable;
+import org.apache.flink.util.OperatingSystem;
 import org.apache.flink.util.Preconditions;
 
 import org.slf4j.Logger;
@@ -56,6 +57,7 @@ import java.lang.management.ClassLoadingMXBean;
 import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryPoolMXBean;
+import java.lang.management.MemoryType;
 import java.lang.management.MemoryUsage;
 import java.lang.management.ThreadMXBean;
 import java.time.Duration;
@@ -84,9 +86,13 @@ public class MetricUtils {
 
     @VisibleForTesting static final String METRIC_GROUP_MEMORY = "Memory";
 
+    @VisibleForTesting static final String METRIC_GROUP_POOL_NAME = "Pool";
+
     @VisibleForTesting static final String METRIC_GROUP_MANAGED_MEMORY = "Managed";
     private static final String WRITER_SUFFIX = ": " + ConfigConstants.WRITER_NAME;
     private static final String COMMITTER_SUFFIX = ": " + ConfigConstants.COMMITTER_NAME;
+
+    private static Boolean fileDescriptorWarningShown = false;
 
     private MetricUtils() {}
 
@@ -260,6 +266,7 @@ public class MetricUtils {
         instantiateHeapMemoryMetrics(metrics.addGroup(METRIC_GROUP_HEAP_NAME));
         instantiateNonHeapMemoryMetrics(metrics.addGroup(METRIC_GROUP_NONHEAP_NAME));
         instantiateMetaspaceMemoryMetrics(metrics);
+        instantiateMemoryPoolMetrics(metrics.addGroup(METRIC_GROUP_POOL_NAME));
 
         final MBeanServer con = ManagementFactory.getPlatformMBeanServer();
 
@@ -339,7 +346,38 @@ public class MetricUtils {
         }
     }
 
+    @VisibleForTesting
+    static void instantiateMemoryPoolMetrics(MetricGroup metrics) {
+        for (final MemoryPoolMXBean pool : ManagementFactory.getMemoryPoolMXBeans()) {
+            if (pool.getType() != MemoryType.HEAP) {
+                continue;
+            }
+            final MetricGroup poolGroup = metrics.addGroup(pool.getName());
+            poolGroup.<Long, Gauge<Long>>gauge("Used", () -> usageUsed(pool.getUsage()));
+            poolGroup.<Long, Gauge<Long>>gauge("Max", () -> usageMax(pool.getUsage()));
+            poolGroup.<Long, Gauge<Long>>gauge(
+                    "CollectionUsed", () -> usageUsed(pool.getCollectionUsage()));
+            poolGroup.<Long, Gauge<Long>>gauge(
+                    "CollectionMax", () -> usageMax(pool.getCollectionUsage()));
+        }
+    }
+
+    private static long usageUsed(MemoryUsage usage) {
+        return usage == null ? -1L : usage.getUsed();
+    }
+
+    private static long usageMax(MemoryUsage usage) {
+        return usage == null ? -1L : usage.getMax();
+    }
+
     static void instantiateFileDescriptorMetrics(MetricGroup metrics) {
+        if (OperatingSystem.isWindows()) {
+            if (!fileDescriptorWarningShown) {
+                fileDescriptorWarningShown = true;
+                LOG.info("Running on Windows, FileDescriptor metrics will not be available.");
+            }
+            return;
+        }
         try {
             final com.sun.management.OperatingSystemMXBean mxBean =
                     (com.sun.management.OperatingSystemMXBean)

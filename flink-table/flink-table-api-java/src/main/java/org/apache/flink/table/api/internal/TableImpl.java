@@ -498,6 +498,11 @@ public class TableImpl implements Table {
     }
 
     @Override
+    public Table fromChangelog(Expression... arguments) {
+        return process(BuiltInFunctionDefinitions.FROM_CHANGELOG.getName(), (Object[]) arguments);
+    }
+
+    @Override
     public ApiExpression asArgument(String name) {
         return createArgumentExpression(operationTree, tableEnvironment, name);
     }
@@ -512,6 +517,11 @@ public class TableImpl implements Table {
     public Table process(Class<? extends UserDefinedFunction> function, Object... arguments) {
         return tableEnvironment.fromCall(
                 function, unionTableAndArguments(operationTree, tableEnvironment, arguments));
+    }
+
+    @Override
+    public Table toChangelog(Expression... arguments) {
+        return process(BuiltInFunctionDefinitions.TO_CHANGELOG.getName(), (Object[]) arguments);
     }
 
     private TablePipeline insertInto(
@@ -873,16 +883,27 @@ public class TableImpl implements Table {
 
         private final TableImpl table;
         private final List<Expression> partitionKeys;
+        private final List<Expression> orderKeys;
 
         private PartitionedTableImpl(TableImpl table, List<Expression> partitionKeys) {
+            this(table, partitionKeys, Collections.emptyList());
+        }
+
+        private PartitionedTableImpl(
+                TableImpl table, List<Expression> partitionKeys, List<Expression> orderKeys) {
             this.table = table;
             this.partitionKeys = partitionKeys;
+            this.orderKeys = orderKeys;
+        }
+
+        @Override
+        public PartitionedTable orderBy(Expression... fields) {
+            return new PartitionedTableImpl(table, partitionKeys, Arrays.asList(fields));
         }
 
         @Override
         public ApiExpression asArgument(String name) {
-            return createArgumentExpression(
-                    createPartitionQueryOperation(), table.tableEnvironment, name);
+            return createArgumentExpression(createQueryOperation(), table.tableEnvironment, name);
         }
 
         @Override
@@ -890,7 +911,7 @@ public class TableImpl implements Table {
             return table.tableEnvironment.fromCall(
                     path,
                     unionTableAndArguments(
-                            createPartitionQueryOperation(), table.tableEnvironment, arguments));
+                            createQueryOperation(), table.tableEnvironment, arguments));
         }
 
         @Override
@@ -898,11 +919,26 @@ public class TableImpl implements Table {
             return table.tableEnvironment.fromCall(
                     function,
                     unionTableAndArguments(
-                            createPartitionQueryOperation(), table.tableEnvironment, arguments));
+                            createQueryOperation(), table.tableEnvironment, arguments));
         }
 
-        private QueryOperation createPartitionQueryOperation() {
-            return table.operationTreeBuilder.partition(partitionKeys, table.operationTree);
+        @Override
+        public Table toChangelog(final Expression... arguments) {
+            return process(BuiltInFunctionDefinitions.TO_CHANGELOG.getName(), (Object[]) arguments);
+        }
+
+        @Override
+        public Table fromChangelog(final Expression... arguments) {
+            return process(
+                    BuiltInFunctionDefinitions.FROM_CHANGELOG.getName(), (Object[]) arguments);
+        }
+
+        private QueryOperation createQueryOperation() {
+            if (orderKeys.isEmpty()) {
+                return table.operationTreeBuilder.partition(partitionKeys, table.operationTree);
+            }
+            return table.operationTreeBuilder.partition(
+                    partitionKeys, orderKeys, table.operationTree);
         }
     }
 

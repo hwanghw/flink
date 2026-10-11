@@ -18,7 +18,9 @@
 
 package org.apache.flink.runtime.taskexecutor;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.configuration.ThreadDumpMode;
 import org.apache.flink.runtime.blob.BlobServer;
 import org.apache.flink.runtime.blob.TransientBlobKey;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
@@ -61,6 +63,7 @@ public interface TaskExecutorGateway
      *
      * @param slotId slot id for the request
      * @param jobId for which to request a slot
+     * @param applicationId to which the job belongs
      * @param allocationId id for the request
      * @param resourceProfile of requested slot, used only for dynamic slot allocation and will be
      *     ignored otherwise
@@ -72,6 +75,7 @@ public interface TaskExecutorGateway
     CompletableFuture<Acknowledge> requestSlot(
             SlotID slotId,
             JobID jobId,
+            ApplicationID applicationId,
             AllocationID allocationId,
             ResourceProfile resourceProfile,
             String targetAddress,
@@ -303,10 +307,12 @@ public interface TaskExecutorGateway
     /**
      * Requests the thread dump from this TaskManager.
      *
+     * @param mode dump granularity; when {@code null} the cluster default is used.
      * @param timeout timeout for the asynchronous operation
      * @return the {@link ThreadDumpInfo} for this TaskManager.
      */
-    CompletableFuture<ThreadDumpInfo> requestThreadDump(@RpcTimeout Duration timeout);
+    CompletableFuture<ThreadDumpInfo> requestThreadDump(
+            ThreadDumpMode mode, @RpcTimeout Duration timeout);
 
     /**
      * Sends new delegation tokens to this TaskManager.

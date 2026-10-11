@@ -24,6 +24,7 @@ import org.apache.flink.table.gateway.api.utils.SqlGatewayException;
 import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.BinaryType;
+import org.apache.flink.table.types.logical.BitmapType;
 import org.apache.flink.table.types.logical.BooleanType;
 import org.apache.flink.table.types.logical.CharType;
 import org.apache.flink.table.types.logical.DateType;
@@ -45,6 +46,7 @@ import org.apache.flink.table.types.logical.SmallIntType;
 import org.apache.flink.table.types.logical.TimeType;
 import org.apache.flink.table.types.logical.TimestampType;
 import org.apache.flink.table.types.logical.TinyIntType;
+import org.apache.flink.table.types.logical.UuidType;
 import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.table.types.logical.VariantType;
@@ -162,6 +164,10 @@ public final class LogicalTypeJsonDeserializer extends StdDeserializer<LogicalTy
                 return deserializeRaw(logicalTypeNode).copy(isNullable);
             case VARIANT:
                 return new VariantType(isNullable);
+            case BITMAP:
+                return new BitmapType(isNullable);
+            case UUID:
+                return new UuidType(isNullable);
             default:
                 throw new UnsupportedOperationException(
                         String.format(

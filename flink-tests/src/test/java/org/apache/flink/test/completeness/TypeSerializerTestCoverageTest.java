@@ -31,6 +31,7 @@ import org.apache.flink.api.common.typeutils.base.LocalDateTimeSerializer;
 import org.apache.flink.api.common.typeutils.base.LocalTimeSerializer;
 import org.apache.flink.api.common.typeutils.base.NullValueSerializer;
 import org.apache.flink.api.common.typeutils.base.SetSerializer;
+import org.apache.flink.api.common.typeutils.base.UuidSerializer;
 import org.apache.flink.api.common.typeutils.base.VoidSerializer;
 import org.apache.flink.api.common.typeutils.base.array.BooleanPrimitiveArraySerializer;
 import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
@@ -43,6 +44,7 @@ import org.apache.flink.api.common.typeutils.base.array.ShortPrimitiveArraySeria
 import org.apache.flink.api.common.typeutils.base.array.StringArraySerializer;
 import org.apache.flink.api.java.typeutils.runtime.CopyableValueSerializer;
 import org.apache.flink.api.java.typeutils.runtime.EitherSerializer;
+import org.apache.flink.api.java.typeutils.runtime.NullableSerializer;
 import org.apache.flink.api.java.typeutils.runtime.RowSerializer;
 import org.apache.flink.api.java.typeutils.runtime.Tuple0Serializer;
 import org.apache.flink.api.java.typeutils.runtime.TupleSerializer;
@@ -73,6 +75,7 @@ import org.apache.flink.table.dataview.ListViewSerializer;
 import org.apache.flink.table.dataview.MapViewSerializer;
 import org.apache.flink.table.dataview.NullAwareMapSerializer;
 import org.apache.flink.table.dataview.NullSerializer;
+import org.apache.flink.table.runtime.operators.sink.SortedLongSerializer;
 import org.apache.flink.table.runtime.operators.window.CountWindow;
 import org.apache.flink.table.runtime.sequencedmultisetstate.linked.MetaSqnInfoSerializer;
 import org.apache.flink.table.runtime.sequencedmultisetstate.linked.NodeSerializer;
@@ -90,9 +93,10 @@ import org.apache.flink.table.runtime.typeutils.SortedMapSerializer;
 import org.apache.flink.table.runtime.typeutils.StringDataSerializer;
 import org.apache.flink.table.runtime.typeutils.TimestampDataSerializer;
 import org.apache.flink.table.runtime.typeutils.WindowKeySerializer;
-import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.TestLoggerExtension;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.reflections.Reflections;
 
 import java.lang.reflect.Modifier;
@@ -101,13 +105,14 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import static org.junit.Assert.fail;
+import static org.assertj.core.api.Assertions.fail;
 
 /** Scans the class path for type serializer and checks if there is a test for it. */
-public class TypeSerializerTestCoverageTest extends TestLogger {
+@ExtendWith(TestLoggerExtension.class)
+class TypeSerializerTestCoverageTest {
 
     @Test
-    public void testTypeSerializerTestCoverage() {
+    void testTypeSerializerTestCoverage() {
         final Reflections reflections = new Reflections("org.apache.flink");
 
         final Set<Class<? extends TypeSerializer>> typeSerializers =
@@ -137,6 +142,7 @@ public class TypeSerializerTestCoverageTest extends TestLogger {
                         SingleThreadAccessCheckingTypeSerializer.class.getName(),
                         GenericArraySerializer.class.getName(),
                         NullValueSerializer.class.getName(),
+                        NullableSerializer.class.getName(),
                         Tuple0Serializer.class.getName(),
                         CopyableValueSerializer.class.getName(),
                         VoidSerializer.class.getName(),
@@ -263,7 +269,9 @@ public class TypeSerializerTestCoverageTest extends TestLogger {
                         NodeSerializer.class.getName(),
                         RowSqnInfoSerializer.class.getName(),
                         MetaSqnInfoSerializer.class.getName(),
-                        SetSerializer.class.getName());
+                        SetSerializer.class.getName(),
+                        SortedLongSerializer.class.getName(),
+                        UuidSerializer.class.getName());
 
         // check if a test exists for each type serializer
         for (Class<? extends TypeSerializer> typeSerializer : typeSerializers) {

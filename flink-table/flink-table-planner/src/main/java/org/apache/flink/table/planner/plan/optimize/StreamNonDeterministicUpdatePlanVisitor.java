@@ -26,6 +26,7 @@ import org.apache.flink.table.connector.source.abilities.SupportsReadingMetadata
 import org.apache.flink.table.legacy.api.TableSchema;
 import org.apache.flink.table.legacy.api.constraints.UniqueConstraint;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
+import org.apache.flink.table.planner.calcite.RexTableArgCall;
 import org.apache.flink.table.planner.connectors.DynamicSourceUtils;
 import org.apache.flink.table.planner.plan.metadata.FlinkRelMetadataQuery;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.OverSpec;
@@ -39,6 +40,7 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalD
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalExchange;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalExpand;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupAggregateBase;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLateralSnapshotJoin;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLegacySink;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLegacyTableSourceScan;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalLimit;
@@ -48,6 +50,7 @@ import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalM
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalMiniBatchAssigner;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalMultiJoin;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalOverAggregateBase;
+import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalProcessTableFunction;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRank;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalRel;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalSink;
@@ -75,12 +78,16 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
 import org.apache.flink.table.runtime.operators.join.FlinkJoinType;
 import org.apache.flink.table.runtime.operators.join.stream.utils.JoinInputSideSpec;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
+import org.apache.flink.table.types.inference.StaticArgument;
+import org.apache.flink.table.types.inference.StaticArgumentTrait;
 import org.apache.flink.types.RowKind;
 
+import org.apache.calcite.linq4j.Ord;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexProgram;
 import org.apache.calcite.sql.SqlExplainLevel;
@@ -202,8 +209,10 @@ public class StreamNonDeterministicUpdatePlanVisitor {
         } else if (rel instanceof StreamPhysicalMLPredictTableFunction) {
             return visitMLPredictTableFunction(
                     (StreamPhysicalMLPredictTableFunction) rel, requireDeterminism);
-        } else if (rel instanceof StreamPhysicalChangelogNormalize
-                || rel instanceof StreamPhysicalDropUpdateBefore
+        } else if (rel instanceof StreamPhysicalChangelogNormalize) {
+            return visitChangelogNormalize(
+                    (StreamPhysicalChangelogNormalize) rel, requireDeterminism);
+        } else if (rel instanceof StreamPhysicalDropUpdateBefore
                 || rel instanceof StreamPhysicalMiniBatchAssigner
                 || rel instanceof StreamPhysicalUnion
                 || rel instanceof StreamPhysicalSort
@@ -216,6 +225,8 @@ public class StreamNonDeterministicUpdatePlanVisitor {
             return transmitDeterminismRequirement(rel, requireDeterminism);
         } else if (rel instanceof StreamPhysicalMatch) {
             return visitMatch((StreamPhysicalMatch) rel, requireDeterminism);
+        } else if (rel instanceof StreamPhysicalProcessTableFunction) {
+            return visitPtf((StreamPhysicalProcessTableFunction) rel, requireDeterminism);
         } else {
             throw new UnsupportedOperationException(
                     String.format(
@@ -340,6 +351,21 @@ public class StreamNonDeterministicUpdatePlanVisitor {
                     "ML_PREDICT", predictTableFunction.getMLPredictCall(), predictTableFunction);
         }
         return transmitDeterminismRequirement(predictTableFunction, NO_REQUIRED_DETERMINISM);
+    }
+
+    /**
+     * ChangelogNormalize may have a filter condition pushed down by the optimizer. A
+     * non-deterministic filter (e.g. NOW()) can asymmetrically drop -U and +U records, corrupting
+     * the retract contract for downstream operators.
+     */
+    private StreamPhysicalRel visitChangelogNormalize(
+            final StreamPhysicalChangelogNormalize changelogNormalize,
+            final ImmutableBitSet requireDeterminism) {
+        final RexNode filterCondition = changelogNormalize.filterCondition();
+        if (filterCondition != null) {
+            checkNonDeterministicCondition(filterCondition, changelogNormalize);
+        }
+        return transmitDeterminismRequirement(changelogNormalize, requireDeterminism);
     }
 
     private StreamPhysicalRel visitCorrelate(
@@ -605,6 +631,10 @@ public class StreamNonDeterministicUpdatePlanVisitor {
             throwNonDeterministicConditionError(
                     ndCall.get(), join.getCondition(), (StreamPhysicalRel) join);
         }
+        // The LATERAL SNAPSHOT join keys its build (right) state by the complete build row, so
+        // build retractions are matched by exact row equality. A unique key offers no protection
+        // here: every build column must be deterministic whenever the build side can update.
+        boolean forceRightWholeRowDeterminism = join instanceof StreamPhysicalLateralSnapshotJoin;
         int leftFieldCnt = leftRel.getRowType().getFieldCount();
         StreamPhysicalRel newLeft =
                 visitJoinChild(
@@ -616,7 +646,8 @@ public class StreamNonDeterministicUpdatePlanVisitor {
                         join.joinSpec().getLeftKeys(),
                         // TODO remove this conversion when scala-free was total done.
                         scala.collection.JavaConverters.seqAsJavaList(
-                                join.getUpsertKeys(leftRel, join.joinSpec().getLeftKeys())));
+                                join.getUpsertKeys(leftRel, join.joinSpec().getLeftKeys())),
+                        false);
         StreamPhysicalRel newRight =
                 visitJoinChild(
                         requireDeterminism,
@@ -627,7 +658,8 @@ public class StreamNonDeterministicUpdatePlanVisitor {
                         join.joinSpec().getRightKeys(),
                         // TODO remove this conversion when scala-free was total done.
                         scala.collection.JavaConverters.seqAsJavaList(
-                                join.getUpsertKeys(rightRel, join.joinSpec().getRightKeys())));
+                                join.getUpsertKeys(rightRel, join.joinSpec().getRightKeys())),
+                        forceRightWholeRowDeterminism);
 
         return (StreamPhysicalRel)
                 join.copy(
@@ -905,7 +937,8 @@ public class StreamNonDeterministicUpdatePlanVisitor {
             final int leftFieldCnt,
             final boolean isLeft,
             final int[] joinKeys,
-            final List<int[]> inputUniqueKeys) {
+            final List<int[]> inputUniqueKeys,
+            final boolean forceWholeRowDeterminism) {
         JoinInputSideSpec joinInputSideSpec =
                 JoinUtil.analyzeJoinInput(
                         ShortcutUtils.unwrapClassLoader(rel),
@@ -914,7 +947,11 @@ public class StreamNonDeterministicUpdatePlanVisitor {
                         inputUniqueKeys);
         ImmutableBitSet inputRequireDeterminism;
         if (inputHasUpdate) {
-            if (joinInputSideSpec.hasUniqueKey() || joinInputSideSpec.joinKeyContainsUniqueKey()) {
+            if (forceWholeRowDeterminism) {
+                // the operator retracts by the whole input row regardless of any unique key
+                inputRequireDeterminism = ImmutableBitSet.range(rel.getRowType().getFieldCount());
+            } else if (joinInputSideSpec.hasUniqueKey()
+                    || joinInputSideSpec.joinKeyContainsUniqueKey()) {
                 // join hasUniqueKey or joinKeyContainsUniqueKey, then transmit corresponding
                 // requirement to input
                 if (isLeft) {
@@ -939,6 +976,86 @@ public class StreamNonDeterministicUpdatePlanVisitor {
             inputRequireDeterminism = NO_REQUIRED_DETERMINISM;
         }
         return transmitDeterminismRequirement(rel, inputRequireDeterminism);
+    }
+
+    private StreamPhysicalRel visitPtf(
+            final StreamPhysicalProcessTableFunction ptf,
+            final ImmutableBitSet requireDeterminism) {
+        final RexCall call = ptf.getCall();
+
+        // Concern 1: PTF function itself is non-deterministic and downstream nodes
+        // require determinism.
+        if (!requireDeterminism.isEmpty()) {
+            final Optional<String> ndCall = FlinkRexUtil.getNonDeterministicCallName(call);
+            if (ndCall.isPresent()) {
+                throwNonDeterministicColumnsError(
+                        requireDeterminism.toList(), ptf.getRowType(), ptf, null, ndCall);
+            }
+        }
+
+        if (inputInsertOnly(ptf)) {
+            // No retracts arrive at the PTF input, so input-column determinism does
+            // not affect retract correctness
+            return transmitDeterminismRequirement(ptf, NO_REQUIRED_DETERMINISM);
+        }
+
+        // Concern 2: non-deterministic input columns.
+        // The PTF is a black box: there is no way to project downstream column requirements
+        // (requireDeterminism) back through the PTF's internal computation to determine which
+        // input columns need to be deterministic. requireDeterminism is therefore ignored here.
+        //
+        // A stricter alternative would be to require all input columns to be deterministic
+        // whenever any output column downstream requires it. That avoids the gap described
+        // below but rejects legitimate queries where the PTF does not actually consume the
+        // non-deterministic column, so we keep the lenient behavior.
+        //
+        // Known gap: cases like the one below are not covered today and may produce wrong
+        // results on failover, since the requirement on {@code nb} at the retract sink never
+        // reaches {@code ndFunc(b)} upstream of the PTF.
+        //
+        // <pre>{@code
+        // CREATE VIEW v AS SELECT a, ndFunc(b) AS nb FROM upsert_src;
+        // INSERT INTO retract_sink SELECT * FROM rowPtf(TABLE v);            -- row-semantic
+        // INSERT INTO retract_sink SELECT * FROM setPtf(TABLE v PARTITION BY a); -- set-semantic
+        // }</pre>
+        //
+        // Note: the physical changelog the PTF receives is not solely determined by the
+        // REQUIRE_UPDATE_BEFORE trait. Per the SUPPORT_UPDATES contract, the function receives
+        // {+I,+U,-D} only when the input is upserting on the same key as the partition key;
+        // otherwise it receives full retractions {+I,-U,+U,-D}, including UB messages, even
+        // without REQUIRE_UPDATE_BEFORE. UBs may therefore arrive regardless of the trait.
+        //
+        // What the trait controls is which messages the PTF is contractually allowed to
+        // consume for state management, and that is what drives the determinism requirement:
+        //   - No REQUIRE_UPDATE_BEFORE: the PTF does not consume UBs; retract handling is
+        //     keyed by partition key, so only partition key columns must be deterministic.
+        //     Any non-key columns on an incidentally-delivered UB are not used by the PTF.
+        //   - Has REQUIRE_UPDATE_BEFORE: the PTF explicitly opts in to consuming UB to
+        //     reconstruct the previously processed row; that row must match exactly, so all
+        //     input columns must be deterministic.
+        final List<Ord<StaticArgument>> providedInputArgs =
+                StreamPhysicalProcessTableFunction.getProvidedInputArgs(call);
+        final List<RexNode> operands = call.getOperands();
+
+        final List<RelNode> newInputs = new ArrayList<>();
+        for (int i = 0; i < ptf.getInputs().size(); i++) {
+            final StreamPhysicalRel input = (StreamPhysicalRel) ptf.getInput(i);
+            final StaticArgument staticArg = providedInputArgs.get(i).e;
+            final RexTableArgCall tableArgCall =
+                    (RexTableArgCall) operands.get(providedInputArgs.get(i).i);
+            final ImmutableBitSet inputReq;
+            if (staticArg.is(StaticArgumentTrait.REQUIRE_UPDATE_BEFORE)) {
+                // The PTF consumes UB to reconstruct the previously processed row, which must
+                // match exactly — all input columns must be deterministic.
+                inputReq = ImmutableBitSet.range(input.getRowType().getFieldCount());
+            } else {
+                // The PTF does not consume UB; retract handling is keyed by partition key, so
+                // only partition key columns must be deterministic.
+                inputReq = ImmutableBitSet.of(tableArgCall.getPartitionKeys());
+            }
+            newInputs.add(visit(input, requireDeterminismExcludeUpsertKey(input, inputReq)));
+        }
+        return (StreamPhysicalRel) ptf.copy(ptf.getTraitSet(), newInputs);
     }
 
     private void checkNonDeterministicRexProgram(

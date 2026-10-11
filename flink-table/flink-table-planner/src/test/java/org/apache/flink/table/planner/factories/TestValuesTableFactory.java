@@ -158,6 +158,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -309,6 +310,16 @@ public final class TestValuesTableFactory
         TestValuesRuntimeFunctions.registerLocalRawResultsObserver(tableName, observer);
     }
 
+    /**
+     * Returns a future that completes once source {@code tableName} has emitted at least {@code
+     * targetCount} rows (cumulative across all subtasks). Useful for triggering a savepoint at a
+     * controlled point when the operator under test produces no output yet. For now only wired for
+     * the watermark-push-down {@code NewSource} runtime used by restore tests.
+     */
+    public static CompletableFuture<Void> awaitSourceEmitted(String tableName, int targetCount) {
+        return TestValuesRuntimeFunctions.awaitSourceEmitted(tableName, targetCount);
+    }
+
     public static List<Watermark> getWatermarkOutput(String tableName) {
         return TestValuesRuntimeFunctions.getWatermarks(tableName);
     }
@@ -439,6 +450,9 @@ public final class TestValuesTableFactory
 
     private static final ConfigOption<Boolean> ENABLE_WATERMARK_PUSH_DOWN =
             ConfigOptions.key("enable-watermark-push-down").booleanType().defaultValue(false);
+
+    private static final ConfigOption<Boolean> ENABLE_METADATA_FILTER_PUSH_DOWN =
+            ConfigOptions.key("enable-metadata-filter-push-down").booleanType().defaultValue(false);
 
     private static final ConfigOption<Boolean> ENABLE_CUSTOM_SHUFFLE =
             ConfigOptions.key("enable-custom-shuffle").booleanType().defaultValue(false);
@@ -574,6 +588,8 @@ public final class TestValuesTableFactory
         boolean enableAggregatePushDown = helper.getOptions().get(ENABLE_AGGREGATE_PUSH_DOWN);
         boolean nestedProjectionSupported = helper.getOptions().get(NESTED_PROJECTION_SUPPORTED);
         boolean enableWatermarkPushDown = helper.getOptions().get(ENABLE_WATERMARK_PUSH_DOWN);
+        boolean enableMetadataFilterPushDown =
+                helper.getOptions().get(ENABLE_METADATA_FILTER_PUSH_DOWN);
         boolean failingSource = helper.getOptions().get(FAILING_SOURCE);
         int numElementToSkip = helper.getOptions().get(SOURCE_NUM_ELEMENT_TO_SKIP);
         boolean internalData = helper.getOptions().get(INTERNAL_DATA);
@@ -692,45 +708,53 @@ public final class TestValuesTableFactory
 
             if (disableLookup) {
                 if (enableWatermarkPushDown) {
-                    return new TestValuesScanTableSourceWithWatermarkPushDown(
-                            producedDataType,
-                            changelogMode,
-                            terminating,
-                            runtimeSource,
-                            failingSource,
-                            partition2Rows,
-                            context.getObjectIdentifier().getObjectName(),
-                            nestedProjectionSupported,
-                            null,
-                            Collections.emptyList(),
-                            filterableFieldsSet,
-                            dynamicFilteringFieldsSet,
-                            numElementToSkip,
-                            Long.MAX_VALUE,
-                            partitions,
-                            readableMetadata,
-                            null,
-                            enableAggregatePushDown);
+                    TestValuesScanTableSourceWithWatermarkPushDown source =
+                            new TestValuesScanTableSourceWithWatermarkPushDown(
+                                    producedDataType,
+                                    changelogMode,
+                                    terminating,
+                                    runtimeSource,
+                                    failingSource,
+                                    partition2Rows,
+                                    context.getObjectIdentifier().getObjectName(),
+                                    nestedProjectionSupported,
+                                    null,
+                                    Collections.emptyList(),
+                                    filterableFieldsSet,
+                                    dynamicFilteringFieldsSet,
+                                    numElementToSkip,
+                                    Long.MAX_VALUE,
+                                    partitions,
+                                    readableMetadata,
+                                    null,
+                                    enableAggregatePushDown,
+                                    sleepAfterElements,
+                                    sleepTimeMillis);
+                    source.setEnableMetadataFilterPushDown(enableMetadataFilterPushDown);
+                    return source;
                 } else {
-                    return new TestValuesScanTableSource(
-                            producedDataType,
-                            changelogMode,
-                            boundedness,
-                            terminating,
-                            runtimeSource,
-                            failingSource,
-                            partition2Rows,
-                            nestedProjectionSupported,
-                            null,
-                            Collections.emptyList(),
-                            filterableFieldsSet,
-                            dynamicFilteringFieldsSet,
-                            numElementToSkip,
-                            Long.MAX_VALUE,
-                            partitions,
-                            readableMetadata,
-                            null,
-                            enableAggregatePushDown);
+                    TestValuesScanTableSource source =
+                            new TestValuesScanTableSource(
+                                    producedDataType,
+                                    changelogMode,
+                                    boundedness,
+                                    terminating,
+                                    runtimeSource,
+                                    failingSource,
+                                    partition2Rows,
+                                    nestedProjectionSupported,
+                                    null,
+                                    Collections.emptyList(),
+                                    filterableFieldsSet,
+                                    dynamicFilteringFieldsSet,
+                                    numElementToSkip,
+                                    Long.MAX_VALUE,
+                                    partitions,
+                                    readableMetadata,
+                                    null,
+                                    enableAggregatePushDown);
+                    source.setEnableMetadataFilterPushDown(enableMetadataFilterPushDown);
+                    return source;
                 }
             } else {
                 Collection<Row> consumedData =
@@ -904,6 +928,7 @@ public final class TestValuesTableFactory
                         SINK_CHANGELOG_MODE_ENFORCED,
                         WRITABLE_METADATA,
                         ENABLE_WATERMARK_PUSH_DOWN,
+                        ENABLE_METADATA_FILTER_PUSH_DOWN,
                         SINK_DROP_LATE_EVENT,
                         SINK_BUCKET_COUNT_REQUIRED,
                         SINK_SUPPORTS_DELETE_BY_KEY,
@@ -1088,6 +1113,7 @@ public final class TestValuesTableFactory
         protected final Map<String, DataType> readableMetadata;
         protected @Nullable int[] projectedMetadataFields;
         protected final boolean enableAggregatePushDown;
+        protected boolean enableMetadataFilterPushDown;
 
         private @Nullable int[] groupingSet;
         private List<AggregateExpression> aggregateExpressions;
@@ -1264,22 +1290,21 @@ public final class TestValuesTableFactory
             return Result.of(acceptedFilters, remainingFilters);
         }
 
-        private Function<String, Comparable<?>> getValueGetter(Row row) {
+        private Function<String, Object> getValueGetter(Row row) {
             final List<String> fieldNames = DataTypeUtils.flattenToNames(producedDataType);
             return fieldName -> {
                 int idx = fieldNames.indexOf(fieldName);
-                return (Comparable<?>) row.getField(idx);
+                return row.getField(idx);
             };
         }
 
-        private Function<int[], Comparable<?>> getNestedValueGetter(Row row) {
+        private Function<int[], Object> getNestedValueGetter(Row row) {
             return fieldIndices -> {
                 Object current = row;
                 for (int i = 0; i < fieldIndices.length - 1; i++) {
                     current = ((Row) current).getField(fieldIndices[i]);
                 }
-                return (Comparable<?>)
-                        ((Row) current).getField(fieldIndices[fieldIndices.length - 1]);
+                return ((Row) current).getField(fieldIndices[fieldIndices.length - 1]);
             };
         }
 
@@ -1620,6 +1645,22 @@ public final class TestValuesTableFactory
         }
 
         @Override
+        public boolean supportsMetadataFilterPushDown() {
+            return enableMetadataFilterPushDown;
+        }
+
+        @Override
+        public SupportsReadingMetadata.MetadataFilterResult applyMetadataFilters(
+                List<ResolvedExpression> metadataFilters) {
+            return SupportsReadingMetadata.MetadataFilterResult.of(
+                    metadataFilters, Collections.emptyList());
+        }
+
+        void setEnableMetadataFilterPushDown(boolean enable) {
+            this.enableMetadataFilterPushDown = enable;
+        }
+
+        @Override
         public List<String> listAcceptedFilterFields() {
             return new ArrayList<>(dynamicFilteringFields);
         }
@@ -1678,25 +1719,28 @@ public final class TestValuesTableFactory
 
         @Override
         public DynamicTableSource copy() {
-            return new TestValuesScanTableSource(
-                    producedDataType,
-                    changelogMode,
-                    boundedness,
-                    terminating,
-                    runtimeSource,
-                    failingSource,
-                    data,
-                    nestedProjectionSupported,
-                    projectedPhysicalFields,
-                    filterPredicates,
-                    filterableFields,
-                    dynamicFilteringFields,
-                    numElementToSkip,
-                    limit,
-                    allPartitions,
-                    readableMetadata,
-                    projectedMetadataFields,
-                    enableAggregatePushDown);
+            TestValuesScanTableSource copy =
+                    new TestValuesScanTableSource(
+                            producedDataType,
+                            changelogMode,
+                            boundedness,
+                            terminating,
+                            runtimeSource,
+                            failingSource,
+                            data,
+                            nestedProjectionSupported,
+                            projectedPhysicalFields,
+                            filterPredicates,
+                            filterableFields,
+                            dynamicFilteringFields,
+                            numElementToSkip,
+                            limit,
+                            allPartitions,
+                            readableMetadata,
+                            projectedMetadataFields,
+                            enableAggregatePushDown);
+            copy.setEnableMetadataFilterPushDown(enableMetadataFilterPushDown);
+            return copy;
         }
 
         @Override
@@ -1718,6 +1762,8 @@ public final class TestValuesTableFactory
             extends TestValuesScanTableSource
             implements SupportsWatermarkPushDown, SupportsSourceWatermark {
         private final String tableName;
+        private final int sleepAfterElements;
+        private final long sleepTimeMillis;
 
         private WatermarkStrategy<RowData> watermarkStrategy = WatermarkStrategy.noWatermarks();
 
@@ -1739,7 +1785,9 @@ public final class TestValuesTableFactory
                 List<Map<String, String>> allPartitions,
                 Map<String, DataType> readableMetadata,
                 @Nullable int[] projectedMetadataFields,
-                boolean enableAggregatePushDown) {
+                boolean enableAggregatePushDown,
+                int sleepAfterElements,
+                long sleepTimeMillis) {
             super(
                     producedDataType,
                     changelogMode,
@@ -1760,6 +1808,8 @@ public final class TestValuesTableFactory
                     projectedMetadataFields,
                     enableAggregatePushDown);
             this.tableName = tableName;
+            this.sleepAfterElements = sleepAfterElements;
+            this.sleepTimeMillis = sleepTimeMillis;
         }
 
         @Override
@@ -1785,7 +1835,13 @@ public final class TestValuesTableFactory
             try {
                 return SourceFunctionProvider.of(
                         new TestValuesRuntimeFunctions.FromElementSourceFunctionWithWatermark(
-                                tableName, serializer, values, watermarkStrategy, terminating),
+                                tableName,
+                                serializer,
+                                values,
+                                watermarkStrategy,
+                                terminating,
+                                sleepAfterElements,
+                                sleepTimeMillis),
                         false);
             } catch (IOException e) {
                 throw new TableException("Fail to init source function", e);
@@ -1813,8 +1869,11 @@ public final class TestValuesTableFactory
                             allPartitions,
                             readableMetadata,
                             projectedMetadataFields,
-                            enableAggregatePushDown);
+                            enableAggregatePushDown,
+                            sleepAfterElements,
+                            sleepTimeMillis);
             newSource.watermarkStrategy = watermarkStrategy;
+            newSource.setEnableMetadataFilterPushDown(enableMetadataFilterPushDown);
             return newSource;
         }
     }

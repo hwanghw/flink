@@ -33,12 +33,14 @@ import org.apache.flink.table.types.logical.LogicalTypeFamily;
 import org.apache.flink.table.types.logical.MapType;
 import org.apache.flink.table.types.logical.MultisetType;
 import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.types.variant.Variant;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.node.ArrayNode;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.io.IOException;
 import java.io.Serializable;
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -149,6 +151,8 @@ public class RowDataToJsonConverters implements Serializable {
                         new IntType());
             case ROW:
                 return createRowConverter((RowType) type);
+            case VARIANT:
+                return this::convertVariant;
             case RAW:
             default:
                 throw new UnsupportedOperationException("Not support to parse type: " + type);
@@ -166,6 +170,14 @@ public class RowDataToJsonConverters implements Serializable {
         };
     }
 
+    private JsonNode convertVariant(ObjectMapper mapper, JsonNode reuse, Object value) {
+        try {
+            return mapper.readTree(((Variant) value).toJson());
+        } catch (IOException e) {
+            throw new JsonParseException("Unable to serialize VARIANT value.", e);
+        }
+    }
+
     private RowDataToJsonConverter createDateConverter() {
         return (mapper, reuse, value) -> {
             int days = (int) value;
@@ -177,7 +189,7 @@ public class RowDataToJsonConverters implements Serializable {
     private RowDataToJsonConverter createTimeConverter() {
         return (mapper, reuse, value) -> {
             int millisecond = (int) value;
-            LocalTime time = LocalTime.ofSecondOfDay(millisecond / 1000L);
+            LocalTime time = LocalTime.ofNanoOfDay(millisecond * 1000_000L);
             return mapper.getNodeFactory().textNode(SQL_TIME_FORMAT.format(time));
         };
     }

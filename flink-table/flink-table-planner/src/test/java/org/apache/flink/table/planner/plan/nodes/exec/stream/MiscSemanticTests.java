@@ -31,6 +31,8 @@ public class MiscSemanticTests extends SemanticTestBase {
     public List<TableTestProgram> programs() {
         return List.of(
                 WindowRankTestPrograms.WINDOW_RANK_HOP_TVF_NAMED_MIN_TOP_1,
-                CalcTestPrograms.CURRENT_WATERMARK);
+                CalcTestPrograms.CURRENT_WATERMARK,
+                CalcTestPrograms.COALESCE_NESTED_ROW_LEFT_JOIN,
+                WatermarkAssignerTestPrograms.WATERMARK_ASSIGNER_PUSHDOWN_DECODE);
     }
 }

@@ -18,13 +18,13 @@
 
 package org.apache.flink.runtime.blob;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.util.OperatingSystem;
 
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -37,7 +37,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assumptions.assumeThat;
 
 /** Tests for {@link BlobUtils} working on non-writable directories. */
-@Tag("org.apache.flink.testutils.junit.FailsInGHAContainerWithRootUser")
 class BlobUtilsNonWritableTest {
 
     private static final String CANNOT_CREATE_THIS = "cannot-create-this";
@@ -68,7 +67,9 @@ class BlobUtilsNonWritableTest {
         assertThatThrownBy(
                         () ->
                                 BlobUtils.getStorageLocation(
-                                        getStorageLocationFile(), null, new TransientBlobKey()))
+                                        getStorageLocationFile(),
+                                        (JobID) null,
+                                        new TransientBlobKey()))
                 .isInstanceOf(IOException.class);
     }
 
@@ -90,6 +91,17 @@ class BlobUtilsNonWritableTest {
                                 BlobUtils.getStorageLocation(
                                         getStorageLocationFile(),
                                         new JobID(),
+                                        new PermanentBlobKey()))
+                .isInstanceOf(IOException.class);
+    }
+
+    @Test
+    void testExceptionOnCreateCacheDirectoryFailureForApplicationPermanent() {
+        assertThatThrownBy(
+                        () ->
+                                BlobUtils.getStorageLocation(
+                                        getStorageLocationFile(),
+                                        new ApplicationID(),
                                         new PermanentBlobKey()))
                 .isInstanceOf(IOException.class);
     }

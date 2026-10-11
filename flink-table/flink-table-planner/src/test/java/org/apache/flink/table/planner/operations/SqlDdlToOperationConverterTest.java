@@ -24,6 +24,7 @@ import org.apache.flink.sql.parser.error.SqlValidateException;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.SqlDialect;
+import org.apache.flink.table.api.SqlParserException;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.Catalog;
 import org.apache.flink.table.catalog.CatalogDatabaseImpl;
@@ -41,9 +42,11 @@ import org.apache.flink.table.catalog.IntervalFreshness;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.ResolvedCatalogTable;
+import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.TableChange;
 import org.apache.flink.table.catalog.TableDistribution;
 import org.apache.flink.table.catalog.TableDistribution.Kind;
+import org.apache.flink.table.catalog.UnresolvedIdentifier;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotExistException;
 import org.apache.flink.table.catalog.exceptions.FunctionAlreadyExistException;
 import org.apache.flink.table.expressions.DefaultSqlFactory;
@@ -88,6 +91,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.annotation.Nullable;
 
@@ -104,6 +108,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.apache.flink.table.api.Expressions.$;
+import static org.apache.flink.table.planner.operations.SqlDdlToOperationConverterTest.TestItem.createTestItem;
 import static org.apache.flink.table.planner.utils.OperationMatchers.entry;
 import static org.apache.flink.table.planner.utils.OperationMatchers.isCreateTableOperation;
 import static org.apache.flink.table.planner.utils.OperationMatchers.partitionedBy;
@@ -657,6 +662,69 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
     }
 
     @Test
+    void testCreateTableWithConnection() {
+        final String sql =
+                "CREATE TABLE derivedTable(\n"
+                        + "  a INT\n"
+                        + ")\n"
+                        + "USING CONNECTION mycat.mydb.myconn";
+        Operation operation = parseAndConvert(sql);
+        assertThat(operation).isInstanceOf(CreateTableOperation.class);
+        CreateTableOperation op = (CreateTableOperation) operation;
+        assertThat(op.getCatalogTable().getConnection())
+                .hasValue(UnresolvedIdentifier.of("mycat", "mydb", "myconn"));
+    }
+
+    @Test
+    void testCreateTableWithoutConnection() {
+        final String sql = "CREATE TABLE derivedTable(\n" + "  a INT\n" + ")";
+        Operation operation = parseAndConvert(sql);
+        assertThat(operation).isInstanceOf(CreateTableOperation.class);
+        CreateTableOperation op = (CreateTableOperation) operation;
+        assertThat(op.getCatalogTable().getConnection()).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"mycat....mydb....myconn", ".", "...", ".2.2."})
+    void testCreateTableWithMalformedConnectionNameFailsToParse(String connectionName) {
+        final String sql = "CREATE TABLE derivedTable(a INT) USING CONNECTION " + connectionName;
+        assertThatThrownBy(() -> parseAndConvert(sql)).isInstanceOf(SqlParserException.class);
+    }
+
+    @Test
+    void testCreateTableWithTooManyConnectionNameParts() {
+        final String sql =
+                "CREATE TABLE derivedTable(a INT) USING CONNECTION mycat.mydb.mygroup.myconn";
+        assertThatThrownBy(() -> parseAndConvert(sql))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining("Object identifier must consist of 1 to 3 parts.");
+    }
+
+    @Test
+    void testCreateTableWithWhitespaceOnlyConnectionNamePart() {
+        final String sql = "CREATE TABLE derivedTable(a INT) USING CONNECTION mycat.`   `.myconn";
+        assertThatThrownBy(() -> parseAndConvert(sql))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining(
+                        "Parts of the object identifier are null or whitespace-only.");
+    }
+
+    @Test
+    void testCreateTableWithUnicodeConnectionName() {
+        final String sql = "CREATE TABLE derivedTable(a INT) USING CONNECTION `😍.😍`";
+        CreateTableOperation op = (CreateTableOperation) parseAndConvert(sql);
+        assertThat(op.getCatalogTable().getConnection()).hasValue(UnresolvedIdentifier.of("😍.😍"));
+    }
+
+    @Test
+    void testCreateTableWithMultibyteConnectionName() {
+        final String sql = "CREATE TABLE derivedTable(a INT) USING CONNECTION `目录`.`Привет`.`café`";
+        CreateTableOperation op = (CreateTableOperation) parseAndConvert(sql);
+        assertThat(op.getCatalogTable().getConnection())
+                .hasValue(UnresolvedIdentifier.of("目录", "Привет", "café"));
+    }
+
+    @Test
     void testCreateTableInvalidDistribution() {
         final String sql =
                 "create table derivedTable(\n" + "  a int\n" + ")\n" + "DISTRIBUTED BY (f3)";
@@ -807,10 +875,10 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
                                 + " ROW<`tmstmp` TIMESTAMP(3)>.");
     }
 
-    @Test // TODO: tweak the tests when FLINK-13604 is fixed.
+    @Test
     void testCreateTableWithFullDataTypes() {
         final List<TestItem> testItems =
-                Arrays.asList(
+                List.of(
                         createTestItem("CHAR", DataTypes.CHAR(1)),
                         createTestItem("CHAR NOT NULL", DataTypes.CHAR(1).notNull()),
                         createTestItem("CHAR NULL", DataTypes.CHAR(1)),
@@ -844,10 +912,8 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
                         createTestItem("DATE", DataTypes.DATE()),
                         createTestItem("TIME", DataTypes.TIME()),
                         createTestItem("TIME WITHOUT TIME ZONE", DataTypes.TIME()),
-                        // Expect to be TIME(3).
-                        createTestItem("TIME(3)", DataTypes.TIME()),
-                        // Expect to be TIME(3).
-                        createTestItem("TIME(3) WITHOUT TIME ZONE", DataTypes.TIME()),
+                        createTestItem("TIME(3)", DataTypes.TIME(3)),
+                        createTestItem("TIME(3) WITHOUT TIME ZONE", DataTypes.TIME(3)),
                         createTestItem("TIMESTAMP", DataTypes.TIMESTAMP(6)),
                         createTestItem("TIMESTAMP WITHOUT TIME ZONE", DataTypes.TIMESTAMP(6)),
                         createTestItem("TIMESTAMP(3)", DataTypes.TIMESTAMP(3)),
@@ -951,11 +1017,15 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
         final CalciteParser parser = getParserBySqlDialect(SqlDialect.DEFAULT);
         SqlNode node = parser.parse(sql);
         assertThat(node).isInstanceOf(SqlCreateTable.class);
-        Operation operation =
-                SqlNodeToOperationConversion.convert(planner, catalogManager, node).get();
-        TableSchema schema = ((CreateTableOperation) operation).getCatalogTable().getSchema();
-        Object[] expectedDataTypes = testItems.stream().map(item -> item.expectedType).toArray();
-        assertThat(schema.getFieldDataTypes()).isEqualTo(expectedDataTypes);
+        final Optional<Operation> convert =
+                SqlNodeToOperationConversion.convert(planner, catalogManager, node);
+        assertThat(convert).isPresent();
+        Operation operation = convert.get();
+        ResolvedSchema schema =
+                ((CreateTableOperation) operation).getCatalogTable().getResolvedSchema();
+        List<DataType> expectedDataTypes =
+                testItems.stream().map(item -> item.expectedType).collect(Collectors.toList());
+        assertThat(schema.getColumnDataTypes()).isEqualTo(expectedDataTypes);
     }
 
     @Test
@@ -1455,7 +1525,7 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
                                 + "  `user_id` INT NOT NULL,\n"
                                 + "  CONSTRAINT `PK_user_id` PRIMARY KEY (`user_id`) NOT ENFORCED\n"
                                 + "), comment='null', distribution=null, partitionKeys=[], "
-                                + "options={format=debezium-json}, snapshot=null, originalQuery='SELECT 1 AS `shop_id`, 2 AS `user_id`', expandedQuery='SELECT 1 AS `shop_id`, 2 AS `user_id`', "
+                                + "options={format=debezium-json}, snapshot=null, originalQuery='SELECT 1 as shop_id, 2 as user_id', expandedQuery='SELECT 1 AS `shop_id`, 2 AS `user_id`', "
                                 + "freshness=INTERVAL '30' SECOND, logicalRefreshMode=CONTINUOUS, refreshMode=CONTINUOUS, "
                                 + "refreshStatus=INITIALIZING, refreshHandlerDescription='null', serializedRefreshHandler=null}, resolvedSchema=(\n"
                                 + "  `shop_id` INT,\n"
@@ -1467,7 +1537,7 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
                                     assertThat(
                                                     op.getCatalogMaterializedTable()
                                                             .getDefinitionFreshness())
-                                            .isEqualTo(IntervalFreshness.ofSecond("30"));
+                                            .isEqualTo(IntervalFreshness.ofSecond(30));
                                     assertThat(op.getCatalogMaterializedTable().getRefreshMode())
                                             .isSameAs(RefreshMode.CONTINUOUS);
                                 }),
@@ -1487,7 +1557,7 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
                                 + "  `user_id` INT NOT NULL,\n"
                                 + "  CONSTRAINT `PK_user_id` PRIMARY KEY (`user_id`) NOT ENFORCED\n"
                                 + "), comment='null', distribution=DISTRIBUTED BY HASH(`user_id`) INTO 7 BUCKETS, partitionKeys=[], "
-                                + "options={format=debezium-json}, snapshot=null, originalQuery='SELECT 1 AS `shop_id`, 2 AS `user_id`', expandedQuery='SELECT 1 AS `shop_id`, 2 AS `user_id`', "
+                                + "options={format=debezium-json}, snapshot=null, originalQuery='SELECT 1 as shop_id, 2 as user_id', expandedQuery='SELECT 1 AS `shop_id`, 2 AS `user_id`', "
                                 + "freshness=INTERVAL '30' SECOND, logicalRefreshMode=AUTOMATIC, refreshMode=null, "
                                 + "refreshStatus=INITIALIZING, refreshHandlerDescription='null', serializedRefreshHandler=null}, resolvedSchema=(\n"
                                 + "  `shop_id` INT NOT NULL,\n"
@@ -1549,9 +1619,13 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
                 "tb2", false, 1, TableDistribution.of(Kind.HASH, 1, List.of("a")), "SELECT 1");
 
         assertThatThrownBy(
-                        () ->
-                                parse(
-                                        "alter materialized table cat1.db1.tb2 add distribution into 3 buckets"))
+                        () -> {
+                            AlterMaterializedTableChangeOperation tableChangeOperation =
+                                    (AlterMaterializedTableChangeOperation)
+                                            parse(
+                                                    "alter materialized table cat1.db1.tb2 add distribution into 3 buckets");
+                            tableChangeOperation.getTableChanges();
+                        })
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining(
                         "The current materialized table has already defined the distribution "
@@ -2583,6 +2657,43 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
         assertThat(operation).isInstanceOf(CreateViewOperation.class);
     }
 
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("viewOriginalQueryCases")
+    void testCreateViewOriginalQuery(String name, String sql, String expectedOriginalQuery) {
+        final Operation operation = parse(sql);
+        assertThat(operation).isInstanceOf(CreateViewOperation.class);
+        assertThat(((CreateViewOperation) operation).getCatalogView().getOriginalQuery())
+                .isEqualTo(expectedOriginalQuery);
+    }
+
+    private static Stream<Arguments> viewOriginalQueryCases() {
+        return Stream.of(
+                // The AS query is sliced verbatim, preserving the user's wording.
+                viewAsQueryCase(
+                        "AS query with a leading comment is kept verbatim",
+                        "/* keep me */\nselect 1"),
+                viewAsQueryCase(
+                        "trailing comment after the AS query is kept",
+                        "select 1 -- trailing comment"),
+                // Everything before AS must be excluded and must not shift the slice.
+                Arguments.of(
+                        "comment before AS is dropped",
+                        "CREATE VIEW v1\n-- note before AS\nAS SELECT 1",
+                        "SELECT 1"),
+                Arguments.of(
+                        "As-query is stripped and comments are kept",
+                        "CREATE VIEW v1 AS \n\n\n\n--keep\n--me\nSELECT * FROM t1\n\n",
+                        "--keep\n--me\nSELECT * FROM t1"),
+                Arguments.of(
+                        "column list and COMMENT before AS are dropped",
+                        "CREATE VIEW v1 (w, x, y, z)\nCOMMENT 'a view'\nAS SELECT a, b, c, d FROM t1",
+                        "SELECT a, b, c, d FROM t1"));
+    }
+
+    private static Arguments viewAsQueryCase(String name, String query) {
+        return Arguments.of(name, "CREATE VIEW v1 AS " + query, query);
+    }
+
     @Test
     void testAlterTableAddPartitions() throws Exception {
         prepareTable("tb1", true, true, 0);
@@ -2715,18 +2826,6 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
     }
 
     // ~ Tool Methods ----------------------------------------------------------
-
-    private static TestItem createTestItem(Object... args) {
-        assertThat(args).hasSize(2);
-        final String testExpr = (String) args[0];
-        TestItem testItem = TestItem.fromTestExpr(testExpr);
-        if (args[1] instanceof String) {
-            testItem.withExpectedError((String) args[1]);
-        } else {
-            testItem.withExpectedType(args[1]);
-        }
-        return testItem;
-    }
 
     private CatalogTable prepareTable(boolean hasConstraint) throws Exception {
         return prepareTable("tb1", hasConstraint ? 1 : 0);
@@ -2880,7 +2979,7 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
                         .partitionKeys(
                                 hasPartition ? Arrays.asList("b", "c") : Collections.emptyList())
                         .options(Collections.unmodifiableMap(options))
-                        .freshness(IntervalFreshness.ofHour("2"))
+                        .freshness(IntervalFreshness.ofHour(2))
                         .logicalRefreshMode(LogicalRefreshMode.CONTINUOUS)
                         .refreshMode(RefreshMode.CONTINUOUS)
                         .refreshStatus(RefreshStatus.ACTIVATED)
@@ -2952,27 +3051,34 @@ class SqlDdlToOperationConverterTest extends SqlNodeToOperationConversionTestBas
 
     // ~ Inner Classes ----------------------------------------------------------
 
-    private static class TestItem {
+    static class TestItem {
         private final String testExpr;
-        @Nullable private Object expectedType;
-        @Nullable private String expectedError;
+        @Nullable private final DataType expectedType;
+        @Nullable private final String expectedError;
 
-        private TestItem(String testExpr) {
+        private TestItem(
+                final String testExpr,
+                @Nullable final DataType expectedType,
+                @Nullable final String expectedError) {
             this.testExpr = testExpr;
-        }
-
-        static TestItem fromTestExpr(String testExpr) {
-            return new TestItem(testExpr);
-        }
-
-        TestItem withExpectedType(Object expectedType) {
             this.expectedType = expectedType;
-            return this;
+            this.expectedError = expectedError;
         }
 
-        TestItem withExpectedError(String expectedError) {
-            this.expectedError = expectedError;
-            return this;
+        private TestItem(final String testExpr, @Nullable final DataType expectedType) {
+            this(testExpr, expectedType, null);
+        }
+
+        private TestItem(final String testExpr, @Nullable final String expectedError) {
+            this(testExpr, null, expectedError);
+        }
+
+        static TestItem createTestItem(String testExpr, DataType dataType) {
+            return new TestItem(testExpr, dataType);
+        }
+
+        static TestItem createTestItem(String testExpr, String expectedError) {
+            return new TestItem(testExpr, expectedError);
         }
 
         @Override

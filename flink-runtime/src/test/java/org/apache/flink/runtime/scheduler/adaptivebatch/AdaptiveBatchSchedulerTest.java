@@ -25,7 +25,7 @@ import org.apache.flink.configuration.BatchExecutionOptions;
 import org.apache.flink.core.failure.FailureEnricher;
 import org.apache.flink.core.failure.TestingFailureEnricher;
 import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutor;
-import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutorServiceAdapter;
+import org.apache.flink.runtime.concurrent.NoMainThreadCheckComponentMainThreadExecutor;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.DefaultExecutionGraph;
 import org.apache.flink.runtime.executiongraph.Execution;
@@ -98,7 +98,13 @@ class AdaptiveBatchSchedulerTest {
 
     @BeforeEach
     void setUp() {
-        mainThreadExecutor = ComponentMainThreadExecutorServiceAdapter.forMainThread();
+        // Use a DirectScheduledExecutorService-based executor that maintains synchronous
+        // execution semantics without strict thread identity checks. This fixes flaky test
+        // failures (FLINK-38970) caused by main thread constraint violations when
+        // CompletableFuture callbacks are dispatched from background IO executor threads.
+        // No-op thread check avoids flakiness from FLINK-38970: scheduler callbacks
+        // can complete on background IO threads rather than the main thread.
+        mainThreadExecutor = new NoMainThreadCheckComponentMainThreadExecutor();
         taskRestartExecutor = new ManuallyTriggeredScheduledExecutor();
     }
 

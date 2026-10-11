@@ -50,10 +50,16 @@ object FlinkBatchRuleSets {
   /**
    * Expand plan by replacing references to tables into a proper plan sub trees. Those rules can
    * create new plan nodes.
+   *
+   * The lookup join rules run first and rewrite supported temporal joins. The rejection rules then
+   * catch any remaining temporal joins (unsupported in batch) with a clear error message.
    */
   val EXPAND_PLAN_RULES: RuleSet = RuleSets.ofList(
     LogicalCorrelateToJoinFromTemporalTableRule.LOOKUP_JOIN_WITH_FILTER,
-    LogicalCorrelateToJoinFromTemporalTableRule.LOOKUP_JOIN_WITHOUT_FILTER)
+    LogicalCorrelateToJoinFromTemporalTableRule.LOOKUP_JOIN_WITHOUT_FILTER,
+    RejectTemporalJoinInBatchRule.WITH_FILTER,
+    RejectTemporalJoinInBatchRule.WITHOUT_FILTER
+  )
 
   val POST_EXPAND_CLEAN_UP_RULES: RuleSet = RuleSets.ofList(EnumerableToLogicalTableScan.INSTANCE)
 
@@ -72,10 +78,8 @@ object FlinkBatchRuleSets {
 
   /** RuleSet to simplify coalesce invocations */
   private val SIMPLIFY_COALESCE_RULES: RuleSet = RuleSets.ofList(
-    RemoveUnreachableCoalesceArgumentsRule.PROJECT_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.FILTER_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.JOIN_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.CALC_INSTANCE
+    SimplifyCoalesceWithEquiJoinConditionRule.PROJECT_INSTANCE,
+    SimplifyCoalesceWithEquiJoinConditionRule.CALC_INSTANCE
   )
 
   private val LIMIT_RULES: RuleSet = RuleSets.ofList(
@@ -109,11 +113,20 @@ object FlinkBatchRuleSets {
         // let project transpose window operator.
         CoreRules.PROJECT_WINDOW_TRANSPOSE,
         // ensure union set operator have the same row type
-        new CoerceInputsRule(classOf[LogicalUnion], false),
+        CoerceInputsRule.Config.DEFAULT
+          .withCoerceNames(false)
+          .withConsumerRelClass(classOf[LogicalUnion])
+          .toRule,
         // ensure intersect set operator have the same row type
-        new CoerceInputsRule(classOf[LogicalIntersect], false),
+        CoerceInputsRule.Config.DEFAULT
+          .withCoerceNames(false)
+          .withConsumerRelClass(classOf[LogicalIntersect])
+          .toRule,
         // ensure except set operator have the same row type
-        new CoerceInputsRule(classOf[LogicalMinus], false),
+        CoerceInputsRule.Config.DEFAULT
+          .withCoerceNames(false)
+          .withConsumerRelClass(classOf[LogicalMinus])
+          .toRule,
         ConvertToNotInOrInRule.INSTANCE,
         // optimize limit 0
         PruneEmptyRules.SORT_FETCH_ZERO_INSTANCE,
@@ -125,7 +138,10 @@ object FlinkBatchRuleSets {
         // vector search rule.
         ConstantVectorSearchCallToCorrelateRule.INSTANCE,
         // Wrap arguments for JSON aggregate functions
-        WrapJsonAggFunctionArgumentsRule.INSTANCE
+        WrapJsonAggFunctionArgumentsRule.AGGREGATE_INSTANCE,
+        WrapJsonAggFunctionArgumentsRule.WINDOW_AGGREGATE_INSTANCE,
+        // prune COUNT(*) input to project a constant before aggregation
+        PruneCountStarInputRule.INSTANCE
       )).asJava)
 
   /** RuleSet about filter */
@@ -179,15 +195,19 @@ object FlinkBatchRuleSets {
 
   /** RuleSet to prune empty results rules */
   val PRUNE_EMPTY_RULES: RuleSet = RuleSets.ofList(
-    FlinkPruneEmptyRules.UNION_INSTANCE,
-    PruneEmptyRules.INTERSECT_INSTANCE,
-    FlinkPruneEmptyRules.MINUS_INSTANCE,
     PruneEmptyRules.PROJECT_INSTANCE,
     PruneEmptyRules.FILTER_INSTANCE,
+    PruneEmptyRules.UNION_INSTANCE,
+    PruneEmptyRules.INTERSECT_INSTANCE,
+    PruneEmptyRules.MINUS_INSTANCE,
     PruneEmptyRules.SORT_INSTANCE,
     PruneEmptyRules.AGGREGATE_INSTANCE,
     PruneEmptyRules.JOIN_LEFT_INSTANCE,
-    PruneEmptyRules.JOIN_RIGHT_INSTANCE
+    PruneEmptyRules.JOIN_RIGHT_INSTANCE,
+    // Replaces global Aggregate over empty Values with default literal values
+    // (e.g. COUNT(*)=0). Handles the plan-time case where the planner can
+    // statically determine the input is empty.
+    CoreRules.AGGREGATE_VALUES
   )
 
   /** RuleSet about project */
@@ -371,11 +391,13 @@ object FlinkBatchRuleSets {
     PythonCalcSplitRule.SPLIT_CONDITION_REX_FIELD,
     PythonCalcSplitRule.SPLIT_PROJECTION_REX_FIELD,
     PythonCalcSplitRule.SPLIT_CONDITION,
+    PythonCalcSplitRule.CONDITION_PROJECTION_CSE,
     PythonCalcSplitRule.SPLIT_PROJECT,
     PythonCalcSplitRule.SPLIT_PANDAS_IN_PROJECT,
     PythonCalcSplitRule.EXPAND_PROJECT,
     PythonCalcSplitRule.PUSH_CONDITION,
     PythonCalcSplitRule.REWRITE_PROJECT,
+    PythonCalcSplitRule.PROJECTION_CSE,
     PythonMapRenameRule.INSTANCE,
     PythonMapMergeRule.INSTANCE,
     AsyncCalcSplitRule.SPLIT_CONDITION_REX_FIELD,
@@ -398,7 +420,13 @@ object FlinkBatchRuleSets {
     // Avoid having async calls in multiple projections in a single calc.
     AsyncCalcSplitRule.ONE_PER_CALC_SPLIT,
     // remove output of rank number when it is not used by successor calc
-    RedundantRankNumberColumnRemoveRule.INSTANCE
+    RedundantRankNumberColumnRemoveRule.INSTANCE,
+    // Rewrites a join over a LATERAL SNAPSHOT table function call into a dedicated
+    // FlinkLogicalLateralSnapshotJoin
+    LogicalJoinToLateralSnapshotJoinRule.INSTANCE,
+    // Rejects SNAPSHOT scans that survived the rewrite above, i.e. SNAPSHOT calls used outside a
+    // LATERAL context. Must run after LogicalJoinToLateralSnapshotJoinRule.
+    ForbidSnapshotOutsideLateralRule.INSTANCE
   )
 
   /** RuleSet to do physical optimize for batch */
@@ -439,6 +467,9 @@ object FlinkBatchRuleSets {
     BatchPhysicalPythonWindowAggregateRule.INSTANCE,
     // window tvf
     BatchPhysicalWindowTableFunctionRule.INSTANCE,
+    // Converts a LATERAL SNAPSHOT join into a (shuffle hash) batch join with the SNAPSHOT input as
+    // build side
+    BatchPhysicalLateralSnapshotJoinRule.INSTANCE,
     // join
     BatchPhysicalHashJoinRule.INSTANCE,
     BatchPhysicalSortMergeJoinRule.INSTANCE,

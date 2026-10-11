@@ -37,6 +37,7 @@ CREATE 语句用于向当前或指定的 [Catalog]({{< ref "docs/sql/catalogs" >
 
 - CREATE TABLE
 - [CREATE OR] REPLACE TABLE
+- CREATE [OR ALTER ]MATERIALIZED TABLE
 - CREATE CATALOG
 - CREATE DATABASE
 - CREATE VIEW
@@ -155,7 +156,7 @@ Flink SQL> INSERT INTO RubberOrders SELECT product, amount FROM Orders WHERE pro
 ##  CREATE TABLE
 
 ```text
-CREATE TABLE [IF NOT EXISTS] [catalog_name.][db_name.]table_name
+CREATE [TEMPORARY] TABLE [IF NOT EXISTS] [catalog_name.][db_name.]table_name
   (
     { <physical_column_definition> | <metadata_column_definition> | <computed_column_definition> }[ , ...n]
     [ <watermark_definition> ]
@@ -196,13 +197,19 @@ CREATE TABLE [IF NOT EXISTS] [catalog_name.][db_name.]table_name
 
 <distribution>:
 {
-    DISTRIBUTION BY [ { HASH | RANGE } ] (bucket_column_name1, bucket_column_name2, ...) [INTO n BUCKETS]
-  | DISTRIBUTION INTO n BUCKETS
+    DISTRIBUTED BY [ { HASH | RANGE } ] (bucket_column_name1, bucket_column_name2, ...) [INTO n BUCKETS]
+  | DISTRIBUTED INTO n BUCKETS
 }
 
 ```
 
 根据指定的表名创建一个表，如果同名表已经在 catalog 中存在了，则无法注册。
+
+**TEMPORARY**
+
+临时表通常保存于内存中并且仅在创建它们的 Flink 会话持续期间存在。
+
+更多信息请查看 [Temporary vs Permanent tables]({{< ref "docs/dev/table/common" >}}#temporary-vs-permanent-tables).
 
 ### Columns
 
@@ -229,7 +236,7 @@ CREATE TABLE MyTable (
 
 Metadata columns are an extension to the SQL standard and allow to access connector and/or format specific
 fields for every row of a table. A metadata column is indicated by the `METADATA` keyword. For example,
-a metadata column can be be used to read and write the timestamp from and to Kafka records for time-based
+a metadata column can be used to read and write the timestamp from and to Kafka records for time-based
 operations. The [connector and format documentation]({{< ref "docs/connectors/table/overview" >}}) lists the
 available metadata fields for every component. However, declaring a metadata column in a table's schema
 is optional.
@@ -294,7 +301,7 @@ CREATE TABLE MyTable (
   `timestamp` BIGINT METADATA,       -- part of the query-to-sink schema
   `offset` BIGINT METADATA VIRTUAL,  -- not part of the query-to-sink schema
   `user_id` BIGINT,
-  `name` STRING,
+  `name` STRING
 ) WITH (
   'connector' = 'kafka'
   ...
@@ -607,7 +614,7 @@ CREATE TABLE my_ctas_table (
     desc STRING,
     quantity DOUBLE,   
     cost AS price * quantity,
-    WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND,
+    WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND
 ) WITH (
     'connector' = 'kafka',
     ...
@@ -808,6 +815,9 @@ INSERT INTO my_rtas_table (id, price, quantity, order_time)
 
 {{< top >}}
 
+## CREATE [OR ALTER ]MATERIALIZED TABLE
+See a dedicated page for [Materialized tables]({{< ref "docs/sql/materialized-table/statements" >}}#create-materialized-table).
+
 ## CREATE CATALOG
 
 ```sql
@@ -876,7 +886,7 @@ CREATE [TEMPORARY] VIEW [IF NOT EXISTS] [catalog_name.][db_name.]view_name
 CREATE [TEMPORARY|TEMPORARY SYSTEM] FUNCTION
   [IF NOT EXISTS] [[catalog_name.]db_name.]function_name
   AS identifier [LANGUAGE JAVA|SCALA|PYTHON]
-  [USING JAR '<path_to_filename>.jar' [, JAR '<path_to_filename>.jar']* ]
+  [USING [JAR|ARTIFACT] '<path_to_filename>.jar' [, JAR '<path_to_filename>.jar']* ]
   [WITH (key1=val1, key2=val2, ...)]
 ```
 
@@ -966,6 +976,22 @@ WITH (
     'api-key' = '<YOUR KEY>',
     'model'='gpt-3.5-turbo',
     'system-prompt' = 'Classify the text below into one of the following labels: [positive, negative, neutral, mixed]. Output only the label.'
+);
+```
+
+```sql
+CREATE MODEL triton_text_classifier
+INPUT (input STRING COMMENT '用于分类的输入文本')
+OUTPUT (output STRING COMMENT '分类结果')
+COMMENT '基于 Triton 的文本分类模型'
+WITH (
+    'provider' = 'triton',
+    'endpoint' = 'http://localhost:8000/v2/models',
+    'model-name' = 'text-classification',
+    'headers.Authorization' = 'Bearer ${TRITON_TOKEN}',
+    'model-version' = '1',
+    'timeout' = '10000',
+    'max-retries' = '3'
 );
 ```
 

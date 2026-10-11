@@ -19,7 +19,7 @@
 package org.apache.flink.state.table;
 
 import org.apache.flink.api.common.state.StateDescriptor;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 
 import javax.annotation.Nullable;
 
@@ -31,21 +31,24 @@ public class StateValueColumnConfiguration implements Serializable {
     private final int columnIndex;
     private final String stateName;
     private final SavepointConnectorOptions.StateType stateType;
-    @Nullable private final TypeInformation mapKeyTypeInfo;
-    @Nullable private final TypeInformation valueTypeInfo;
+    private final StateDescriptor.Type actualStateKind;
+    @Nullable private final TypeSerializer mapKeyTypeSerializer;
+    @Nullable private final TypeSerializer valueTypeSerializer;
     @Nullable private StateDescriptor stateDescriptor;
 
     public StateValueColumnConfiguration(
             int columnIndex,
             final String stateName,
             final SavepointConnectorOptions.StateType stateType,
-            @Nullable final TypeInformation mapKeyTypeInfo,
-            final TypeInformation valueTypeInfo) {
+            final StateDescriptor.Type actualStateKind,
+            @Nullable final TypeSerializer mapKeyTypeSerializer,
+            final TypeSerializer valueTypeSerializer) {
         this.columnIndex = columnIndex;
         this.stateName = stateName;
         this.stateType = stateType;
-        this.mapKeyTypeInfo = mapKeyTypeInfo;
-        this.valueTypeInfo = valueTypeInfo;
+        this.actualStateKind = actualStateKind;
+        this.mapKeyTypeSerializer = mapKeyTypeSerializer;
+        this.valueTypeSerializer = valueTypeSerializer;
     }
 
     public int getColumnIndex() {
@@ -60,13 +63,23 @@ public class StateValueColumnConfiguration implements Serializable {
         return stateType;
     }
 
-    @Nullable
-    public TypeInformation getMapKeyTypeInfo() {
-        return mapKeyTypeInfo;
+    /**
+     * The precise {@link StateDescriptor.Type} the state was originally registered under (e.g.
+     * {@code REDUCING}/{@code AGGREGATING} for a {@code .reduce()}/{@code .aggregate()} window
+     * function's window-contents state), as opposed to {@link #getStateType()} which only
+     * distinguishes the coarse VALUE/LIST/MAP shape used for the SQL schema.
+     */
+    public StateDescriptor.Type getActualStateKind() {
+        return actualStateKind;
     }
 
-    public TypeInformation getValueTypeInfo() {
-        return valueTypeInfo;
+    @Nullable
+    public TypeSerializer getMapKeyTypeSerializer() {
+        return mapKeyTypeSerializer;
+    }
+
+    public TypeSerializer getValueTypeSerializer() {
+        return valueTypeSerializer;
     }
 
     public void setStateDescriptor(StateDescriptor stateDescriptor) {
@@ -76,5 +89,18 @@ public class StateValueColumnConfiguration implements Serializable {
     @Nullable
     public StateDescriptor getStateDescriptor() {
         return stateDescriptor;
+    }
+
+    public StateValueColumnConfiguration withColumnIndex(int newColumnIndex) {
+        StateValueColumnConfiguration copy =
+                new StateValueColumnConfiguration(
+                        newColumnIndex,
+                        stateName,
+                        stateType,
+                        actualStateKind,
+                        mapKeyTypeSerializer,
+                        valueTypeSerializer);
+        copy.stateDescriptor = this.stateDescriptor;
+        return copy;
     }
 }

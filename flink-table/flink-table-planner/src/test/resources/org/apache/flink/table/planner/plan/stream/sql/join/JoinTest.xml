@@ -427,18 +427,20 @@ LogicalProject(a1=[$0], a2=[$1], b1=[$2], b2=[$3])
     </Resource>
     <Resource name="optimized exec plan">
       <![CDATA[
-Calc(select=[a1, a2, CAST(2 AS INTEGER) AS b1, b2])
-+- Join(joinType=[InnerJoin], where=[((a1 = b1) AND (a2 = b2))], select=[a1, a2, b1, b2], leftInputSpec=[JoinKeyContainsUniqueKey], rightInputSpec=[JoinKeyContainsUniqueKey])
-   :- Exchange(distribution=[hash[a1, a2]])
-   :  +- GroupAggregate(groupBy=[a1], select=[a1, COUNT(a2) AS a2])
-   :     +- Exchange(distribution=[hash[a1]])
-   :        +- Calc(select=[CAST(2 AS INTEGER) AS a1, a2], where=[(a1 = 2)])
-   :           +- TableSourceScan(table=[[default_catalog, default_database, A]], fields=[a1, a2, a3])
-   +- Exchange(distribution=[hash[b1, b2]])
-      +- GroupAggregate(groupBy=[b1], select=[b1, COUNT(b2) AS b2])
-         +- Exchange(distribution=[hash[b1]])
-            +- Calc(select=[CAST(2 AS INTEGER) AS b1, b2], where=[(b1 = 2)])
-               +- TableSourceScan(table=[[default_catalog, default_database, B]], fields=[b1, b2, b3])
+Calc(select=[CAST(2 AS INTEGER) AS a1, a2, CAST(2 AS INTEGER) AS b1, b2])
++- Join(joinType=[InnerJoin], where=[(a2 = b2)], select=[a2, b2], leftInputSpec=[NoUniqueKey], rightInputSpec=[NoUniqueKey])
+   :- Exchange(distribution=[hash[a2]])
+   :  +- Calc(select=[a2])
+   :     +- GroupAggregate(groupBy=[a1], select=[a1, COUNT(a2) AS a2])
+   :        +- Exchange(distribution=[hash[a1]])
+   :           +- Calc(select=[CAST(2 AS INTEGER) AS a1, a2], where=[(a1 = 2)])
+   :              +- TableSourceScan(table=[[default_catalog, default_database, A]], fields=[a1, a2, a3])
+   +- Exchange(distribution=[hash[b2]])
+      +- Calc(select=[b2])
+         +- GroupAggregate(groupBy=[b1], select=[b1, COUNT(b2) AS b2])
+            +- Exchange(distribution=[hash[b1]])
+               +- Calc(select=[CAST(2 AS INTEGER) AS b1, b2], where=[(b1 = 2)])
+                  +- TableSourceScan(table=[[default_catalog, default_database, B]], fields=[b1, b2, b3])
 ]]>
     </Resource>
   </TestCase>
@@ -467,15 +469,15 @@ LogicalProject(a1=[$0], a2=[$1], b1=[$2], b2=[$3])
     </Resource>
     <Resource name="optimized exec plan">
       <![CDATA[
-Calc(select=[a1, 1 AS a2, CAST(2 AS INTEGER) AS b1, 1 AS b2])
-+- Join(joinType=[InnerJoin], where=[(a1 = b1)], select=[a1, b1], leftInputSpec=[JoinKeyContainsUniqueKey], rightInputSpec=[JoinKeyContainsUniqueKey])
-   :- Exchange(distribution=[hash[a1]])
+Calc(select=[CAST(2 AS INTEGER) AS a1, 1 AS a2, CAST(2 AS INTEGER) AS b1, 1 AS b2])
++- Join(joinType=[InnerJoin], where=[true], select=[a1, b1], leftInputSpec=[HasUniqueKey], rightInputSpec=[HasUniqueKey])
+   :- Exchange(distribution=[single])
    :  +- Calc(select=[a1], where=[(a2 = 1)])
    :     +- GroupAggregate(groupBy=[a1], select=[a1, COUNT(a2) AS a2])
    :        +- Exchange(distribution=[hash[a1]])
    :           +- Calc(select=[CAST(2 AS INTEGER) AS a1, a2], where=[(a1 = 2)])
    :              +- TableSourceScan(table=[[default_catalog, default_database, A]], fields=[a1, a2, a3])
-   +- Exchange(distribution=[hash[b1]])
+   +- Exchange(distribution=[single])
       +- Calc(select=[b1], where=[(b2 = 1)])
          +- GroupAggregate(groupBy=[b1], select=[b1, COUNT(b2) AS b2])
             +- Exchange(distribution=[hash[b1]])
@@ -574,7 +576,7 @@ Calc(select=[a1])
    :  +- Calc(select=[a1])
    :     +- TableSourceScan(table=[[default_catalog, default_database, A]], fields=[a1, a2, a3])
    +- Exchange(distribution=[hash[pk1]])
-      +- TableSourceScan(table=[[default_catalog, default_database, tableWithCompositePk, project=[pk1], metadata=[]]], fields=[pk1])
+      +- TableSourceScan(table=[[default_catalog, default_database, tableWithCompositePk, project=[pk1]]], fields=[pk1])
 ]]>
     </Resource>
   </TestCase>
@@ -642,7 +644,7 @@ Sink(table=[default_catalog.default_database.sink], fields=[city_name, customer_
       :        +- Calc(select=[city_id], changelogMode=[I,UB,UA,D])
       :           +- ChangelogNormalize(key=[customer_id], changelogMode=[I,UB,UA,D])
       :              +- Exchange(distribution=[hash[customer_id]], changelogMode=[I,UA,D])
-      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id], metadata=[]]], fields=[city_id, customer_id], changelogMode=[I,UA,D])
+      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id]]], fields=[city_id, customer_id], changelogMode=[I,UA,D])
       +- Exchange(distribution=[hash[id]], changelogMode=[I,UB,UA,D])
          +- ChangelogNormalize(key=[id], changelogMode=[I,UB,UA,D])
             +- Exchange(distribution=[hash[id]], changelogMode=[I,UA,D])
@@ -658,7 +660,7 @@ Sink(table=[default_catalog.default_database.sink], fields=[city_name, customer_
       :        +- Calc(select=[city_id])
       :           +- ChangelogNormalize(key=[customer_id])
       :              +- Exchange(distribution=[hash[customer_id]])
-      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id], metadata=[]]], fields=[city_id, customer_id])
+      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id]]], fields=[city_id, customer_id])
       +- Exchange(distribution=[hash[id]])
          +- ChangelogNormalize(key=[id])
             +- Exchange(distribution=[hash[id]])
@@ -687,7 +689,7 @@ Sink(table=[default_catalog.default_database.sink], fields=[city_id, city_name, 
       :        +- Calc(select=[city_id], changelogMode=[I,UB,UA,D])
       :           +- ChangelogNormalize(key=[customer_id], changelogMode=[I,UB,UA,D])
       :              +- Exchange(distribution=[hash[customer_id]], changelogMode=[I,UA,D])
-      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id], metadata=[]]], fields=[city_id, customer_id], changelogMode=[I,UA,D])
+      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id]]], fields=[city_id, customer_id], changelogMode=[I,UA,D])
       +- Exchange(distribution=[hash[id]], changelogMode=[I,UB,UA,D])
          +- ChangelogNormalize(key=[id], changelogMode=[I,UB,UA,D])
             +- Exchange(distribution=[hash[id]], changelogMode=[I,UA,D])
@@ -703,11 +705,77 @@ Sink(table=[default_catalog.default_database.sink], fields=[city_id, city_name, 
       :        +- Calc(select=[city_id])
       :           +- ChangelogNormalize(key=[customer_id])
       :              +- Exchange(distribution=[hash[customer_id]])
-      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id], metadata=[]]], fields=[city_id, customer_id])
+      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id]]], fields=[city_id, customer_id])
       +- Exchange(distribution=[hash[id]])
          +- ChangelogNormalize(key=[id])
             +- Exchange(distribution=[hash[id]])
                +- TableSourceScan(table=[[default_catalog, default_database, source_city]], fields=[id, city_name])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testJoinOutputUpsertKeyInSinkPkWhileJoinOnImmutableCols">
+    <Resource name="explain">
+      <![CDATA[== Abstract Syntax Tree ==
+LogicalSink(table=[default_catalog.default_database.sink], fields=[id, city_id, city_name, city_detail])
++- LogicalProject(id=[$0], city_id=[$2], city_name=[$1], city_detail=[$4])
+   +- LogicalJoin(condition=[=($1, $3)], joinType=[inner])
+      :- LogicalTableScan(table=[[default_catalog, default_database, source_city]])
+      +- LogicalTableScan(table=[[default_catalog, default_database, source_city_detail]])
+
+== Optimized Physical Plan ==
+Sink(table=[default_catalog.default_database.sink], fields=[id, city_id, city_name, city_detail], conflictStrategy=[DEDUPLICATE], changelogMode=[NONE])
++- Calc(select=[id, city_id, city_name, city_detail], changelogMode=[I,UA])
+   +- Join(joinType=[InnerJoin], where=[=(city_name, city_name0)], select=[id, city_name, city_id, city_name0, city_detail], leftInputSpec=[HasUniqueKey], rightInputSpec=[HasUniqueKey], changelogMode=[I,UA])
+      :- Exchange(distribution=[hash[city_name]], changelogMode=[I,UA])
+      :  +- DropUpdateBefore(changelogMode=[I,UA])
+      :     +- TableSourceScan(table=[[default_catalog, default_database, source_city]], fields=[id, city_name], changelogMode=[I,UB,UA])
+      +- Exchange(distribution=[hash[city_name]], changelogMode=[I,UA])
+         +- DropUpdateBefore(changelogMode=[I,UA])
+            +- TableSourceScan(table=[[default_catalog, default_database, source_city_detail]], fields=[city_id, city_name, city_detail], changelogMode=[I,UB,UA])
+
+== Optimized Execution Plan ==
+Sink(table=[default_catalog.default_database.sink], fields=[id, city_id, city_name, city_detail], conflictStrategy=[DEDUPLICATE])
++- Calc(select=[id, city_id, city_name, city_detail])
+   +- Join(joinType=[InnerJoin], where=[(city_name = city_name0)], select=[id, city_name, city_id, city_name0, city_detail], leftInputSpec=[HasUniqueKey], rightInputSpec=[HasUniqueKey])
+      :- Exchange(distribution=[hash[city_name]])
+      :  +- DropUpdateBefore
+      :     +- TableSourceScan(table=[[default_catalog, default_database, source_city]], fields=[id, city_name])
+      +- Exchange(distribution=[hash[city_name]])
+         +- DropUpdateBefore
+            +- TableSourceScan(table=[[default_catalog, default_database, source_city_detail]], fields=[city_id, city_name, city_detail])
+]]>
+    </Resource>
+  </TestCase>
+  <TestCase name="testJoinOutputUpsertKeyInSinkPkWhileJoinOnPartOfImmutableCols">
+    <Resource name="explain">
+      <![CDATA[== Abstract Syntax Tree ==
+LogicalSink(table=[default_catalog.default_database.sink], fields=[id, city_id, city_name, city_detail])
++- LogicalProject(id=[$0], city_id=[$3], city_name=[$1], city_detail=[$6])
+   +- LogicalJoin(condition=[=($1, $4)], joinType=[inner])
+      :- LogicalTableScan(table=[[default_catalog, default_database, source_city]])
+      +- LogicalTableScan(table=[[default_catalog, default_database, source_city_detail]])
+
+== Optimized Physical Plan ==
+Sink(table=[default_catalog.default_database.sink], fields=[id, city_id, city_name, city_detail], conflictStrategy=[DEDUPLICATE], changelogMode=[NONE])
++- Calc(select=[id, city_id, city_name, city_detail], changelogMode=[I,UA])
+   +- Join(joinType=[InnerJoin], where=[=(city_name, city_name0)], select=[id, city_name, city_id, city_name0, city_detail], leftInputSpec=[HasUniqueKey], rightInputSpec=[HasUniqueKey], changelogMode=[I,UA])
+      :- Exchange(distribution=[hash[city_name]], changelogMode=[I,UA])
+      :  +- DropUpdateBefore(changelogMode=[I,UA])
+      :     +- TableSourceScan(table=[[default_catalog, default_database, source_city, project=[id, city_name]]], fields=[id, city_name], changelogMode=[I,UB,UA])
+      +- Exchange(distribution=[hash[city_name]], changelogMode=[I,UA])
+         +- DropUpdateBefore(changelogMode=[I,UA])
+            +- TableSourceScan(table=[[default_catalog, default_database, source_city_detail, project=[city_id, city_name, city_detail]]], fields=[city_id, city_name, city_detail], changelogMode=[I,UB,UA])
+
+== Optimized Execution Plan ==
+Sink(table=[default_catalog.default_database.sink], fields=[id, city_id, city_name, city_detail], conflictStrategy=[DEDUPLICATE])
++- Calc(select=[id, city_id, city_name, city_detail])
+   +- Join(joinType=[InnerJoin], where=[(city_name = city_name0)], select=[id, city_name, city_id, city_name0, city_detail], leftInputSpec=[HasUniqueKey], rightInputSpec=[HasUniqueKey])
+      :- Exchange(distribution=[hash[city_name]])
+      :  +- DropUpdateBefore
+      :     +- TableSourceScan(table=[[default_catalog, default_database, source_city, project=[id, city_name]]], fields=[id, city_name])
+      +- Exchange(distribution=[hash[city_name]])
+         +- DropUpdateBefore
+            +- TableSourceScan(table=[[default_catalog, default_database, source_city_detail, project=[city_id, city_name, city_detail]]], fields=[city_id, city_name, city_detail])
 ]]>
     </Resource>
   </TestCase>
@@ -732,7 +800,7 @@ Sink(table=[default_catalog.default_database.sink], fields=[city_id, city_name, 
       :        +- Calc(select=[city_id], changelogMode=[I,UB,UA,D])
       :           +- ChangelogNormalize(key=[customer_id], changelogMode=[I,UB,UA,D])
       :              +- Exchange(distribution=[hash[customer_id]], changelogMode=[I,UA,D])
-      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id], metadata=[]]], fields=[city_id, customer_id], changelogMode=[I,UA,D])
+      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id]]], fields=[city_id, customer_id], changelogMode=[I,UA,D])
       +- Exchange(distribution=[hash[id]], changelogMode=[I,UB,UA,D])
          +- ChangelogNormalize(key=[id], changelogMode=[I,UB,UA,D])
             +- Exchange(distribution=[hash[id]], changelogMode=[I,UA,D])
@@ -748,7 +816,7 @@ Sink(table=[default_catalog.default_database.sink], fields=[city_id, city_name, 
       :        +- Calc(select=[city_id])
       :           +- ChangelogNormalize(key=[customer_id])
       :              +- Exchange(distribution=[hash[customer_id]])
-      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id], metadata=[]]], fields=[city_id, customer_id])
+      :                 +- TableSourceScan(table=[[default_catalog, default_database, source_customer, project=[city_id, customer_id]]], fields=[city_id, customer_id])
       +- Exchange(distribution=[hash[id]])
          +- ChangelogNormalize(key=[id])
             +- Exchange(distribution=[hash[id]])
@@ -950,18 +1018,20 @@ LogicalProject(a1=[$0], a2=[$1], b1=[$2], b2=[$3])
     </Resource>
     <Resource name="optimized exec plan">
       <![CDATA[
-Calc(select=[CAST(2 AS INTEGER) AS a1, a2, b1, CAST(b2 AS BIGINT) AS b2])
-+- Join(joinType=[InnerJoin], where=[((a1 = b1) AND (b2 = a2))], select=[a1, a2, b1, b2], leftInputSpec=[JoinKeyContainsUniqueKey], rightInputSpec=[JoinKeyContainsUniqueKey])
-   :- Exchange(distribution=[hash[a1, a2]])
-   :  +- GroupAggregate(groupBy=[a1], select=[a1, COUNT(a2) AS a2])
-   :     +- Exchange(distribution=[hash[a1]])
-   :        +- Calc(select=[CAST(2 AS INTEGER) AS a1, a2], where=[(a1 = 2)])
-   :           +- TableSourceScan(table=[[default_catalog, default_database, A]], fields=[a1, a2, a3])
-   +- Exchange(distribution=[hash[b1, b2]])
-      +- GroupAggregate(groupBy=[b1], select=[b1, COUNT(b2) AS b2])
-         +- Exchange(distribution=[hash[b1]])
-            +- Calc(select=[CAST(2 AS INTEGER) AS b1, b2], where=[(b1 = 2)])
-               +- TableSourceScan(table=[[default_catalog, default_database, B]], fields=[b1, b2, b3])
+Calc(select=[CAST(2 AS INTEGER) AS a1, a2, CAST(2 AS INTEGER) AS b1, CAST(b2 AS BIGINT) AS b2])
++- Join(joinType=[InnerJoin], where=[(b2 = a2)], select=[a2, b2], leftInputSpec=[NoUniqueKey], rightInputSpec=[NoUniqueKey])
+   :- Exchange(distribution=[hash[a2]])
+   :  +- Calc(select=[a2])
+   :     +- GroupAggregate(groupBy=[a1], select=[a1, COUNT(a2) AS a2])
+   :        +- Exchange(distribution=[hash[a1]])
+   :           +- Calc(select=[CAST(2 AS INTEGER) AS a1, a2], where=[(a1 = 2)])
+   :              +- TableSourceScan(table=[[default_catalog, default_database, A]], fields=[a1, a2, a3])
+   +- Exchange(distribution=[hash[b2]])
+      +- Calc(select=[b2])
+         +- GroupAggregate(groupBy=[b1], select=[b1, COUNT(b2) AS b2])
+            +- Exchange(distribution=[hash[b1]])
+               +- Calc(select=[CAST(2 AS INTEGER) AS b1, b2], where=[(b1 = 2)])
+                  +- TableSourceScan(table=[[default_catalog, default_database, B]], fields=[b1, b2, b3])
 ]]>
     </Resource>
   </TestCase>
@@ -1357,18 +1427,20 @@ LogicalProject(a1=[$0], a2=[$1], b1=[$2], b2=[$3])
     </Resource>
     <Resource name="optimized exec plan">
       <![CDATA[
-Calc(select=[a1, CAST(a2 AS BIGINT) AS a2, CAST(2 AS INTEGER) AS b1, b2])
-+- Join(joinType=[InnerJoin], where=[((a1 = b1) AND (a2 = b2))], select=[a1, a2, b1, b2], leftInputSpec=[JoinKeyContainsUniqueKey], rightInputSpec=[JoinKeyContainsUniqueKey])
-   :- Exchange(distribution=[hash[a1, a2]])
-   :  +- GroupAggregate(groupBy=[a1], select=[a1, COUNT(a2) AS a2])
-   :     +- Exchange(distribution=[hash[a1]])
-   :        +- Calc(select=[CAST(2 AS INTEGER) AS a1, a2], where=[(a1 = 2)])
-   :           +- TableSourceScan(table=[[default_catalog, default_database, A]], fields=[a1, a2, a3])
-   +- Exchange(distribution=[hash[b1, b2]])
-      +- GroupAggregate(groupBy=[b1], select=[b1, COUNT(b2) AS b2])
-         +- Exchange(distribution=[hash[b1]])
-            +- Calc(select=[CAST(2 AS INTEGER) AS b1, b2], where=[(b1 = 2)])
-               +- TableSourceScan(table=[[default_catalog, default_database, B]], fields=[b1, b2, b3])
+Calc(select=[CAST(2 AS INTEGER) AS a1, CAST(a2 AS BIGINT) AS a2, CAST(2 AS INTEGER) AS b1, b2])
++- Join(joinType=[InnerJoin], where=[(a2 = b2)], select=[a2, b2], leftInputSpec=[NoUniqueKey], rightInputSpec=[NoUniqueKey])
+   :- Exchange(distribution=[hash[a2]])
+   :  +- Calc(select=[a2])
+   :     +- GroupAggregate(groupBy=[a1], select=[a1, COUNT(a2) AS a2])
+   :        +- Exchange(distribution=[hash[a1]])
+   :           +- Calc(select=[CAST(2 AS INTEGER) AS a1, a2], where=[(a1 = 2)])
+   :              +- TableSourceScan(table=[[default_catalog, default_database, A]], fields=[a1, a2, a3])
+   +- Exchange(distribution=[hash[b2]])
+      +- Calc(select=[b2])
+         +- GroupAggregate(groupBy=[b1], select=[b1, COUNT(b2) AS b2])
+            +- Exchange(distribution=[hash[b1]])
+               +- Calc(select=[CAST(2 AS INTEGER) AS b1, b2], where=[(b1 = 2)])
+                  +- TableSourceScan(table=[[default_catalog, default_database, B]], fields=[b1, b2, b3])
 ]]>
     </Resource>
   </TestCase>

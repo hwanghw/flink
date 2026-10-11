@@ -54,7 +54,7 @@ public abstract class RecoveredInputChannel extends InputChannel implements Chan
     private static final Logger LOG = LoggerFactory.getLogger(RecoveredInputChannel.class);
 
     private final ArrayDeque<Buffer> receivedBuffers = new ArrayDeque<>();
-    private final CompletableFuture<?> stateConsumedFuture = new CompletableFuture<>();
+    private final CompletableFuture<Void> stateConsumedFuture = new CompletableFuture<>();
     protected final BufferManager bufferManager;
 
     @GuardedBy("receivedBuffers")
@@ -93,7 +93,7 @@ public abstract class RecoveredInputChannel extends InputChannel implements Chan
                 numBytesIn,
                 numBuffersIn);
 
-        bufferManager = new BufferManager(inputGate.getMemorySegmentProvider(), this, 0);
+        bufferManager = new BufferManager(inputGate.getMemorySegmentProvider(), this, 0, true);
         this.networkBuffersPerChannel = networkBuffersPerChannel;
     }
 
@@ -103,10 +103,14 @@ public abstract class RecoveredInputChannel extends InputChannel implements Chan
         this.channelStateWriter = checkNotNull(channelStateWriter);
     }
 
-    public final InputChannel toInputChannel() throws IOException {
-        Preconditions.checkState(
-                stateConsumedFuture.isDone(), "recovered state is not fully consumed");
-        final InputChannel inputChannel = toInputChannelInternal();
+    public final InputChannel toInputChannel(boolean needsRecovery) throws IOException {
+        // With checkpointing-during-recovery, data is spilled instead of queued here.
+        synchronized (receivedBuffers) {
+            Preconditions.checkState(receivedBuffers.isEmpty(), "Received buffer should be empty.");
+        }
+
+        final InputChannel inputChannel = toInputChannelInternal(needsRecovery);
+        inputChannel.setup();
         inputChannel.checkpointStopped(lastStoppedCheckpointId);
         return inputChannel;
     }
@@ -116,19 +120,22 @@ public abstract class RecoveredInputChannel extends InputChannel implements Chan
         this.lastStoppedCheckpointId = checkpointId;
     }
 
-    protected abstract InputChannel toInputChannelInternal() throws IOException;
+    /**
+     * Creates the physical {@link InputChannel}; {@code needsRecovery} controls whether it starts
+     * in recovery.
+     */
+    protected abstract InputChannel toInputChannelInternal(boolean needsRecovery)
+            throws IOException;
 
-    CompletableFuture<?> getStateConsumedFuture() {
+    @Override
+    public CompletableFuture<Void> getStateConsumedFuture() {
         return stateConsumedFuture;
     }
 
     public void onRecoveredStateBuffer(Buffer buffer) {
         boolean recycleBuffer = true;
         NetworkActionsLogger.traceRecover(
-                "InputChannelRecoveredStateHandler#recover",
-                buffer,
-                inputGate.getOwningTaskName(),
-                channelInfo);
+                "NoSpillingHandler#recover", buffer, inputGate.getOwningTaskName(), channelInfo);
         try {
             final boolean wasEmpty;
             synchronized (receivedBuffers) {
@@ -250,7 +257,7 @@ public abstract class RecoveredInputChannel extends InputChannel implements Chan
         }
     }
 
-    void releaseAllResources() throws IOException {
+    public void releaseAllResources() throws IOException {
         ArrayDeque<Buffer> releasedBuffers = new ArrayDeque<>();
         boolean shouldRelease = false;
 

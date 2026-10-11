@@ -28,6 +28,7 @@ import org.apache.flink.table.test.program.SinkTestStep;
 import org.apache.flink.table.test.program.SourceTestStep;
 import org.apache.flink.table.test.program.TableTestProgram;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
 
 import javax.annotation.Nullable;
 
@@ -813,6 +814,327 @@ public class ConstraintEnforcerTestPrograms {
                                     + " of length 3 is being written into it. You can set job"
                                     + " configuration 'table.exec.sink.type-length-enforcer' to"
                                     + " control this behaviour")
+                    .build();
+
+    public static final String SCHEMA_CHAR_LENGTH_NULLABLE =
+            "a INT NOT NULL, b CHAR(8), c CHAR(6), d INT NOT NULL, e INT NOT NULL, f VARCHAR(6)";
+
+    static final TableTestProgram CHAR_LENGTH_TRIM_PAD_WITH_NULLABLE_COLUMNS =
+            TableTestProgram.of(
+                            "constraint-enforcer-char-length-trim-pad-nullable",
+                            "validates constraint enforcer handles null values in nullable"
+                                    + " CHAR/VARCHAR columns with TRIM_PAD enforcement")
+                    .setupConfig(TABLE_EXEC_SINK_TYPE_LENGTH_ENFORCER, TypeLengthEnforcer.TRIM_PAD)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SCHEMA_CHAR_LENGTH_NULLABLE)
+                                    .producedValues(
+                                            Row.of(1, "Apache Flink", "SQL RuleZ", 11, 111, "SQL"),
+                                            Row.of(2, null, null, 22, 222, null))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(SCHEMA_CHAR_LENGTH_NULLABLE)
+                                    .consumedValues(
+                                            Row.of(1, "Apache F", "SQL Ru", 11, 111, "SQL"),
+                                            Row.of(2, null, null, 22, 222, null))
+                                    .build())
+                    .runSql("INSERT INTO sink_t SELECT * FROM source_t")
+                    .build();
+
+    public static final String SCHEMA_BINARY_LENGTH_NULLABLE =
+            "a INT NOT NULL, b BINARY(8), c BINARY(6), d INT NOT NULL, e INT NOT NULL, f VARBINARY(6)";
+
+    static final TableTestProgram BINARY_LENGTH_TRIM_PAD_WITH_NULLABLE_COLUMNS =
+            TableTestProgram.of(
+                            "constraint-enforcer-binary-length-trim-pad-nullable",
+                            "validates constraint enforcer handles null values in nullable"
+                                    + " BINARY/VARBINARY columns with TRIM_PAD enforcement")
+                    .setupConfig(TABLE_EXEC_SINK_TYPE_LENGTH_ENFORCER, TypeLengthEnforcer.TRIM_PAD)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SCHEMA_BINARY_LENGTH_NULLABLE)
+                                    .producedValues(
+                                            Row.of(
+                                                    1,
+                                                    new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                                                    new byte[] {1, 2, 3, 4, 5, 6, 7, 8},
+                                                    11,
+                                                    111,
+                                                    new byte[] {1, 2, 3}),
+                                            Row.of(2, null, null, 22, 222, null))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(SCHEMA_BINARY_LENGTH_NULLABLE)
+                                    .consumedValues(
+                                            Row.of(
+                                                    1,
+                                                    new byte[] {1, 2, 3, 4, 5, 6, 7, 8},
+                                                    new byte[] {1, 2, 3, 4, 5, 6},
+                                                    11,
+                                                    111,
+                                                    new byte[] {1, 2, 3}),
+                                            Row.of(2, null, null, 22, 222, null))
+                                    .build())
+                    .runSql("INSERT INTO sink_t SELECT * FROM source_t")
+                    .build();
+
+    static final TableTestProgram CHAR_LENGTH_ERROR_WITH_NULLABLE_COLUMNS =
+            TableTestProgram.of(
+                            "constraint-enforcer-char-length-error-nullable",
+                            "validates constraint enforcer handles null values in nullable"
+                                    + " CHAR/VARCHAR columns with ERROR enforcement")
+                    .setupConfig(TABLE_EXEC_SINK_TYPE_LENGTH_ENFORCER, TypeLengthEnforcer.ERROR)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SCHEMA_CHAR_LENGTH_NULLABLE)
+                                    .producedValues(
+                                            Row.of(1, "ApacheFl", "SQL Ru", 11, 111, "SQL"),
+                                            Row.of(2, null, null, 22, 222, null))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(SCHEMA_CHAR_LENGTH_NULLABLE)
+                                    .consumedValues(
+                                            Row.of(1, "ApacheFl", "SQL Ru", 11, 111, "SQL"),
+                                            Row.of(2, null, null, 22, 222, null))
+                                    .build())
+                    .runSql("INSERT INTO sink_t SELECT * FROM source_t")
+                    .build();
+
+    static final TableTestProgram BINARY_LENGTH_ERROR_WITH_NULLABLE_COLUMNS =
+            TableTestProgram.of(
+                            "constraint-enforcer-binary-length-error-nullable",
+                            "validates constraint enforcer handles null values in nullable"
+                                    + " BINARY/VARBINARY columns with ERROR enforcement")
+                    .setupConfig(TABLE_EXEC_SINK_TYPE_LENGTH_ENFORCER, TypeLengthEnforcer.ERROR)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SCHEMA_BINARY_LENGTH_NULLABLE)
+                                    .producedValues(
+                                            Row.of(
+                                                    1,
+                                                    new byte[] {1, 2, 3, 4, 5, 6, 7, 8},
+                                                    new byte[] {1, 2, 3, 4, 5, 6},
+                                                    11,
+                                                    111,
+                                                    new byte[] {1, 2, 3}),
+                                            Row.of(2, null, null, 22, 222, null))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(SCHEMA_BINARY_LENGTH_NULLABLE)
+                                    .consumedValues(
+                                            Row.of(
+                                                    1,
+                                                    new byte[] {1, 2, 3, 4, 5, 6, 7, 8},
+                                                    new byte[] {1, 2, 3, 4, 5, 6},
+                                                    11,
+                                                    111,
+                                                    new byte[] {1, 2, 3}),
+                                            Row.of(2, null, null, 22, 222, null))
+                                    .build())
+                    .runSql("INSERT INTO sink_t SELECT * FROM source_t")
+                    .build();
+
+    // ------------------------------------------------------------------------------------------
+    // Delete-by-key: a by-key delete might carry null in its non-key columns, regardless
+    // of nullability constraints. The constraint enforcer should only check key columns for
+    // by-key delete messages and ignores all value columns.
+    // ------------------------------------------------------------------------------------------
+
+    public static final String SCHEMA_DELETE_BY_KEY_NOT_NULL =
+            "id INT PRIMARY KEY NOT ENFORCED, v INT NOT NULL";
+
+    static final TableTestProgram NOT_NULL_ERROR_DELETE_BY_KEY =
+            TableTestProgram.of(
+                            "constraint-enforcer-error-not-null-delete-by-key",
+                            "validates that a by-key delete carrying null in a scalar NOT NULL"
+                                    + " non-key column is applied rather than rejected by the NOT"
+                                    + " NULL enforcer (ERROR strategy)")
+                    .setupConfig(TABLE_EXEC_SINK_NOT_NULL_ENFORCER, NotNullEnforcer.ERROR)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_NOT_NULL)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("source.produces-delete-by-key", "true")
+                                    .producedValues(
+                                            Row.ofKind(RowKind.INSERT, 1, 10),
+                                            Row.ofKind(RowKind.INSERT, 2, 20),
+                                            // tombstone: key only, NOT NULL value column is null
+                                            Row.ofKind(RowKind.DELETE, 1, null))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_NOT_NULL)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("sink.supports-delete-by-key", "true")
+                                    .testMaterializedData()
+                                    .consumedValues("+I[2, 20]")
+                                    .build())
+                    .runSql("INSERT INTO sink_t SELECT id, v FROM source_t")
+                    .build();
+
+    static final TableTestProgram NOT_NULL_DROP_DELETE_BY_KEY =
+            TableTestProgram.of(
+                            "constraint-enforcer-drop-not-null-delete-by-key",
+                            "validates that a by-key delete carrying null in a scalar NOT NULL"
+                                    + " non-key column is applied rather than silently dropped by the"
+                                    + " NOT NULL enforcer (DROP strategy), which would leave a stale"
+                                    + " row")
+                    .setupConfig(TABLE_EXEC_SINK_NOT_NULL_ENFORCER, NotNullEnforcer.DROP)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_NOT_NULL)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("source.produces-delete-by-key", "true")
+                                    .producedValues(
+                                            Row.ofKind(RowKind.INSERT, 1, 10),
+                                            Row.ofKind(RowKind.INSERT, 2, 20),
+                                            // tombstone: key only, NOT NULL value column is null
+                                            Row.ofKind(RowKind.DELETE, 1, null))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_NOT_NULL)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("sink.supports-delete-by-key", "true")
+                                    .testMaterializedData()
+                                    .consumedValues("+I[2, 20]")
+                                    .build())
+                    .runSql("INSERT INTO sink_t SELECT id, v FROM source_t")
+                    .build();
+
+    static final TableTestProgram NOT_NULL_ERROR_INSERT_IN_DELETE_BY_KEY =
+            TableTestProgram.of(
+                            "constraint-enforcer-error-not-null-insert-in-delete-by-key",
+                            "validates that in a key-only-delete pipeline an INSERT carrying null in"
+                                    + " a NOT NULL column is still rejected by the NOT NULL enforcer")
+                    .setupConfig(TABLE_EXEC_SINK_NOT_NULL_ENFORCER, NotNullEnforcer.ERROR)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_NOT_NULL)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("source.produces-delete-by-key", "true")
+                                    .producedValues(
+                                            // genuine violation: an INSERT with a null NOT NULL
+                                            // value
+                                            Row.ofKind(RowKind.INSERT, 1, null))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_NOT_NULL)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("sink.supports-delete-by-key", "true")
+                                    .consumedValues(new Row[0])
+                                    .build())
+                    .runFailingSql(
+                            "INSERT INTO sink_t SELECT id, v FROM source_t",
+                            TableRuntimeException.class,
+                            "Column 'v' is NOT NULL, however, a null value is being written into it."
+                                    + " You can set job configuration"
+                                    + " 'table.exec.sink.not-null-enforcer'='DROP' to suppress this"
+                                    + " exception and drop such records silently.")
+                    .build();
+
+    static final TableTestProgram NOT_NULL_ERROR_DELETE_BY_KEY_NULL_KEY =
+            TableTestProgram.of(
+                            "constraint-enforcer-error-not-null-delete-by-key-null-key",
+                            "validates that a by-key delete carrying null in its NOT NULL key column"
+                                    + " is still rejected by the NOT NULL enforcer")
+                    .setupConfig(TABLE_EXEC_SINK_NOT_NULL_ENFORCER, NotNullEnforcer.ERROR)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_NOT_NULL)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("source.produces-delete-by-key", "true")
+                                    .producedValues(
+                                            // genuine violation: the key column is null on a delete
+                                            Row.ofKind(RowKind.DELETE, null, null))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_NOT_NULL)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("sink.supports-delete-by-key", "true")
+                                    .consumedValues(new Row[0])
+                                    .build())
+                    .runFailingSql(
+                            "INSERT INTO sink_t SELECT id, v FROM source_t",
+                            TableRuntimeException.class,
+                            "Column 'id' is NOT NULL, however, a null value is being written into it."
+                                    + " You can set job configuration"
+                                    + " 'table.exec.sink.not-null-enforcer'='DROP' to suppress this"
+                                    + " exception and drop such records silently.")
+                    .build();
+
+    public static final String SCHEMA_DELETE_BY_KEY_NESTED_NOT_NULL =
+            "id INT PRIMARY KEY NOT ENFORCED, v ROW<a INT NOT NULL, b INT> NOT NULL";
+
+    static final TableTestProgram NOT_NULL_ERROR_DELETE_BY_KEY_NESTED_ROW =
+            TableTestProgram.of(
+                            "constraint-enforcer-error-not-null-delete-by-key-nested-row",
+                            "validates that a by-key delete carrying a null nested NOT NULL ROW"
+                                    + " non-key column is applied rather than rejected, with nested"
+                                    + " constraint checking enabled")
+                    .setupConfig(TABLE_EXEC_SINK_NESTED_CONSTRAINT_ENFORCER, NestedEnforcer.ROWS)
+                    .setupConfig(TABLE_EXEC_SINK_NOT_NULL_ENFORCER, NotNullEnforcer.ERROR)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_NESTED_NOT_NULL)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("source.produces-delete-by-key", "true")
+                                    .producedValues(
+                                            Row.ofKind(RowKind.INSERT, 1, Row.of(10, 100)),
+                                            Row.ofKind(RowKind.INSERT, 2, Row.of(20, 200)),
+                                            // tombstone: key only, the nested NOT NULL ROW is null
+                                            Row.ofKind(RowKind.DELETE, 1, null))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_NESTED_NOT_NULL)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("sink.supports-delete-by-key", "true")
+                                    .testMaterializedData()
+                                    .consumedValues("+I[2, +I[20, 200]]")
+                                    .build())
+                    .runSql("INSERT INTO sink_t SELECT id, v FROM source_t")
+                    .build();
+
+    // Multi-column, non-leading primary key: the key mask is index-based (not positional), so on a
+    // by-key delete the NOT NULL value columns on both sides of the key (v1, v2) are relaxed while
+    // both key columns (id1, id2) are still enforced. Guards against a positional regression.
+    public static final String SCHEMA_DELETE_BY_KEY_COMPOSITE_PK =
+            "v1 INT NOT NULL, id1 INT, id2 INT, v2 INT NOT NULL, PRIMARY KEY (id1, id2) NOT ENFORCED";
+
+    static final TableTestProgram NOT_NULL_ERROR_DELETE_BY_KEY_COMPOSITE_PK =
+            TableTestProgram.of(
+                            "constraint-enforcer-error-not-null-delete-by-key-composite-pk",
+                            "validates that a by-key delete with a multi-column, non-leading primary"
+                                    + " key is applied: value columns around the key are relaxed"
+                                    + " while both key columns remain enforced")
+                    .setupConfig(TABLE_EXEC_SINK_NOT_NULL_ENFORCER, NotNullEnforcer.ERROR)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("source_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_COMPOSITE_PK)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("source.produces-delete-by-key", "true")
+                                    .producedValues(
+                                            Row.ofKind(RowKind.INSERT, 10, 1, 2, 20),
+                                            Row.ofKind(RowKind.INSERT, 11, 3, 4, 21),
+                                            // tombstone: only the key columns id1, id2 are set
+                                            Row.ofKind(RowKind.DELETE, null, 1, 2, null))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(SCHEMA_DELETE_BY_KEY_COMPOSITE_PK)
+                                    .addOption("changelog-mode", "I,UA,D")
+                                    .addOption("sink.supports-delete-by-key", "true")
+                                    .testMaterializedData()
+                                    .consumedValues("+I[11, 3, 4, 21]")
+                                    .build())
+                    .runSql("INSERT INTO sink_t SELECT v1, id1, id2, v2 FROM source_t")
                     .build();
 
     private static Map<Long, Long> mapOfNullable(@Nullable Long key, @Nullable Long value) {

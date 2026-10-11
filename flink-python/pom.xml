@@ -26,7 +26,7 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-parent</artifactId>
-		<version>2.3-SNAPSHOT</version>
+		<version>2.4-SNAPSHOT</version>
 	</parent>
 
 	<artifactId>flink-python</artifactId>
@@ -35,14 +35,22 @@ under the License.
 	<packaging>jar</packaging>
 
 	<properties>
-		<arrow.version>13.0.0</arrow.version>
+		<!-- Override Beam's optional transitive with a version that fixes CVE-2026-45292. -->
+		<opentelemetry.bundled.version>1.62.0</opentelemetry.bundled.version>
+		
+		<!-- Arrow Java is released from apache/arrow-java and is not version-aligned with pyarrow. -->
+		<arrow.version>19.0.0</arrow.version>
 		<surefire.module.config><!--
 			CommonTestUtils#setEnv
 			-->--add-opens=java.base/java.util=ALL-UNNAMED <!--
 			Kryo AtomicBoolean
 			-->--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED <!--
 			Arrow MemoryUtil
-			-->--add-opens=java.base/java.nio=ALL-UNNAMED
+			-->--add-opens=java.base/java.nio=ALL-UNNAMED <!--
+			ArrowReaderWriterTest
+			-->--sun-misc-unsafe-memory-access=allow <!--
+			-->--enable-native-access=ALL-UNNAMED <!--
+			-->-Dio.netty.tryReflectionSetAccessible=true
 		</surefire.module.config>
 	</properties>
 
@@ -129,11 +137,25 @@ under the License.
 			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
 
+		<!-- Declared optional by Beam; required at runtime for PipelineOptionsFactory. -->
+		<dependency>
+			<groupId>io.opentelemetry</groupId>
+			<artifactId>opentelemetry-api</artifactId>
+			<version>${opentelemetry.bundled.version}</version>
+			<optional>${flink.markBundledAsOptional}</optional>
+		</dependency>
+		<dependency>
+			<groupId>io.opentelemetry</groupId>
+			<artifactId>opentelemetry-context</artifactId>
+			<version>${opentelemetry.bundled.version}</version>
+			<optional>${flink.markBundledAsOptional}</optional>
+		</dependency>
+
 		<!-- PemJa dependencies -->
 		<dependency>
 			<groupId>com.alibaba</groupId>
 			<artifactId>pemja</artifactId>
-			<version>0.5.6</version>
+			<version>0.6.2</version>
 			<optional>${flink.markBundledAsOptional}</optional>
 		</dependency>
 
@@ -289,7 +311,7 @@ under the License.
 			<!-- Indirectly accessed in pyflink_gateway_server -->
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-sql-connector-kafka</artifactId>
-			<version>4.0.1-2.0</version>
+			<version>5.0.0-2.2</version>
 			<scope>test</scope>
 		</dependency>
 
@@ -417,19 +439,6 @@ under the License.
 				<artifactId>conscrypt-openjdk-uber</artifactId>
 				<version>2.5.1</version>
 				<scope>runtime</scope>
-			</dependency>
-
-			<!-- Netty dependency is fixed to 4.1 here as Arrow 13.0.0 expects this version. It
-				should be removed or updated once Apache Arrow version is upgraded to a version
-				that supports Netty 4.2.x.
-			 	https://github.com/apache/arrow-java/commit/7d4cf21bd6502fc650dfad4a6e9fbe0ae5cf4360
-			 -->
-			<dependency>
-				<groupId>io.netty</groupId>
-				<artifactId>netty-bom</artifactId>
-				<version>4.1.100.Final</version>
-				<type>pom</type>
-				<scope>import</scope>
 			</dependency>
 		</dependencies>
 	</dependencyManagement>
@@ -677,6 +686,7 @@ under the License.
 									<include>net.razorvine:*</include>
 									<include>net.sf.py4j:*</include>
 									<include>org.apache.beam:*</include>
+									<include>io.opentelemetry:*</include>
 									<include>com.fasterxml.jackson.core:*</include>
 									<include>joda-time:*</include>
 									<include>com.google.protobuf:*</include>
@@ -719,6 +729,8 @@ under the License.
 										<exclude>LICENSE</exclude>
 										<exclude>META-INF/LICENSE.txt</exclude>
 										<exclude>*.proto</exclude>
+										<!-- Drop stale JPMS descriptors from relocated multi-release jars (e.g. jackson, netty) -->
+										<exclude>META-INF/**/module-info.class</exclude>
 									</excludes>
 								</filter>
 							</filters>
@@ -739,6 +751,72 @@ under the License.
 									<shadedPattern>
 										org.apache.flink.api.python.shaded.com.fasterxml.jackson
 									</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>io.opentelemetry</pattern>
+									<shadedPattern>
+										org.apache.flink.api.python.shaded.io.opentelemetry
+									</shadedPattern>
+								</relocation>
+								<!--
+								Manually relocate multi-release classes to the correct shaded package. This is needed
+								due to a bug in the Maven Shade plugin, which only relocates the content but not
+								the package structure itself, see https://github.com/apache/maven-shade-plugin/issues/652
+								-->
+								<relocation>
+									<pattern>META-INF/versions/(\d+)/com/fasterxml/jackson/</pattern>
+									<shadedPattern>META-INF/versions/$1/org/apache/flink/api/python/shaded/com/fasterxml/jackson/</shadedPattern>
+									<rawString>true</rawString>
+								</relocation>
+								<!--
+								Same maven-shade-plugin#652 workaround as the jackson relocation above, extended to every
+								relocated package: keep each dependency's multi-release (META-INF/versions/N) classes aligned
+								with its relocated base classes. No-op for non-multi-release jars.
+								-->
+								<relocation>
+									<pattern>META-INF/versions/(\d+)/py4j/</pattern>
+									<shadedPattern>META-INF/versions/$1/org/apache/flink/api/python/shaded/py4j/</shadedPattern>
+									<rawString>true</rawString>
+								</relocation>
+								<relocation>
+									<pattern>META-INF/versions/(\d+)/net/razorvine/</pattern>
+									<shadedPattern>META-INF/versions/$1/org/apache/flink/api/python/shaded/net/razorvine/</shadedPattern>
+									<rawString>true</rawString>
+								</relocation>
+								<relocation>
+									<pattern>META-INF/versions/(\d+)/org/joda/time/</pattern>
+									<shadedPattern>META-INF/versions/$1/org/apache/flink/api/python/shaded/org/joda/time/</shadedPattern>
+									<rawString>true</rawString>
+								</relocation>
+								<relocation>
+									<pattern>META-INF/versions/(\d+)/com/google/protobuf/</pattern>
+									<shadedPattern>META-INF/versions/$1/org/apache/flink/api/python/shaded/com/google/protobuf/</shadedPattern>
+									<rawString>true</rawString>
+								</relocation>
+								<relocation>
+									<pattern>META-INF/versions/(\d+)/org/apache/arrow/</pattern>
+									<shadedPattern>META-INF/versions/$1/org/apache/flink/api/python/shaded/org/apache/arrow/</shadedPattern>
+									<rawString>true</rawString>
+								</relocation>
+								<relocation>
+									<pattern>META-INF/versions/(\d+)/io/netty/</pattern>
+									<shadedPattern>META-INF/versions/$1/org/apache/flink/api/python/shaded/io/netty/</shadedPattern>
+									<rawString>true</rawString>
+								</relocation>
+								<relocation>
+									<pattern>META-INF/versions/(\d+)/io/opentelemetry/</pattern>
+									<shadedPattern>META-INF/versions/$1/org/apache/flink/api/python/shaded/io/opentelemetry/</shadedPattern>
+									<rawString>true</rawString>
+								</relocation>
+								<relocation>
+									<pattern>META-INF/versions/(\d+)/com/google/flatbuffers/</pattern>
+									<shadedPattern>META-INF/versions/$1/org/apache/flink/api/python/shaded/com/google/flatbuffers/</shadedPattern>
+									<rawString>true</rawString>
+								</relocation>
+								<relocation>
+									<pattern>META-INF/versions/(\d+)/org/apache/avro/</pattern>
+									<shadedPattern>META-INF/versions/$1/org/apache/flink/avro/shaded/org/apache/avro/</shadedPattern>
+									<rawString>true</rawString>
 								</relocation>
 								<relocation>
 									<pattern>org.joda.time</pattern>
@@ -781,26 +859,29 @@ under the License.
 									</shadedPattern>
 								</relocation>
 							</relocations>
+							<transformers combine.children="append">
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+									<manifestEntries>
+										<Multi-Release>true</Multi-Release>
+									</manifestEntries>
+								</transformer>
+							</transformers>
 						</configuration>
 					</execution>
 				</executions>
 			</plugin>
 			<plugin>
-				<groupId>com.github.os72</groupId>
-				<artifactId>protoc-jar-maven-plugin</artifactId>
-				<version>3.11.4</version>
+				<groupId>io.github.ascopes</groupId>
+				<artifactId>protobuf-maven-plugin</artifactId>
 				<executions>
 					<execution>
-						<phase>generate-sources</phase>
 						<goals>
-							<goal>run</goal>
+							<goal>generate</goal>
 						</goals>
 						<configuration>
-							<protocArtifact>com.google.protobuf:protoc:${protoc.version}
-							</protocArtifact>
-							<inputDirectories>
-								<include>pyflink/proto</include>
-							</inputDirectories>
+							<sourceDirectories>
+								<sourceDirectory>${project.basedir}/pyflink/proto</sourceDirectory>
+							</sourceDirectories>
 						</configuration>
 					</execution>
 				</executions>

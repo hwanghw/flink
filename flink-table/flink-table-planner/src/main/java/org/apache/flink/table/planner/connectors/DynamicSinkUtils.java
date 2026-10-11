@@ -168,9 +168,9 @@ public final class DynamicSinkUtils {
         return convertSinkToRel(
                 relBuilder,
                 input,
-                Collections.emptyMap(), // dynamicOptions
+                Map.of(), // dynamicOptions
                 contextResolvedTable,
-                Collections.emptyMap(), // staticPartitions
+                Map.of(), // staticPartitions
                 null, // targetColumns
                 false,
                 tableSink,
@@ -192,9 +192,9 @@ public final class DynamicSinkUtils {
         return convertSinkToRel(
                 relBuilder,
                 input,
-                Collections.emptyMap(),
+                Map.of(),
                 externalModifyOperation.getContextResolvedTable(),
-                Collections.emptyMap(),
+                Map.of(),
                 null, // targetColumns
                 false,
                 tableSink,
@@ -249,13 +249,43 @@ public final class DynamicSinkUtils {
         return convertSinkToRel(
                 relBuilder,
                 input,
-                Collections.emptyMap(),
+                Map.of(),
                 contextResolvedTable,
                 staticPartitions,
                 null,
                 isOverwrite,
                 sink,
                 null); // conflictStrategy
+    }
+
+    /**
+     * Converts the {@code AS} query of a materialized table (CREATE / CREATE OR ALTER / ALTER ...
+     * AS) into a {@link RelNode} that writes into the table, adding helper projections if
+     * necessary. The caller resolves the target table to its {@link ResolvedCatalogTable} form (the
+     * new definition for an alter, the created definition for a create).
+     */
+    public static RelNode convertMaterializedTableAsToRel(
+            FlinkRelBuilder relBuilder,
+            RelNode input,
+            Catalog catalog,
+            ObjectIdentifier identifier,
+            ResolvedCatalogTable resolvedTable,
+            Map<String, String> staticPartitions,
+            boolean isOverwrite,
+            DynamicTableSink sink) {
+        final ContextResolvedTable contextResolvedTable =
+                ContextResolvedTable.permanent(identifier, catalog, resolvedTable);
+
+        return convertSinkToRel(
+                relBuilder,
+                input,
+                Map.of(),
+                contextResolvedTable,
+                staticPartitions,
+                null,
+                isOverwrite,
+                sink,
+                null);
     }
 
     private static RelNode convertSinkToRel(
@@ -420,7 +450,7 @@ public final class DynamicSinkUtils {
                 throw createSchemaMismatchException(
                         String.format(
                                 "Incompatible types for sink column '%s' at position %s.",
-                                sinkFields.get(i).getName(), i),
+                                sinkFields.get(i).getName(), i + 1),
                         tableDebugName,
                         queryFields,
                         sinkFields);
@@ -515,7 +545,7 @@ public final class DynamicSinkUtils {
                 && updateInfo.getRowLevelUpdateMode()
                         != SupportsRowLevelUpdate.RowLevelUpdateMode.ALL_ROWS) {
             throw new IllegalArgumentException(
-                    "Unknown update mode:" + updateInfo.getRowLevelUpdateMode());
+                    "Unknown update mode: " + updateInfo.getRowLevelUpdateMode());
         }
         Tuple2<RelNode, int[]> updateRelNodeAndRequireIndices =
                 convertToRowLevelUpdate(
@@ -647,7 +677,7 @@ public final class DynamicSinkUtils {
                     if (!(dynamicTableSource instanceof SupportsReadingMetadata)) {
                         throw new UnsupportedOperationException(
                                 String.format(
-                                        "The table source don't support reading metadata, but the require columns contains the meta columns: %s.",
+                                        "The table source does not support reading metadata, but the required columns contain metadata columns: %s.",
                                         column));
                     }
                     // list what metas the source supports to read
@@ -661,7 +691,7 @@ public final class DynamicSinkUtils {
                     if (!readableMetadata.containsKey(metaCol)) {
                         throw new IllegalArgumentException(
                                 String.format(
-                                        "Expect to read the meta column %s, but the table source for table %s doesn't support read the metadata column."
+                                        "Expected to read metadata column %s, but the table source for table %s does not support it. "
                                                 + "Please make sure the readable metadata for the source contains %s.",
                                         column,
                                         UnresolvedIdentifier.of(
@@ -674,7 +704,7 @@ public final class DynamicSinkUtils {
                     if (!dataType.equals(column.getDataType())) {
                         throw new IllegalArgumentException(
                                 String.format(
-                                        "Un-matched data type: the required column %s has datatype %s, but the data type in readable metadata for the table %s has data type %s. ",
+                                        "Mismatched data type: the required column %s has data type %s, but readable metadata for table %s has data type %s.",
                                         column,
                                         column.getDataType(),
                                         UnresolvedIdentifier.of(
@@ -1008,7 +1038,8 @@ public final class DynamicSinkUtils {
                                                             adjustByVirtualColumns(columns, pos);
                                                     return rexBuilder.makeAbstractCast(
                                                             expectedRelDataType,
-                                                            relBuilder.field(posAdjusted));
+                                                            relBuilder.field(posAdjusted),
+                                                            false);
                                                 }))
                         .collect(Collectors.toList());
 
@@ -1234,7 +1265,7 @@ public final class DynamicSinkUtils {
         if (sink instanceof SupportsWritingMetadata) {
             return ((SupportsWritingMetadata) sink).listWritableMetadata();
         }
-        return Collections.emptyMap();
+        return Map.of();
     }
 
     private static void validateAndApplyMetadata(

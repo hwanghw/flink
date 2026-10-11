@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.jobmaster;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.runtime.checkpoint.CheckpointRetentionPolicy;
 import org.apache.flink.runtime.checkpoint.Checkpoints;
 import org.apache.flink.runtime.checkpoint.OperatorState;
@@ -58,7 +59,7 @@ public class TestUtils {
                 new CheckpointMetadata(savepointId, operatorStates, Collections.emptyList());
 
         try (FileOutputStream fileOutputStream = new FileOutputStream(savepointFile)) {
-            Checkpoints.storeCheckpointMetadata(savepoint, fileOutputStream);
+            Checkpoints.storeCheckpointMetadataWithoutExclusiveDir(savepoint, fileOutputStream);
         }
 
         return savepointFile;
@@ -108,11 +109,15 @@ public class TestUtils {
         final JobCheckpointingSettings checkpointingSettings =
                 new JobCheckpointingSettings(checkpointCoordinatorConfiguration, null);
 
-        return JobGraphBuilder.newStreamingJobGraphBuilder()
-                .addJobVertices(Arrays.asList(jobVertices))
-                .setJobCheckpointingSettings(checkpointingSettings)
-                .setSavepointRestoreSettings(savepointRestoreSettings)
-                .build();
+        final JobGraph jobGraph =
+                JobGraphBuilder.newStreamingJobGraphBuilder()
+                        .addJobVertices(Arrays.asList(jobVertices))
+                        .setJobCheckpointingSettings(checkpointingSettings)
+                        .setSavepointRestoreSettings(savepointRestoreSettings)
+                        .build();
+        jobGraph.setApplicationId(new ApplicationID());
+
+        return jobGraph;
     }
 
     private TestUtils() {

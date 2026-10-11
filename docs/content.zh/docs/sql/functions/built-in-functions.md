@@ -107,6 +107,10 @@ JSON 函数使用符合 ISO/IEC TR 19075-6 SQL标准的 JSON 路径表达式。 
 
 {{< sql_functions_zh "hashfunctions" >}}
 
+### 位图函数
+
+{{< sql_functions_zh "bitmap" >}}
+
 ### 辅助函数
 
 {{< sql_functions_zh "auxiliary" >}}
@@ -117,6 +121,34 @@ JSON 函数使用符合 ISO/IEC TR 19075-6 SQL标准的 JSON 路径表达式。 
 聚合函数将所有的行作为输入，并返回单个聚合值作为结果。
 
 {{< sql_functions_zh "aggregate" >}}
+
+### 位图聚合函数
+
+**性能建议：**
+
+- 强烈建议开启 [MiniBatch 聚合]({{< ref "docs/dev/table/tuning" >}})或在[窗口聚合]({{< ref "docs/sql/reference/queries/window-agg" >}})中使用位图聚合函数，以优化状态访问开销、显著提升性能。
+- 位图聚合函数在处理仅追加（Append-Only）输入时性能最佳。处理回撤（Retraction）输入时性能会明显下降，因此应尽量避免对 BITMAP 列进行多级 GROUP BY 聚合。
+- 在仅需要基数统计而不需要中间位图的场景中，建议使用 `BITMAP_XX_CARDINALITY_AGG()` 替代 `BITMAP_CARDINALITY(BITMAP_XX_AGG())`。两者功能一致，但前者避免了中间位图的物化，性能更优。
+
+{{< sql_functions_zh "bitmapagg" >}}
+
+Table Functions
+---------------
+
+Table functions take zero, one, or more values as input and return multiple rows (a table) as the result. Most built-in table functions take a table as an input argument.
+Table functions can be used in two ways: as stand-alone inputs, where they are invoked just once, or in a `LATERAL` context, where they are invoked for each row of an outer table.
+
+| Function                                   | Description                                                                                                                                                                                                                                                                                                     |
+|--------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `TUMBLE(data => TABLE t, ...)`             | Assigns each row of the `data` table to a tumbling window specified by additional window columns (`window_start`, `window_end`, `window_time`). See [Window TVF]({{< ref "docs/sql/reference/queries/window-tvf" >}}#tumble) for the full list of arguments, semantics, and usage.                              |
+| `HOP(data => TABLE t, ...)`                | Assigns each row of the `data` table to a hopping window specified by additional window columns (`window_start`, `window_end`, `window_time`). See [Window TVF]({{< ref "docs/sql/reference/queries/window-tvf" >}}#hop) for the full list of arguments, semantics, and usage.                                  |
+| `CUMULATE(data => TABLE t, ...)`           | Assigns each row of the `data` table to a cumulating window specified by additional window columns (`window_start`, `window_end`, `window_time`). See [Window TVF]({{< ref "docs/sql/reference/queries/window-tvf" >}}#cumulate) for the full list of arguments, semantics, and usage.                          |
+| `SESSION(data => TABLE t, ...)`            | Assigns each row of the `data` table to a session window specified by additional window columns (`window_start`, `window_end`, `window_time`). See [Window TVF]({{< ref "docs/sql/reference/queries/window-tvf" >}}#session) for the full list of arguments, semantics, and usage.                              |
+| `FROM_CHANGELOG(input => TABLE t [, ...])` | Converts an append-only table with an explicit operation column into a dynamic table. See Changelog Conversion for the full list of arguments, semantics, and usage.                                                                       |
+| `TO_CHANGELOG(input => TABLE t [, ...])`   | Converts a dynamic table into an append-only table with an explicit operation column. See Changelog Conversion for the full list of arguments, semantics, and usage.                                                                         |
+| `SNAPSHOT(input => TABLE t [, ...])`       | Returns the current state of a dynamic table `t`. `SNAPSHOT` can only be used in a `LATERAL` context and not as a stand-alone table function. See [LATERAL SNAPSHOT join]({{< ref "docs/sql/reference/queries/joins" >}}#lateral-snapshot-join) for the full list of arguments, the join semantics, and usage. |
+
+To implement your own table functions, see [user-defined table functions]({{< ref "docs/dev/table/functions/udfs" >}}#table-functions).
 
 时间间隔单位和时间点单位标识符
 ---------------------------------------

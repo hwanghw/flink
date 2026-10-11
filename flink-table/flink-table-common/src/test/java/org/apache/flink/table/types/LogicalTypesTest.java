@@ -31,6 +31,7 @@ import org.apache.flink.table.legacy.types.logical.TypeInformationRawType;
 import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.BinaryType;
+import org.apache.flink.table.types.logical.BitmapType;
 import org.apache.flink.table.types.logical.BooleanType;
 import org.apache.flink.table.types.logical.CharType;
 import org.apache.flink.table.types.logical.DateType;
@@ -56,13 +57,15 @@ import org.apache.flink.table.types.logical.TimestampKind;
 import org.apache.flink.table.types.logical.TimestampType;
 import org.apache.flink.table.types.logical.TinyIntType;
 import org.apache.flink.table.types.logical.UnresolvedUserDefinedType;
+import org.apache.flink.table.types.logical.UuidType;
 import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.table.types.logical.VariantType;
 import org.apache.flink.table.types.logical.YearMonthIntervalType;
 import org.apache.flink.table.types.logical.ZonedTimestampType;
 import org.apache.flink.types.Row;
-import org.apache.flink.types.variant.BinaryVariant;
+import org.apache.flink.types.bitmap.Bitmap;
+import org.apache.flink.types.bitmap.RoaringBitmapData;
 import org.apache.flink.types.variant.Variant;
 
 import org.assertj.core.api.ThrowingConsumer;
@@ -77,6 +80,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.UUID;
 
 import static org.apache.flink.table.test.TableAssertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -607,9 +611,35 @@ public class LogicalTypesTest {
                 .hasSerializableString("VARIANT")
                 .hasSummaryString("VARIANT")
                 .supportsOutputConversion(Variant.class)
-                .supportsOutputConversion(BinaryVariant.class)
-                .supportsInputConversion(Variant.class)
-                .supportsInputConversion(BinaryVariant.class);
+                .supportsInputConversion(Variant.class);
+    }
+
+    @Test
+    void testBitmapType() {
+        assertThat(new BitmapType())
+                .isJavaSerializable()
+                .satisfies(
+                        baseAssertions(
+                                "BITMAP",
+                                "BITMAP",
+                                new Class[] {Bitmap.class, RoaringBitmapData.class},
+                                new Class[] {Bitmap.class, RoaringBitmapData.class},
+                                new LogicalType[] {},
+                                new BitmapType(false)));
+    }
+
+    @Test
+    void testUuidType() {
+        assertThat(new UuidType())
+                .isJavaSerializable()
+                .satisfies(
+                        baseAssertions(
+                                "UUID",
+                                "UUID",
+                                new Class[] {UUID.class, byte[].class},
+                                new Class[] {UUID.class, byte[].class},
+                                new LogicalType[] {},
+                                new UuidType(false)));
     }
 
     @Test

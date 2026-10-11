@@ -91,7 +91,7 @@ public class VariantSemanticTest extends SemanticTestBase {
                     .runFailingSql(
                             "INSERT INTO sink_t SELECT PARSE_JSON(v) FROM t",
                             TableRuntimeException.class,
-                            "Failed to parse json string")
+                            "Failed to parse JSON string")
                     .build();
 
     static final TableTestProgram TRY_PARSE_JSON_HANDLE_MALFORMED_JSON =
@@ -111,67 +111,80 @@ public class VariantSemanticTest extends SemanticTestBase {
                     .runSql("INSERT INTO sink_t SELECT TRY_PARSE_JSON(v) FROM t")
                     .build();
 
-    static final TableTestProgram BUILTIN_AGG_WITH_RETRACTION;
+    static final TableTestProgram VARIANT_OMITTED_FROM_INSERT_COLUMN_LIST =
+            TableTestProgram.of(
+                            "variant-omitted-from-insert-column-list",
+                            "validates that VARIANT columns omitted from an INSERT column list are filled with NULL")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema("k INT")
+                                    .producedValues(Row.of(1))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(
+                                            "k INT",
+                                            "v VARIANT",
+                                            "a ARRAY<VARIANT>",
+                                            "r ROW<f VARIANT>",
+                                            "m MAP<STRING, VARIANT>")
+                                    .consumedValues(Row.of(1, null, null, null, null))
+                                    .build())
+                    .runSql("INSERT INTO sink_t (k) SELECT k FROM t")
+                    .build();
 
-    static final TableTestProgram BUILTIN_AGG;
+    static final Variant V1 = BUILDER.of(1);
+    static final Variant V2 = BUILDER.of(2);
 
-    static {
-        Variant v1 = BUILDER.of(1);
-        Variant v2 = BUILDER.of(2);
+    static final TableTestProgram BUILTIN_AGG =
+            TableTestProgram.of("builtin-agg", "validates builtin agg")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema("v VARIANT")
+                                    .producedValues(Row.of(V1), Row.of(V2), Row.of(V2))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("fv VARIANT", "lv VARIANT", "c BIGINT")
+                                    .consumedValues(
+                                            Row.of(V1, V1, 1),
+                                            Row.ofKind(RowKind.UPDATE_BEFORE, V1, V1, 1),
+                                            Row.ofKind(RowKind.UPDATE_AFTER, V1, V2, 2),
+                                            Row.ofKind(RowKind.UPDATE_BEFORE, V1, V2, 2),
+                                            Row.ofKind(RowKind.UPDATE_AFTER, V1, V2, 3))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT FIRST_VALUE(v), LAST_VALUE(v), COUNT(v) FROM t")
+                    .build();
 
-        BUILTIN_AGG =
-                TableTestProgram.of("builtin-agg", "validates builtin agg")
-                        .setupTableSource(
-                                SourceTestStep.newBuilder("t")
-                                        .addSchema("v VARIANT")
-                                        .producedValues(Row.of(v1), Row.of(v2), Row.of(v2))
-                                        .build())
-                        .setupTableSink(
-                                SinkTestStep.newBuilder("sink_t")
-                                        .addSchema(
-                                                "fv VARIANT", "lv VARIANT", "c BIGINT", "dc BIGINT")
-                                        .consumedValues(
-                                                Row.of(v1, v1, 1, 1),
-                                                Row.ofKind(RowKind.UPDATE_BEFORE, v1, v1, 1, 1),
-                                                Row.ofKind(RowKind.UPDATE_AFTER, v1, v2, 2, 2),
-                                                Row.ofKind(RowKind.UPDATE_BEFORE, v1, v2, 2, 2),
-                                                Row.ofKind(RowKind.UPDATE_AFTER, v1, v2, 3, 2))
-                                        .build())
-                        .runSql(
-                                "INSERT INTO sink_t SELECT FIRST_VALUE(v), LAST_VALUE(v), COUNT(v), COUNT(DISTINCT v) FROM t")
-                        .build();
-
-        BUILTIN_AGG_WITH_RETRACTION =
-                TableTestProgram.of(
-                                "builtin-agg-with-retraction",
-                                "validates builtin agg with retraction")
-                        .setupTableSource(
-                                SourceTestStep.newBuilder("t")
-                                        .addSchema("v VARIANT")
-                                        .addOption("changelog-mode", "I,UB,UA,D")
-                                        .producedValues(
-                                                Row.of(v1),
-                                                Row.of(v2),
-                                                Row.of(v2),
-                                                Row.ofKind(RowKind.DELETE, v1))
-                                        .build())
-                        .setupTableSink(
-                                SinkTestStep.newBuilder("sink_t")
-                                        .addSchema(
-                                                "fv VARIANT", "lv VARIANT", "c BIGINT", "dc BIGINT")
-                                        .consumedValues(
-                                                Row.of(v1, v1, 1, 1),
-                                                Row.ofKind(RowKind.UPDATE_BEFORE, v1, v1, 1, 1),
-                                                Row.ofKind(RowKind.UPDATE_AFTER, v1, v2, 2, 2),
-                                                Row.ofKind(RowKind.UPDATE_BEFORE, v1, v2, 2, 2),
-                                                Row.ofKind(RowKind.UPDATE_AFTER, v1, v2, 3, 2),
-                                                Row.ofKind(RowKind.UPDATE_BEFORE, v1, v2, 3, 2),
-                                                Row.ofKind(RowKind.UPDATE_AFTER, v2, v2, 2, 1))
-                                        .build())
-                        .runSql(
-                                "INSERT INTO sink_t SELECT FIRST_VALUE(v), LAST_VALUE(v), COUNT(v), COUNT(DISTINCT v) FROM t")
-                        .build();
-    }
+    static final TableTestProgram BUILTIN_AGG_WITH_RETRACTION =
+            TableTestProgram.of(
+                            "builtin-agg-with-retraction", "validates builtin agg with retraction")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema("v VARIANT")
+                                    .addOption("changelog-mode", "I,UB,UA,D")
+                                    .producedValues(
+                                            Row.of(V1),
+                                            Row.of(V2),
+                                            Row.of(V2),
+                                            Row.ofKind(RowKind.DELETE, V1))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("fv VARIANT", "lv VARIANT", "c BIGINT")
+                                    .consumedValues(
+                                            Row.of(V1, V1, 1),
+                                            Row.ofKind(RowKind.UPDATE_BEFORE, V1, V1, 1),
+                                            Row.ofKind(RowKind.UPDATE_AFTER, V1, V2, 2),
+                                            Row.ofKind(RowKind.UPDATE_BEFORE, V1, V2, 2),
+                                            Row.ofKind(RowKind.UPDATE_AFTER, V1, V2, 3),
+                                            Row.ofKind(RowKind.UPDATE_BEFORE, V1, V2, 3),
+                                            Row.ofKind(RowKind.UPDATE_AFTER, V2, V2, 2))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT FIRST_VALUE(v), LAST_VALUE(v), COUNT(v) FROM t")
+                    .build();
 
     static final TableTestProgram VARIANT_AS_UDF_ARG =
             TableTestProgram.of("variant-as-udf-arg", "validates variant as udf argument")
@@ -200,6 +213,35 @@ public class VariantSemanticTest extends SemanticTestBase {
                                     .consumedValues(Row.of(1), Row.of(2), new Row(1), new Row(1))
                                     .build())
                     .runSql("INSERT INTO sink_t SELECT udf(v) FROM t")
+                    .build();
+
+    static final TableTestProgram VARIANT_IN_VIEW =
+            TableTestProgram.of("variant-in-view", "validates variant unparsing through a view")
+                    .setupTemporarySystemFunction("udf", VariantIdentity.class)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema("v VARIANT")
+                                    .producedValues(
+                                            Row.of(
+                                                    BUILDER.object()
+                                                            .add("k", BUILDER.of(1))
+                                                            .build()),
+                                            Row.of(BUILDER.array().add(BUILDER.of("x")).build()),
+                                            new Row(1))
+                                    .build())
+                    .setupSql("CREATE VIEW variant_view AS SELECT udf(v) AS v FROM t")
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("v VARIANT")
+                                    .consumedValues(
+                                            Row.of(
+                                                    BUILDER.object()
+                                                            .add("k", BUILDER.of(1))
+                                                            .build()),
+                                            Row.of(BUILDER.array().add(BUILDER.of("x")).build()),
+                                            new Row(1))
+                                    .build())
+                    .runSql("INSERT INTO sink_t SELECT v FROM variant_view")
                     .build();
 
     static final TableTestProgram VARIANT_AS_UDAF_ARG =
@@ -235,38 +277,116 @@ public class VariantSemanticTest extends SemanticTestBase {
                     .build();
 
     static final TableTestProgram VARIANT_AS_AGG_KEY =
-            TableTestProgram.of("variant-as-agg-key", "validates variant as agg key")
+            TableTestProgram.of(
+                            "variant-as-agg-key", "validates that a variant cannot be an agg key")
                     .setupTableSource(
                             SourceTestStep.newBuilder("t")
                                     .addSchema("k VARIANT", "v INTEGER")
-                                    .producedValues(
-                                            Row.of(BUILDER.of(1), 1),
-                                            Row.of(BUILDER.of(2), 2),
-                                            Row.of(BUILDER.of(1), 2))
+                                    .producedValues(Row.of(BUILDER.of(1), 1))
                                     .build())
-                    .setupTableSink(
-                            SinkTestStep.newBuilder("sink_t")
-                                    .addSchema("k VARIANT", "total INTEGER")
-                                    .consumedValues(
-                                            Row.of(1, 1),
-                                            Row.of(2, 2),
-                                            Row.ofKind(RowKind.UPDATE_BEFORE, 1, 1),
-                                            Row.ofKind(RowKind.UPDATE_AFTER, 1, 3))
-                                    .build())
-                    .runSql("INSERT INTO sink_t SELECT k, SUM(v) AS total FROM t GROUP BY k")
+                    .runFailingSql(
+                            "SELECT k, SUM(v) AS total FROM t GROUP BY k",
+                            ValidationException.class,
+                            "Column 'k' of type VARIANT cannot be used as a grouping key, "
+                                    + "because the type has no equality. "
+                                    + "Cast the value to a comparable type first.")
                     .build();
 
-    static final TableTestProgram VARIANT_ARRAY_ACCESS;
+    static final SourceTestStep OBJECTS_WITH_DIFFERENT_KEYS_SOURCE =
+            SourceTestStep.newBuilder("t")
+                    .addSchema("s STRING")
+                    .producedValues(
+                            Row.of("{\"a\":1,\"b\":2}"),
+                            Row.of("{\"b\":2,\"a\":1}"),
+                            Row.of("{\"a\":1,\"c\":3}"))
+                    .build();
 
-    static final TableTestProgram VARIANT_ARRAY_ACCESS_WITH_DIFFERENT_INDEX_TYPES;
+    static final TableTestProgram VARIANT_FIELD_CAST_AS_AGG_KEY =
+            TableTestProgram.of(
+                            "variant-field-cast-as-agg-key",
+                            "validates that casting a variant field before grouping forms one group")
+                    .setupTableSource(OBJECTS_WITH_DIFFERENT_KEYS_SOURCE)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema("a INT", "cnt BIGINT")
+                                    .consumedValues(
+                                            Row.of(1, 1L),
+                                            Row.ofKind(RowKind.UPDATE_BEFORE, 1, 1L),
+                                            Row.ofKind(RowKind.UPDATE_AFTER, 1, 2L),
+                                            Row.ofKind(RowKind.UPDATE_BEFORE, 1, 2L),
+                                            Row.ofKind(RowKind.UPDATE_AFTER, 1, 3L))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT a, COUNT(*) FROM "
+                                    + "(SELECT CAST(PARSE_JSON(s)['a'] AS INT) AS a FROM t) GROUP BY a")
+                    .build();
 
-    static final TableTestProgram VARIANT_OBJECT_ACCESS;
+    static final TableTestProgram VARIANT_FIELD_AS_AGG_KEY =
+            TableTestProgram.of(
+                            "variant-field-as-agg-key",
+                            "validates that a variant field cannot be an agg key")
+                    .setupTableSource(OBJECTS_WITH_DIFFERENT_KEYS_SOURCE)
+                    .runFailingSql(
+                            "SELECT a, COUNT(*) FROM (SELECT PARSE_JSON(s)['a'] AS a FROM t) GROUP BY a",
+                            ValidationException.class,
+                            "Column 'a' of type VARIANT cannot be used as a grouping key")
+                    .build();
 
-    static final TableTestProgram VARIANT_NESTED_ACCESS;
+    static final TableTestProgram VARIANT_OBJECT_AS_DISTINCT_KEY =
+            TableTestProgram.of(
+                            "variant-object-as-distinct-key",
+                            "validates that a variant cannot be a DISTINCT key")
+                    .setupTableSource(OBJECTS_WITH_DIFFERENT_KEYS_SOURCE)
+                    .runFailingSql(
+                            "SELECT COUNT(DISTINCT PARSE_JSON(s)) FROM t",
+                            ValidationException.class,
+                            "of type VARIANT cannot be used as an argument of a DISTINCT aggregate")
+                    .runFailingSql(
+                            "SELECT DISTINCT PARSE_JSON(s) FROM t",
+                            ValidationException.class,
+                            "of type VARIANT cannot be used as a grouping key")
+                    .build();
 
-    static final TableTestProgram VARIANT_ARRAY_ERROR_ACCESS;
+    static final TableTestProgram VARIANT_FIELD_EQUALS_VARIANT =
+            TableTestProgram.of(
+                            "variant-field-equals-variant",
+                            "validates that variants cannot be compared with = or IS [NOT] DISTINCT FROM")
+                    .setupTableSource(OBJECTS_WITH_DIFFERENT_KEYS_SOURCE)
+                    .runFailingSql(
+                            "SELECT s FROM t WHERE PARSE_JSON(s)['a'] = PARSE_JSON('1')",
+                            ValidationException.class,
+                            "An expression of type VARIANT cannot be used in a comparison with '='")
+                    // the SQL converter expands IS [NOT] DISTINCT FROM into =
+                    .runFailingSql(
+                            "SELECT s FROM t WHERE PARSE_JSON(s)['a'] IS DISTINCT FROM PARSE_JSON('1')",
+                            ValidationException.class,
+                            "An expression of type VARIANT cannot be used in a comparison with '='")
+                    .runFailingSql(
+                            "SELECT s FROM t WHERE PARSE_JSON(s)['a'] IS NOT DISTINCT FROM PARSE_JSON('1')",
+                            ValidationException.class,
+                            "An expression of type VARIANT cannot be used in a comparison with '='")
+                    .build();
 
-    static final TableTestProgram VARIANT_OBJECT_ERROR_ACCESS;
+    static final TableTestProgram VARIANT_FIELD_AS_JOIN_KEY =
+            TableTestProgram.of(
+                            "variant-field-as-join-key",
+                            "validates that a variant field cannot be a join key")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("l")
+                                    .addSchema("s STRING")
+                                    .producedValues(Row.of("{\"id\":7,\"x\":1}"))
+                                    .build())
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("r")
+                                    .addSchema("s STRING")
+                                    .producedValues(Row.of("{\"y\":2,\"id\":7}"))
+                                    .build())
+                    .runFailingSql(
+                            "SELECT PARSE_JSON(l.s)['x'], PARSE_JSON(r.s)['y'] "
+                                    + "FROM l JOIN r ON PARSE_JSON(l.s)['id'] = PARSE_JSON(r.s)['id']",
+                            ValidationException.class,
+                            "An expression of type VARIANT cannot be used in a comparison with '='")
+                    .build();
 
     public static final SourceTestStep VARIANT_ARRAY_SOURCE =
             SourceTestStep.newBuilder("t")
@@ -322,148 +442,152 @@ public class VariantSemanticTest extends SemanticTestBase {
                             new Row(3))
                     .build();
 
-    public static final SourceTestStep VARIANT_NESTED_SOURCE =
-            SourceTestStep.newBuilder("t")
-                    .addSchema("v VARIANT")
-                    .producedValues(
-                            Row.of(
-                                    BUILDER.object()
-                                            .add(
-                                                    "users",
-                                                    BUILDER.array()
-                                                            .add(
-                                                                    BUILDER.object()
-                                                                            .add(
-                                                                                    "id",
-                                                                                    BUILDER.of(1))
-                                                                            .add(
-                                                                                    "name",
-                                                                                    BUILDER.of(
-                                                                                            "Alice"))
-                                                                            .build())
-                                                            .build())
-                                            .build()),
-                            new Row(1))
+    static final TableTestProgram VARIANT_ARRAY_ACCESS =
+            TableTestProgram.of(
+                            "variant-array-access",
+                            "validates variant array access using [] operator in sql and at() in table api")
+                    .setupTableSource(VARIANT_ARRAY_SOURCE)
+                    .setupTableSink(VARIANT_ARRAY_SINK)
+                    .runSql("INSERT INTO sink_t SELECT v[1], v[2], v[3] FROM t")
+                    .runTableApi(
+                            t ->
+                                    t.from("t")
+                                            .select(
+                                                    $("v").at(1).as("v1"),
+                                                    $("v").at(2).as("v2"),
+                                                    $("v").at(3).as("v3")),
+                            "sink_t")
                     .build();
 
-    public static final SinkTestStep VARIANT_NESTED_SINK =
-            SinkTestStep.newBuilder("sink_t")
-                    .addSchema("user_id VARIANT", "user_name VARIANT")
-                    .consumedValues(Row.of(BUILDER.of(1), BUILDER.of("Alice")), new Row(2))
+    static final TableTestProgram VARIANT_ARRAY_ACCESS_WITH_DIFFERENT_INDEX_TYPES =
+            TableTestProgram.of(
+                            "variant-array-access-with-different-index-types",
+                            "validates variant array access with different index types using [] operator in sql and at() in table api")
+                    .setupTableSource(VARIANT_ARRAY_SOURCE)
+                    .setupTableSink(VARIANT_ARRAY_SINK)
+                    .runSql(
+                            "INSERT INTO sink_t SELECT v[cast(1 as tinyint)], v[cast(2 as smallint)], v[cast(4 as bigint)] FROM t")
+                    .runTableApi(
+                            t ->
+                                    t.from("t")
+                                            .select(
+                                                    $("v").at((byte) 1).as("v1"),
+                                                    $("v").at((short) 2).as("v2"),
+                                                    $("v").at((long) 3).as("v3")),
+                            "sink_t")
                     .build();
 
-    static {
-        VARIANT_ARRAY_ACCESS =
-                TableTestProgram.of(
-                                "variant-array-access",
-                                "validates variant array access using [] operator in sql and at() in table api")
-                        .setupTableSource(VARIANT_ARRAY_SOURCE)
-                        .setupTableSink(VARIANT_ARRAY_SINK)
-                        .runSql("INSERT INTO sink_t SELECT v[1], v[2], v[3] FROM t")
-                        .runTableApi(
-                                t ->
-                                        t.from("t")
-                                                .select(
-                                                        $("v").at(1).as("v1"),
-                                                        $("v").at(2).as("v2"),
-                                                        $("v").at(3).as("v3")),
-                                "sink_t")
-                        .build();
+    static final TableTestProgram VARIANT_OBJECT_ACCESS =
+            TableTestProgram.of(
+                            "variant-object-access",
+                            "validates variant object field access using [] operator in sql and at() in table api")
+                    .setupTableSource(VARIANT_OBJECT_SOURCE)
+                    .setupTableSink(VARIANT_OBJECT_SINK)
+                    .runSql("INSERT INTO sink_t SELECT v['name'], v['age'], v['city'] FROM t")
+                    .runTableApi(
+                            t ->
+                                    t.from("t")
+                                            .select(
+                                                    $("v").at("name").as("name"),
+                                                    $("v").at("age").as("age"),
+                                                    $("v").at("city").as("city")),
+                            "sink_t")
+                    .build();
 
-        VARIANT_ARRAY_ACCESS_WITH_DIFFERENT_INDEX_TYPES =
-                TableTestProgram.of(
-                                "variant-array-access-with-different-index-types",
-                                "validates variant array access with different index types using [] operator in sql and at() in table api")
-                        .setupTableSource(VARIANT_ARRAY_SOURCE)
-                        .setupTableSink(VARIANT_ARRAY_SINK)
-                        .runSql(
-                                "INSERT INTO sink_t SELECT v[cast(1 as tinyint)], v[cast(2 as smallint)], v[cast(4 as bigint)] FROM t")
-                        .runTableApi(
-                                t ->
-                                        t.from("t")
-                                                .select(
-                                                        $("v").at((byte) 1).as("v1"),
-                                                        $("v").at((short) 2).as("v2"),
-                                                        $("v").at((long) 3).as("v3")),
-                                "sink_t")
-                        .build();
+    static final Variant COMPLEX_VARIANT =
+            BUILDER.object()
+                    .add(
+                            "users",
+                            BUILDER.array()
+                                    .add(
+                                            BUILDER.object()
+                                                    .add("id", BUILDER.of(1))
+                                                    .add("name", BUILDER.of("Alice"))
+                                                    .add(
+                                                            "special ' \" \\ \u0000",
+                                                            BUILDER.of("Bob"))
+                                                    .build())
+                                    .build())
+                    .build();
 
-        VARIANT_OBJECT_ACCESS =
-                TableTestProgram.of(
-                                "variant-object-access",
-                                "validates variant object field access using [] operator in sql and at() in table api")
-                        .setupTableSource(VARIANT_OBJECT_SOURCE)
-                        .setupTableSink(VARIANT_OBJECT_SINK)
-                        .runSql("INSERT INTO sink_t SELECT v['name'], v['age'], v['city'] FROM t")
-                        .runTableApi(
-                                t ->
-                                        t.from("t")
-                                                .select(
-                                                        $("v").at("name").as("name"),
-                                                        $("v").at("age").as("age"),
-                                                        $("v").at("city").as("city")),
-                                "sink_t")
-                        .build();
+    static final TableTestProgram VARIANT_NESTED_ACCESS =
+            TableTestProgram.of(
+                            "variant-nested-access",
+                            "validates variant nested access using [] operator in sql and at() in table api")
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema("v VARIANT")
+                                    .producedValues(Row.of(COMPLEX_VARIANT), new Row(1))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink_t")
+                                    .addSchema(
+                                            "user_id VARIANT",
+                                            "user_name VARIANT",
+                                            "special_name VARIANT")
+                                    .consumedValues(
+                                            Row.of(
+                                                    BUILDER.of(1),
+                                                    BUILDER.of("Alice"),
+                                                    BUILDER.of("Bob")),
+                                            new Row(3))
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink_t SELECT "
+                                    + "v['users'][1]['id'], "
+                                    + "v['users'][1]['name'], "
+                                    + "v['users'][1]['special '' \" \\ \u0000'] FROM t")
+                    .runTableApi(
+                            t ->
+                                    t.from("t")
+                                            .select(
+                                                    $("v").at("users").at(1).at("id").as("user_id"),
+                                                    $("v").at("users")
+                                                            .at(1)
+                                                            .at("name")
+                                                            .as("user_name"),
+                                                    $("v").at("users")
+                                                            .at(1)
+                                                            .at("special ' \" \\ \u0000")
+                                                            .as("special_name")),
+                            "sink_t")
+                    .build();
 
-        VARIANT_NESTED_ACCESS =
-                TableTestProgram.of(
-                                "variant-nested-access",
-                                "validates variant nested access using [] operator in sql and at() in table api")
-                        .setupTableSource(VARIANT_NESTED_SOURCE)
-                        .setupTableSink(VARIANT_NESTED_SINK)
-                        .runSql(
-                                "INSERT INTO sink_t SELECT v['users'][1]['id'], v['users'][1]['name'] FROM t")
-                        .runTableApi(
-                                t ->
-                                        t.from("t")
-                                                .select(
-                                                        $("v").at("users")
-                                                                .at(1)
-                                                                .at("id")
-                                                                .as("user_id"),
-                                                        $("v").at("users")
-                                                                .at(1)
-                                                                .at("name")
-                                                                .as("user_name")),
-                                "sink_t")
-                        .build();
+    static final TableTestProgram VARIANT_ARRAY_ERROR_ACCESS =
+            TableTestProgram.of(
+                            "variant-array-error-access",
+                            "validates variant array access using [] operator in sql and at() in table api with string")
+                    .setupTableSource(VARIANT_ARRAY_SOURCE)
+                    .runFailingSql(
+                            "SELECT v['1'], v['2'], v['3'] FROM t",
+                            TableRuntimeException.class,
+                            "String key access on variant requires an object variant, but a non-object variant was provided.")
+                    .runFailingSql(
+                            "SELECT v[1.5], v[4.2], v[3.3] FROM t",
+                            ValidationException.class,
+                            "Cannot apply 'ITEM' to arguments of type 'ITEM(<VARIANT>, <DECIMAL(2, 1)>)'. Supported form(s): <ARRAY>[<INTEGER>]\n"
+                                    + "<MAP>[<ANY>]\n"
+                                    + "<ROW>[<CHARACTER>|<INTEGER>]\n"
+                                    + "<VARIANT>[<CHARACTER>|<INTEGER>]")
+                    .build();
 
-        VARIANT_ARRAY_ERROR_ACCESS =
-                TableTestProgram.of(
-                                "variant-array-error-access",
-                                "validates variant array access using [] operator in sql and at() in table api with string")
-                        .setupTableSource(VARIANT_ARRAY_SOURCE)
-                        .runFailingSql(
-                                "SELECT v['1'], v['2'], v['3'] FROM t",
-                                TableRuntimeException.class,
-                                "String key access on variant requires an object variant, but a non-object variant was provided.")
-                        .runFailingSql(
-                                "SELECT v[1.5], v[4.2], v[3.3] FROM t",
-                                ValidationException.class,
-                                "Cannot apply 'ITEM' to arguments of type 'ITEM(<VARIANT>, <DECIMAL(2, 1)>)'. Supported form(s): <ARRAY>[<INTEGER>]\n"
-                                        + "<MAP>[<ANY>]\n"
-                                        + "<ROW>[<CHARACTER>|<INTEGER>]\n"
-                                        + "<VARIANT>[<CHARACTER>|<INTEGER>]")
-                        .build();
-
-        VARIANT_OBJECT_ERROR_ACCESS =
-                TableTestProgram.of(
-                                "variant-object-error-access",
-                                "validates variant object field access using [] operator in sql and at() in table api")
-                        .setupTableSource(VARIANT_OBJECT_SOURCE)
-                        .runFailingSql(
-                                "SELECT v[1], v[2], v[3] FROM t",
-                                TableRuntimeException.class,
-                                "Integer index access on variant requires an array variant, but a non-array variant was provided.")
-                        .runFailingSql(
-                                "SELECT v[1.5], v[4.2], v[3.3] FROM t",
-                                ValidationException.class,
-                                "Cannot apply 'ITEM' to arguments of type 'ITEM(<VARIANT>, <DECIMAL(2, 1)>)'. Supported form(s): <ARRAY>[<INTEGER>]\n"
-                                        + "<MAP>[<ANY>]\n"
-                                        + "<ROW>[<CHARACTER>|<INTEGER>]\n"
-                                        + "<VARIANT>[<CHARACTER>|<INTEGER>]")
-                        .build();
-    }
+    static final TableTestProgram VARIANT_OBJECT_ERROR_ACCESS =
+            TableTestProgram.of(
+                            "variant-object-error-access",
+                            "validates variant object field access using [] operator in sql and at() in table api")
+                    .setupTableSource(VARIANT_OBJECT_SOURCE)
+                    .runFailingSql(
+                            "SELECT v[1], v[2], v[3] FROM t",
+                            TableRuntimeException.class,
+                            "Integer index access on variant requires an array variant, but a non-array variant was provided.")
+                    .runFailingSql(
+                            "SELECT v[1.5], v[4.2], v[3.3] FROM t",
+                            ValidationException.class,
+                            "Cannot apply 'ITEM' to arguments of type 'ITEM(<VARIANT>, <DECIMAL(2, 1)>)'. Supported form(s): <ARRAY>[<INTEGER>]\n"
+                                    + "<MAP>[<ANY>]\n"
+                                    + "<ROW>[<CHARACTER>|<INTEGER>]\n"
+                                    + "<VARIANT>[<CHARACTER>|<INTEGER>]")
+                    .build();
 
     @Override
     public List<TableTestProgram> programs() {
@@ -475,14 +599,27 @@ public class VariantSemanticTest extends SemanticTestBase {
                 BUILTIN_AGG,
                 BUILTIN_AGG_WITH_RETRACTION,
                 VARIANT_AS_UDF_ARG,
+                VARIANT_IN_VIEW,
                 VARIANT_AS_UDAF_ARG,
                 VARIANT_AS_AGG_KEY,
+                VARIANT_FIELD_CAST_AS_AGG_KEY,
+                VARIANT_FIELD_AS_AGG_KEY,
+                VARIANT_OBJECT_AS_DISTINCT_KEY,
+                VARIANT_FIELD_EQUALS_VARIANT,
+                VARIANT_FIELD_AS_JOIN_KEY,
                 VARIANT_ARRAY_ACCESS,
                 VARIANT_ARRAY_ACCESS_WITH_DIFFERENT_INDEX_TYPES,
                 VARIANT_OBJECT_ACCESS,
                 VARIANT_NESTED_ACCESS,
                 VARIANT_ARRAY_ERROR_ACCESS,
-                VARIANT_OBJECT_ERROR_ACCESS);
+                VARIANT_OBJECT_ERROR_ACCESS,
+                VARIANT_OMITTED_FROM_INSERT_COLUMN_LIST);
+    }
+
+    public static class VariantIdentity extends ScalarFunction {
+        public Variant eval(Variant v) {
+            return v;
+        }
     }
 
     public static class MyUdf extends ScalarFunction {

@@ -18,6 +18,7 @@
 package org.apache.flink.table.functions;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.table.api.ValidationException;
 
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -95,8 +96,11 @@ public class SqlLikeUtils {
                 throw invalidEscapeCharacter(escapeStr.toString());
             }
             escapeChar = escapeStr.charAt(0);
+            if (escapeChar == 0) {
+                throw invalidEscapeCharacter(escapeStr.toString());
+            }
         } else {
-            escapeChar = '\\';
+            escapeChar = 0;
         }
         return sqlToRegexLike(sqlPattern, escapeChar);
     }
@@ -108,7 +112,7 @@ public class SqlLikeUtils {
         final StringBuilder javaPattern = new StringBuilder(len + len);
         for (i = 0; i < len; i++) {
             char c = sqlPattern.charAt(i);
-            if (c == escapeChar) {
+            if (c == escapeChar && escapeChar != 0) {
                 if (i == (sqlPattern.length() - 1)) {
                     throw invalidEscapeSequence(sqlPattern, i);
                 }
@@ -140,11 +144,11 @@ public class SqlLikeUtils {
     }
 
     public static RuntimeException invalidEscapeCharacter(String s) {
-        return new RuntimeException("Invalid escape character '" + s + "'");
+        return new ValidationException("Invalid escape character '" + s + "'");
     }
 
     public static RuntimeException invalidEscapeSequence(String s, int i) {
-        return new RuntimeException("Invalid escape sequence '" + s + "', " + i);
+        return new ValidationException("Invalid escape sequence '" + s + "', " + i);
     }
 
     private static void similarEscapeRuleChecking(String sqlPattern, char escapeChar) {
@@ -191,7 +195,7 @@ public class SqlLikeUtils {
             char c = sqlPattern.charAt(i);
             if (c == ']') {
                 return i - 1;
-            } else if (c == escapeChar) {
+            } else if (c == escapeChar && escapeChar != 0) {
                 i++;
                 char nextChar = sqlPattern.charAt(i);
                 if (SQL_SIMILAR_SPECIALS.indexOf(nextChar) >= 0) {
@@ -240,6 +244,9 @@ public class SqlLikeUtils {
                 throw invalidEscapeCharacter(escapeStr.toString());
             }
             escapeChar = escapeStr.charAt(0);
+            if (escapeChar == 0) {
+                throw invalidEscapeCharacter(escapeStr.toString());
+            }
         } else {
             escapeChar = 0;
         }
@@ -255,7 +262,7 @@ public class SqlLikeUtils {
         final int len = sqlPattern.length();
         for (int i = 0; i < len; i++) {
             char c = sqlPattern.charAt(i);
-            if (c == escapeChar) {
+            if (c == escapeChar && escapeChar != 0) {
                 if (i == (len - 1)) {
                     // It should never reach here after the escape rule
                     // checking.

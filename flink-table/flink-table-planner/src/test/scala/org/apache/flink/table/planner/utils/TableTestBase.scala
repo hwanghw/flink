@@ -82,7 +82,6 @@ import org.apache.flink.util.jackson.JacksonMapperFactory
 
 import _root_.java.math.{BigDecimal => JBigDecimal}
 import _root_.java.util
-import _root_.scala.collection.JavaConversions._
 import _root_.scala.io.Source
 import org.apache.calcite.avatica.util.TimeUnit
 import org.apache.calcite.rel.RelNode
@@ -612,6 +611,11 @@ abstract class TableTestUtilBase(test: TableTestBase, isStreamingMode: Boolean) 
       withQueryBlockAlias = false)
   }
 
+  /** Java-friendly overload that accepts a list of [[ExplainDetail]]s. */
+  def verifyRelPlan(query: String, extraDetails: java.util.List[ExplainDetail]): Unit = {
+    verifyRelPlan(query, extraDetails.asScala: _*)
+  }
+
   /**
    * Verify the AST (abstract syntax tree) and the optimized rel plan for the given INSERT
    * statement.
@@ -1043,6 +1047,22 @@ abstract class TableTestUtilBase(test: TableTestBase, isStreamingMode: Boolean) 
       withRowType: Boolean,
       expectedPlans: Array[PlanKind],
       withQueryBlockAlias: Boolean): Unit = {
+    doVerifyPlan(
+      query,
+      extraDetails,
+      withRowType,
+      expectedPlans,
+      withQueryBlockAlias,
+      withUpsertKey = false)
+  }
+
+  def doVerifyPlan(
+      query: String,
+      extraDetails: Array[ExplainDetail],
+      withRowType: Boolean,
+      expectedPlans: Array[PlanKind],
+      withQueryBlockAlias: Boolean,
+      withUpsertKey: Boolean): Unit = {
     val table = getTableEnv.sqlQuery(query)
     val relNode = TableTestUtil.toRelNode(table)
 
@@ -1052,7 +1072,9 @@ abstract class TableTestUtilBase(test: TableTestBase, isStreamingMode: Boolean) 
       withRowType,
       expectedPlans,
       () => assertEqualsOrExpand("sql", query),
-      withQueryBlockAlias)
+      withQueryBlockAlias = withQueryBlockAlias,
+      withUpsertKey = withUpsertKey
+    )
   }
 
   /**
@@ -1145,7 +1167,7 @@ abstract class TableTestUtilBase(test: TableTestBase, isStreamingMode: Boolean) 
       withDuplicateChanges: Boolean): Unit = {
     val testStmtSet = stmtSet.asInstanceOf[StatementSetImpl[_]]
 
-    val relNodes = testStmtSet.getOperations.map(getPlanner.translateToRel)
+    val relNodes = testStmtSet.getOperations.asScala.map(getPlanner.translateToRel)
     if (relNodes.isEmpty) {
       throw new TableException(
         "No output table have been created yet. " +
@@ -1187,7 +1209,8 @@ abstract class TableTestUtilBase(test: TableTestBase, isStreamingMode: Boolean) 
       expectedPlans: Array[PlanKind],
       assertSqlEqualsOrExpandFunc: () => Unit,
       withQueryBlockAlias: Boolean = false,
-      withDuplicateChanges: Boolean = false): Unit = {
+      withDuplicateChanges: Boolean = false,
+      withUpsertKey: Boolean = false): Unit = {
 
     val expectedPlanKinds = new util.HashSet[PlanKind](expectedPlans.toSeq.asJava)
 
@@ -1214,7 +1237,8 @@ abstract class TableTestUtilBase(test: TableTestBase, isStreamingMode: Boolean) 
         optimizedRels.toArray,
         extraDetails,
         withRowType = withRowType,
-        withDuplicateChanges = withDuplicateChanges)
+        withDuplicateChanges = withDuplicateChanges,
+        withUpsertKey = withUpsertKey)
 
     // build optimized exec plan if `expectedPlanKinds` contains OPT_EXEC
     val optimizedExecPlan = if (expectedPlanKinds.contains(PlanKind.OPT_EXEC)) {
@@ -1271,7 +1295,8 @@ abstract class TableTestUtilBase(test: TableTestBase, isStreamingMode: Boolean) 
       optimizedRels: Array[RelNode],
       extraDetails: Array[ExplainDetail],
       withRowType: Boolean,
-      withDuplicateChanges: Boolean): String = {
+      withDuplicateChanges: Boolean,
+      withUpsertKey: Boolean = false): String = {
     require(optimizedRels.nonEmpty)
     val explainLevel = if (extraDetails.contains(ExplainDetail.ESTIMATED_COST)) {
       SqlExplainLevel.ALL_ATTRIBUTES
@@ -1298,7 +1323,9 @@ abstract class TableTestUtilBase(test: TableTestBase, isStreamingMode: Boolean) 
                   detailLevel = explainLevel,
                   withChangelogTraits = withChangelogTraits,
                   withRowType = withRowType,
-                  withDuplicateChangesTrait = withDuplicateChanges)
+                  withUpsertKey = withUpsertKey,
+                  withDuplicateChangesTrait = withDuplicateChanges
+                )
             }
             .mkString("\n")
         }
@@ -1495,7 +1522,7 @@ case class StreamTableTestUtil(
   def buildStreamProgram(firstProgramNameToRemove: String): Unit = {
     val program = FlinkStreamProgram.buildProgram(tableEnv.getConfig)
     var startRemove = false
-    program.getProgramNames.foreach {
+    program.getProgramNames.asScala.foreach {
       name =>
         if (name.equals(firstProgramNameToRemove)) {
           startRemove = true
@@ -1548,7 +1575,7 @@ case class BatchTableTestUtil(
   def buildBatchProgram(firstProgramNameToRemove: String): Unit = {
     val program = FlinkBatchProgram.buildProgram(tableEnv.getConfig)
     var startRemove = false
-    program.getProgramNames.foreach {
+    program.getProgramNames.asScala.foreach {
       name =>
         if (name.equals(firstProgramNameToRemove)) {
           startRemove = true
@@ -1933,7 +1960,7 @@ object TableTestUtil {
     } else if (file.isHidden) {
       Seq.empty[String]
     } else {
-      Files.readAllLines(Paths.get(file.toURI)).toSeq
+      Files.readAllLines(Paths.get(file.toURI)).asScala
     }
   }
 

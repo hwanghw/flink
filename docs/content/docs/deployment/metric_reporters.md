@@ -189,7 +189,7 @@ Flink metric types are mapped to Prometheus metric types as follows:
 | --------- |------------|------------------------------------------|
 | Counter   | Gauge      |Prometheus counters cannot be decremented.|
 | Gauge     | Gauge      |Only numbers and booleans are supported.  |
-| Histogram | Summary    |Quantiles .5, .75, .95, .98, .99 and .999 |
+| Histogram | Summary    |Quantiles 0.0, .5, .75, .95, .98, .99, .999 and 1.0 |
 | Meter     | Gauge      |The gauge exports the meter's rate.       |
 
 All Flink metrics variables (see [List of all Variables]({{< ref "docs/ops/metrics" >}}#list-of-all-variables)) are exported to Prometheus as labels. 
@@ -213,11 +213,27 @@ metrics.reporter.promgateway.randomJobNameSuffix: true
 metrics.reporter.promgateway.deleteOnShutdown: false
 metrics.reporter.promgateway.groupingKey: k1=v1;k2=v2
 metrics.reporter.promgateway.interval: 60 SECONDS
+metrics.reporter.promgateway.allowList: metricA,metricB
 ```
 
 The PrometheusPushGatewayReporter pushes metrics to a [Pushgateway](https://github.com/prometheus/pushgateway), which can be scraped by Prometheus.
 
 Please see the [Prometheus documentation](https://prometheus.io/docs/practices/pushing/) for use-cases.
+
+#### HTTP Basic Authentication
+
+The reporter supports HTTP Basic Authentication for connecting to secured PushGateway instances. To enable authentication, configure both `username` and `password`:
+
+```yaml
+metrics.reporter.promgateway.factory.class: org.apache.flink.metrics.prometheus.PrometheusPushGatewayReporterFactory
+metrics.reporter.promgateway.hostUrl: https://pushgateway.example.com:9091
+metrics.reporter.promgateway.jobName: myJob
+metrics.reporter.promgateway.username: flink-reporter
+metrics.reporter.promgateway.password: ${PUSHGATEWAY_PASSWORD}
+metrics.reporter.promgateway.interval: 60 SECONDS
+```
+
+<span class="label label-info">Note</span> Basic authentication is enabled only when both `username` and `password` are configured. It is recommended to use HTTPS when authentication is enabled to protect credentials in transit.
 
 ### StatsD
 #### (org.apache.flink.metrics.statsd.StatsDReporter)
@@ -293,6 +309,15 @@ metrics.reporter.otel.exporter.protocol: gRPC
 metrics.reporter.otel.factory.class: org.apache.flink.metrics.otel.OpenTelemetryMetricReporterFactory
 metrics.reporter.otel.exporter.endpoint: http://127.0.0.1:9090
 metrics.reporter.otel.exporter.protocol: HTTP
+```
+
+```yaml
+# With batching enabled (500 metrics per export request)
+metrics.reporter.otel.factory.class: org.apache.flink.metrics.otel.OpenTelemetryMetricReporterFactory
+metrics.reporter.otel.exporter.endpoint: http://127.0.0.1:1337
+metrics.reporter.otel.exporter.protocol: gRPC
+metrics.reporter.otel.batch.size: 1500
+metrics.reporter.otel.export-completion-timeout-millis: 60000
 ```
 
 ### Slf4j

@@ -45,6 +45,7 @@ Out of the box, Flink bundles these state backends:
 
  - *HashMapStateBackend*
  - *EmbeddedRocksDBStateBackend*
+ - *ForStStateBackend*
 
 If nothing else is configured, the system will use the HashMapStateBackend.
 
@@ -53,10 +54,15 @@ If nothing else is configured, the system will use the HashMapStateBackend.
 The *HashMapStateBackend* holds data internally as objects on the Java heap. Key/value state and window operators hold hash tables
 that store the values, triggers, etc.
 
+Limitations of the HashMapStateBackend:
+
+  - State size is bounded by the JVM heap available on the TaskManagers. Restoring a checkpoint or savepoint requires that each TaskManager has enough heap to hold its share of the state.
+  - Only full snapshots are supported as incremental checkpoints are not available. Every checkpoint captures the complete state, which can lengthen checkpoint duration and recovery time as state grows.
+
 The HashMapStateBackend is encouraged for:
 
-  - Jobs with large state, long windows, large key/value states.
-  - All high-availability setups.
+  - Jobs whose state fits comfortably in the JVM heap of the TaskManagers, where fast, in-memory state access is the priority.
+  - Jobs with low-latency requirements that benefit from avoiding de-/serialization on every state access.
 
 It is also recommended to set [managed memory]({{< ref "docs/deployment/memory/mem_setup_tm" >}}#managed-memory) to zero.
 This will ensure that the maximum amount of memory is allocated for user code on the JVM.
@@ -95,7 +101,7 @@ Certain RocksDB native metrics are available but disabled by default, you can fi
 
 The total memory amount of RocksDB instance(s) per slot can also be bounded, please refer to documentation [here]({{< ref "docs/ops/state/large_state_tuning" >}}#bounding-rocksdb-memory-usage) for details.
 
-## The ForStStateBackend
+### The ForStStateBackend
 
 The *ForStStateBackend* is a state backend that is based on [ForSt project](https://github.com/ververica/ForSt),
 which is also a LSM-tree structured key-value store and built on top of the RocksDB.
@@ -299,7 +305,7 @@ See [configuration docs]({{< ref "docs/deployment/config" >}}#rocksdb-native-met
 Enabling RocksDB's native metrics may have a negative performance impact on your application.
 {{< /hint >}}
 
-### Advanced RocksDB Memory Turning
+### Advanced RocksDB Memory Tuning
 
 {{< hint info >}}
 Flink offers sophisticated default [memory management for RocksDB](#memory-management) that should work for most use-cases. The below mechanisms should mainly be used for *expert tuning* or *trouble shooting*.

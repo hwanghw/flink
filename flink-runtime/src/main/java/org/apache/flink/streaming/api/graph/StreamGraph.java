@@ -134,7 +134,7 @@ public class StreamGraph implements Pipeline, ExecutionPlan {
 
     private String jobName;
 
-    private JobID jobId;
+    @Nullable private JobID jobId;
 
     /** ID of the application this job belongs to. */
     @Nullable private ApplicationID applicationId;
@@ -204,6 +204,8 @@ public class StreamGraph implements Pipeline, ExecutionPlan {
     // declared
     private byte[] serializedWatermarkDeclarations;
 
+    private final Set<String> userJarsToSkip = new HashSet<>();
+
     public StreamGraph(
             Configuration jobConfiguration,
             ExecutionConfig executionConfig,
@@ -213,7 +215,6 @@ public class StreamGraph implements Pipeline, ExecutionPlan {
         this.executionConfig = checkNotNull(executionConfig);
         this.checkpointConfig = checkNotNull(checkpointConfig);
         this.savepointRestoreSettings = checkNotNull(savepointRestoreSettings);
-        this.jobId = new JobID();
         this.jobName = "(unnamed job)";
 
         // create an empty new stream graph.
@@ -265,6 +266,10 @@ public class StreamGraph implements Pipeline, ExecutionPlan {
     public void addJar(Path jar) {
         if (jar == null) {
             throw new IllegalArgumentException();
+        }
+
+        if (userJarsToSkip.contains(jar.getName())) {
+            return;
         }
 
         if (!userJars.contains(jar)) {
@@ -1281,12 +1286,16 @@ public class StreamGraph implements Pipeline, ExecutionPlan {
     }
 
     public void setJobId(JobID jobId) {
-        this.jobId = jobId;
+        this.jobId = checkNotNull(jobId);
+    }
+
+    public Optional<JobID> getOptionalJobId() {
+        return Optional.ofNullable(jobId);
     }
 
     @Override
     public JobID getJobID() {
-        return jobId;
+        return checkNotNull(jobId);
     }
 
     @Override
@@ -1297,6 +1306,12 @@ public class StreamGraph implements Pipeline, ExecutionPlan {
     @Override
     public Optional<ApplicationID> getApplicationId() {
         return Optional.ofNullable(applicationId);
+    }
+
+    public void addUserJarToSkip(String userJarName) {
+        LOG.info("Add user jar to skip uploading: {}", userJarName);
+        userJarsToSkip.add(userJarName);
+        userJars.removeIf(jar -> userJarName.equals(jar.getName()));
     }
 
     /**

@@ -148,7 +148,9 @@ function run_group_1 {
         #     run_test "Running Kerberized YARN application on Docker test (custom fs plugin)" "$END_TO_END_DIR/test-scripts/test_yarn_application_kerberos_docker.sh dummy-fs"
         # fi
     fi
+}
 
+function run_group_2 {
     ################################################################################
     # High Availability
     ################################################################################
@@ -162,9 +164,7 @@ function run_group_1 {
     run_test "Running HA per-job cluster (hashmap, sync) end-to-end test" "$END_TO_END_DIR/test-scripts/test_ha_per_job_cluster_datastream.sh hashmap false false" "skip_check_exceptions"
     run_test "Running HA per-job cluster (rocks, non-incremental) end-to-end test" "$END_TO_END_DIR/test-scripts/test_ha_per_job_cluster_datastream.sh rocks true false" "skip_check_exceptions"
     run_test "Running HA per-job cluster (rocks, incremental) end-to-end test" "$END_TO_END_DIR/test-scripts/test_ha_per_job_cluster_datastream.sh rocks true true" "skip_check_exceptions"
-}
 
-function run_group_2 {
     ################################################################################
     # Miscellaneous
     ################################################################################
@@ -182,18 +182,17 @@ function run_group_2 {
     run_test "Run kubernetes SQL application test" "$END_TO_END_DIR/test-scripts/test_kubernetes_sql_application.sh"
     run_test "Run kubernetes Materialized Table test" "$END_TO_END_DIR/test-scripts/test_kubernetes_materialized_table.sh"
 
-    run_test "Streaming File Sink end-to-end test" "$END_TO_END_DIR/test-scripts/test_file_sink.sh local StreamingFileSink" "skip_check_exceptions"
-    run_test "Streaming File Sink s3 end-to-end test" "$END_TO_END_DIR/test-scripts/test_file_sink.sh s3 StreamingFileSink" "skip_check_exceptions"
-    run_test "New File Sink end-to-end test" "$END_TO_END_DIR/test-scripts/test_file_sink.sh local FileSink" "skip_check_exceptions"
-    run_test "New File Sink s3 end-to-end test" "$END_TO_END_DIR/test-scripts/test_file_sink.sh s3 FileSink" "skip_check_exceptions"
+    run_test "File Sink end-to-end test" "$END_TO_END_DIR/test-scripts/test_file_sink.sh local" "skip_check_exceptions"
+    run_test "File Sink s3 end-to-end test" "$END_TO_END_DIR/test-scripts/test_file_sink.sh s3" "skip_check_exceptions"
 
-    run_test "Stateful stream job upgrade end-to-end test" "$END_TO_END_DIR/test-scripts/test_stateful_stream_job_upgrade.sh 2 4"
+    run_test "Wordcount Hadoop S3 SeaweedFS read-write end-to-end test" "$END_TO_END_DIR/test-scripts/test_batch_wordcount.sh hadoop_seaweedfs"
+    run_test "Wordcount Presto S3 SeaweedFS read end-to-end test" "$END_TO_END_DIR/test-scripts/test_batch_wordcount.sh presto_seaweedfs_read"
+}
 
-    run_test "Netty shuffle direct memory consumption end-to-end test" "$END_TO_END_DIR/test-scripts/test_netty_shuffle_memory_control.sh"
-
-    run_test "Quickstarts Java nightly end-to-end test" "$END_TO_END_DIR/test-scripts/test_quickstarts.sh java"
-
-    run_test "Walkthrough DataStream Java nightly end-to-end test" "$END_TO_END_DIR/test-scripts/test_datastream_walkthroughs.sh java"
+function run_group_3 {
+    ################################################################################
+    # Miscellaneous
+    ################################################################################
 
     # Disable this test as 2.0 broke the compatibility of kafka sink writer. We should consider migrate this test to flink-connector-kafka repo.
     # See FLINK-36268.
@@ -205,6 +204,17 @@ function run_group_2 {
     run_test "TPC-H end-to-end test" "$END_TO_END_DIR/test-scripts/test_tpch.sh"
     run_test "TPC-DS end-to-end test" "$END_TO_END_DIR/test-scripts/test_tpcds.sh"
     run_test "TPC-DS end-to-end test with adaptive batch scheduler" "$END_TO_END_DIR/test-scripts/test_tpcds.sh AdaptiveBatch run_test" "custom_check_exceptions" "$END_TO_END_DIR/test-scripts/test_tpcds.sh AdaptiveBatch check_exceptions"
+}
+
+function run_group_4 {
+
+    run_test "Stateful stream job upgrade end-to-end test" "$END_TO_END_DIR/test-scripts/test_stateful_stream_job_upgrade.sh 2 4"
+
+    run_test "Netty shuffle direct memory consumption end-to-end test" "$END_TO_END_DIR/test-scripts/test_netty_shuffle_memory_control.sh"
+
+    run_test "Quickstarts Java nightly end-to-end test" "$END_TO_END_DIR/test-scripts/test_quickstarts.sh java"
+
+    run_test "Walkthrough DataStream Java nightly end-to-end test" "$END_TO_END_DIR/test-scripts/test_datastream_walkthroughs.sh java"
 
     run_test "Heavy deployment end-to-end test" "$END_TO_END_DIR/test-scripts/test_heavy_deployment.sh" "skip_check_exceptions"
 
@@ -222,6 +232,8 @@ function run_group_2 {
     # if [[ ${PROFILE} != *"jdk11"* ]] && [[ `uname -i` != 'aarch64' ]]; then
     #     run_test "PyFlink YARN application on Docker test" "$END_TO_END_DIR/test-scripts/test_pyflink_yarn.sh" "skip_check_exceptions"
     # fi
+
+    run_test "Flink Table API with custom type end-to-end test" "$END_TO_END_DIR/test-scripts/test_table_api.sh"
 
     ################################################################################
     # Sticky Scheduling
@@ -260,9 +272,15 @@ if [ "$1" == "1" ]; then
     run_group_1
 elif [ "$1" == "2" ]; then
     run_group_2
+elif [ "$1" == "3" ]; then
+    run_group_3
+elif [ "$1" == "4" ]; then
+    run_group_4
 else
     run_group_1
     run_group_2
+    run_group_3
+    run_group_4
 fi
 
 

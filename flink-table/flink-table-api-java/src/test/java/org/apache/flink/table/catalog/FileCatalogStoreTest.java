@@ -23,7 +23,6 @@ import org.apache.flink.table.catalog.exceptions.CatalogException;
 import org.apache.flink.util.OperatingSystem;
 
 import org.assertj.core.api.ThrowableAssert;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -64,7 +63,6 @@ class FileCatalogStoreTest {
         assertCatalogStoreNotOpened(() -> catalogStore.removeCatalog(DUMMY, true));
     }
 
-    @Tag("org.apache.flink.testutils.junit.FailsInGHAContainerWithRootUser")
     @Test
     void testCannotMakeStorePath() {
         assumeThat(OperatingSystem.isWindows())
@@ -106,6 +104,38 @@ class FileCatalogStoreTest {
         Set<String> storedCatalogs = catalogStore.listCatalogs();
         assertThat(storedCatalogs.size()).isEqualTo(1);
         assertThat(storedCatalogs.contains(DUMMY)).isTrue();
+    }
+
+    @Test
+    void testStoreCatalogRejectsPathTraversal() throws Exception {
+        CatalogStore catalogStore = initCatalogStore();
+        catalogStore.open();
+
+        // A malicious catalog name that, if not validated, resolves outside of the
+        // catalog store directory: tempDir/dummy-catalog-store/../escaped.yaml ->
+        // tempDir/escaped.yaml.
+        String maliciousName = "../escaped";
+        File escapedFile = tempDir.resolve("escaped" + FileCatalogStore.FILE_EXTENSION).toFile();
+
+        assertThatThrownBy(() -> catalogStore.storeCatalog(maliciousName, DUMMY_CATALOG))
+                .isInstanceOf(CatalogException.class);
+        assertThat(escapedFile).doesNotExist();
+    }
+
+    @Test
+    void testStoreCatalogRejectsAbsoluteSchemeOverride() throws Exception {
+        CatalogStore catalogStore = initCatalogStore();
+        catalogStore.open();
+
+        // A catalog name that embeds its own absolute file:// URI. Per RFC 3986 §5.3, resolving
+        // an absolute reference against a base URI discards the base entirely, so if this isn't
+        // rejected, the catalog store directory is bypassed altogether.
+        File escapedFile = tempDir.resolve("escaped" + FileCatalogStore.FILE_EXTENSION).toFile();
+        String maliciousName = "file://" + escapedFile.getAbsolutePath().replace(".yaml", "");
+
+        assertThatThrownBy(() -> catalogStore.storeCatalog(maliciousName, DUMMY_CATALOG))
+                .isInstanceOf(CatalogException.class);
+        assertThat(escapedFile).doesNotExist();
     }
 
     @Test

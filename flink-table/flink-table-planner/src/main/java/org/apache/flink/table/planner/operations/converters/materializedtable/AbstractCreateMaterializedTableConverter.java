@@ -21,6 +21,7 @@ package org.apache.flink.table.planner.operations.converters.materializedtable;
 import org.apache.flink.sql.parser.ddl.materializedtable.SqlCreateMaterializedTable;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.table.api.config.MaterializedTableConfigOptions;
 import org.apache.flink.table.catalog.CatalogMaterializedTable;
 import org.apache.flink.table.catalog.CatalogMaterializedTable.LogicalRefreshMode;
 import org.apache.flink.table.catalog.CatalogMaterializedTable.RefreshMode;
@@ -29,9 +30,11 @@ import org.apache.flink.table.catalog.IntervalFreshness;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.ResolvedCatalogMaterializedTable;
 import org.apache.flink.table.catalog.ResolvedSchema;
+import org.apache.flink.table.catalog.StartMode;
 import org.apache.flink.table.catalog.TableDistribution;
 import org.apache.flink.table.catalog.UnresolvedIdentifier;
 import org.apache.flink.table.planner.operations.PlannerQueryOperation;
+import org.apache.flink.table.planner.operations.converters.SqlNodeConvertUtils;
 import org.apache.flink.table.planner.operations.converters.SqlNodeConverter;
 import org.apache.flink.table.planner.utils.MaterializedTableUtils;
 import org.apache.flink.table.planner.utils.OperationConverterUtils;
@@ -57,6 +60,12 @@ public abstract class AbstractCreateMaterializedTableConverter<T extends SqlCrea
         implements SqlNodeConverter<T> {
     /** Context of create table converters while merging source and derived items. */
     protected interface MergeContext {
+        boolean hasSchemaDefinition();
+
+        // A separate from schema definition method is required
+        // as current syntax allows to specify constraints only without the whole schema
+        boolean hasConstraintDefinition();
+
         Schema getMergedSchema();
 
         Map<String, String> getMergedTableOptions();
@@ -70,6 +79,18 @@ public abstract class AbstractCreateMaterializedTableConverter<T extends SqlCrea
         String getMergedExpandedQuery();
 
         ResolvedSchema getMergedQuerySchema();
+
+        PlannerQueryOperation getAsQueryOperation();
+
+        RefreshMode getMergedRefreshMode();
+
+        LogicalRefreshMode getMergedLogicalRefreshMode();
+
+        StartMode getMergedStartMode();
+
+        String getMergedComment();
+
+        IntervalFreshness getMergedFreshness();
     }
 
     protected abstract MergeContext getMergeContext(
@@ -91,16 +112,24 @@ public abstract class AbstractCreateMaterializedTableConverter<T extends SqlCrea
                 .orElse(null);
     }
 
-    protected final ResolvedSchema getQueryResolvedSchema(
-            T sqlCreateMaterializedTable, ConvertContext context) {
-        SqlNode selectQuery = sqlCreateMaterializedTable.getAsQuery();
-        SqlNode validateQuery = context.getSqlValidator().validate(selectQuery);
+    protected final StartMode getStartMode(T sqlCreateMaterializedTable, ConvertContext context) {
+        StartMode startMode =
+                MaterializedTableUtils.getStartMode(sqlCreateMaterializedTable.getStartMode());
+        if (startMode != null) {
+            return startMode;
+        }
+        return StartMode.of(
+                context.getTableConfig()
+                        .get(MaterializedTableConfigOptions.MATERIALIZED_TABLE_DEFAULT_START_MODE));
+    }
 
-        PlannerQueryOperation queryOperation =
-                new PlannerQueryOperation(
-                        context.toRelRoot(validateQuery).project(),
-                        () -> context.toQuotedSqlString(validateQuery));
-        return queryOperation.getResolvedSchema();
+    protected final PlannerQueryOperation getAsQueryOperation(
+            T sqlCreateMaterializedTable, ConvertContext context) {
+        final SqlNode selectQuery = sqlCreateMaterializedTable.getAsQuery();
+        final SqlNode validateQuery = context.getSqlValidator().validate(selectQuery);
+        return new PlannerQueryOperation(
+                context.toRelRoot(validateQuery).project(),
+                () -> context.toQuotedSqlString(validateQuery));
     }
 
     protected final LogicalRefreshMode getDerivedLogicalRefreshMode(T sqlCreateMaterializedTable) {
@@ -112,10 +141,17 @@ public abstract class AbstractCreateMaterializedTableConverter<T extends SqlCrea
         return MaterializedTableUtils.fromLogicalRefreshModeToRefreshMode(logicalRefreshMode);
     }
 
+    /**
+     * Returns the user's original {@code AS} query text, sliced verbatim from the statement so
+     * formatting and identifier casing are preserved (e.g. {@code int} is not normalized to {@code
+     * INTEGER}). A comment placed between {@code AS} and the query is kept; the {@code AS} keyword
+     * itself is excluded.
+     */
     protected final String getDerivedOriginalQuery(
             T sqlCreateMaterializedTable, ConvertContext context) {
-        SqlNode selectQuery = sqlCreateMaterializedTable.getAsQuery();
-        return context.toQuotedSqlString(selectQuery);
+        return SqlNodeConvertUtils.extractOriginalAsQueryText(
+                        context, sqlCreateMaterializedTable.getAsQueryKeywordPos())
+                .orElse(context.toQuotedSqlString(sqlCreateMaterializedTable.getAsQuery()));
     }
 
     protected final String getDerivedExpandedQuery(
@@ -130,8 +166,7 @@ public abstract class AbstractCreateMaterializedTableConverter<T extends SqlCrea
     }
 
     protected final ResolvedCatalogMaterializedTable getResolvedCatalogMaterializedTable(
-            T sqlCreateMaterializedTable, ConvertContext context) {
-        final MergeContext mergeContext = getMergeContext(sqlCreateMaterializedTable, context);
+            MergeContext mergeContext, T sqlCreateMaterializedTable, ConvertContext context) {
         final List<String> partitionKeys = mergeContext.getMergedPartitionKeys();
         final Schema schema = mergeContext.getMergedSchema();
         final ResolvedSchema querySchema = mergeContext.getMergedQuerySchema();
@@ -152,6 +187,8 @@ public abstract class AbstractCreateMaterializedTableConverter<T extends SqlCrea
 
         final RefreshMode refreshMode = getDerivedRefreshMode(logicalRefreshMode);
 
+        final StartMode startMode = mergeContext.getMergedStartMode();
+
         return context.getCatalogManager()
                 .resolveCatalogMaterializedTable(
                         CatalogMaterializedTable.newBuilder()
@@ -166,6 +203,7 @@ public abstract class AbstractCreateMaterializedTableConverter<T extends SqlCrea
                                 .logicalRefreshMode(logicalRefreshMode)
                                 .refreshMode(refreshMode)
                                 .refreshStatus(RefreshStatus.INITIALIZING)
+                                .startMode(startMode)
                                 .build());
     }
 

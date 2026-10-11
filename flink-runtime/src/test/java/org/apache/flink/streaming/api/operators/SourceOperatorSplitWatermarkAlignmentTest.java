@@ -73,6 +73,8 @@ import java.util.stream.Collectors;
 import static org.apache.flink.configuration.PipelineOptions.WATERMARK_ALIGNMENT_BUFFER_SIZE;
 import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /** Unit test for split alignment in {@link SourceOperator}. */
 class SourceOperatorSplitWatermarkAlignmentTest {
@@ -499,6 +501,132 @@ class SourceOperatorSplitWatermarkAlignmentTest {
         operator.emitNext(actualOutput);
         assertOutput(actualOutput, Arrays.asList(5, 6, 7));
         assertThat(operator.getSplitMetricGroup(split0.splitId()).isActive()).isTrue();
+    }
+
+    @Test
+    void testAlignmentCheckIsDeferredForIdleSplits() throws Exception {
+        final long idleTimeout = 100;
+        final MockSourceReader sourceReader =
+                new MockSourceReader(WaitingForSplits.DO_NOT_WAIT_FOR_SPLITS, true, true);
+        final TestProcessingTimeService processingTimeService = new TestProcessingTimeService();
+        // Split states math assumes non-negative time
+        processingTimeService.setCurrentTime(0);
+        final SourceOperator<Integer, MockSourceSplit> operator =
+                createAndOpenSourceOperatorWithIdleness(
+                        sourceReader, processingTimeService, idleTimeout);
+
+        final MockSourceSplit split0 = new MockSourceSplit(0, 0, 10);
+        final int allowedWatermark4 = 4;
+        final int allowedWatermark7 = 7;
+        split0.addRecord(5);
+        split0.addRecord(6);
+        split0.addRecord(7);
+        split0.addRecord(8);
+        operator.handleOperatorEvent(
+                new AddSplitEvent<>(Arrays.asList(split0), new MockSourceSplitSerializer()));
+        final CollectingDataOutput<Integer> actualOutput = new CollectingDataOutput<>();
+
+        // Emit enough record to fill the sampler buffer
+        operator.emitNext(actualOutput);
+        operator.emitNext(actualOutput);
+        operator.emitNext(actualOutput);
+        sampleAllWatermarks(processingTimeService);
+
+        // Transition the split to idle state:
+        for (int i = 0; i < 10; i++) {
+            processingTimeService.advance(idleTimeout);
+        }
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isIdle()).isTrue();
+
+        // Alignment check fires but doesn't pause the idle split
+        operator.handleOperatorEvent(new WatermarkAlignmentEvent(allowedWatermark4));
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isIdle()).isTrue();
+
+        // While the split is idle, we advance the allowed watermark to keep the source active
+        operator.handleOperatorEvent(new WatermarkAlignmentEvent(allowedWatermark7));
+        sampleAllWatermarks(processingTimeService);
+        // The split is still idle:
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isIdle()).isTrue();
+
+        // updating timers values manually (in reality this is done by ViewUpdater)
+        operator.getSplitMetricGroup(split0.splitId()).updateTimers();
+        // Ensure the idle timer ticked, but not pause timer
+        assertNotEquals(
+                0L, operator.getSplitMetricGroup(split0.splitId()).getAccumulatedIdleTime());
+        assertEquals(0L, operator.getSplitMetricGroup(split0.splitId()).getAccumulatedPausedTime());
+
+        // The split emits a record to break out of idleness
+        operator.emitNext(actualOutput);
+        sampleAllWatermarks(processingTimeService);
+
+        // The split is marked not idle, then immediately paused by the deferred alignment check
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isPaused()).isTrue();
+
+        // Make pause timer tick
+        processingTimeService.advance(10);
+        operator.getSplitMetricGroup(split0.splitId()).updateTimers();
+        assertNotEquals(
+                0L, operator.getSplitMetricGroup(split0.splitId()).getAccumulatedPausedTime());
+    }
+
+    @Test
+    void testPausedIdleSplitsCanBeResumedByAlignmentCheck() throws Exception {
+        final long idleTimeout = 1000;
+        final long autoWatermarkIntervalMillis = 100;
+        final long marginMillis = autoWatermarkIntervalMillis / 2;
+        final MockSourceReader sourceReader =
+                new MockSourceReader(WaitingForSplits.DO_NOT_WAIT_FOR_SPLITS, true, true);
+        final TestProcessingTimeService processingTimeService = new TestProcessingTimeService();
+        processingTimeService.setCurrentTime(0);
+        final SourceOperator<Integer, MockSourceSplit> operator =
+                createAndOpenSourceOperatorWithIdleness(
+                        sourceReader, processingTimeService, idleTimeout);
+
+        final MockSourceSplit split0 = new MockSourceSplit(0, 0, 10);
+        final int allowedWatermark4 = 4;
+        final int allowedWatermark7 = 7;
+        split0.addRecord(5);
+        split0.addRecord(6);
+        operator.handleOperatorEvent(
+                new AddSplitEvent<>(
+                        Collections.singletonList(split0), new MockSourceSplitSerializer()));
+        final CollectingDataOutput<Integer> actualOutput = new CollectingDataOutput<>();
+
+        operator.emitNext(actualOutput); // 5
+        sampleAllWatermarks(
+                processingTimeService); // fill the alignment ring buffer with watermark=5
+        final long timeElapsed =
+                WATERMARK_ALIGNMENT_BUFFER_SIZE.defaultValue() * updateIntervalMillis;
+
+        // Advancing in small steps (TestProcessingTimeService limitation)
+        processingTimeService.advance(2 * autoWatermarkIntervalMillis - timeElapsed); // t=200
+        processingTimeService.advance(idleTimeout); // t=1200
+        processingTimeService.advance(marginMillis); // t=1250
+
+        // Firing alignment check at t=1250.
+        // Idleness clock will be now paused 250ms past the timeout (1000),
+        // which means it will fire on the next idleness periodic check
+        operator.handleOperatorEvent(new WatermarkAlignmentEvent(allowedWatermark4));
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isPaused()).isTrue();
+        assertThat(sourceReader.getPausedSplits()).containsExactly("0");
+        assertOutput(actualOutput, Arrays.asList(5));
+
+        // Triggerring the next idleness periodic check
+        // which marks the split idle while paused.
+        processingTimeService.advance(autoWatermarkIntervalMillis + marginMillis); // t=1400
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isIdle()).isTrue();
+        assertThat(sourceReader.getPausedSplits()).containsExactly("0");
+
+        // Watermark advances and resumes the split
+        // (Though it is still considered idle - this is what this commit is about)
+        operator.handleOperatorEvent(new WatermarkAlignmentEvent(allowedWatermark7));
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isIdle()).isTrue();
+        assertThat(sourceReader.getPausedSplits()).isEmpty();
+
+        // The split emits a record and breaks out of idleness
+        operator.emitNext(actualOutput); // 6
+        assertThat(operator.getSplitMetricGroup(split0.splitId()).isActive()).isTrue();
+        assertOutput(actualOutput, Arrays.asList(5, 6));
     }
 
     private void sampleAllWatermarks(TestProcessingTimeService timeService) throws Exception {

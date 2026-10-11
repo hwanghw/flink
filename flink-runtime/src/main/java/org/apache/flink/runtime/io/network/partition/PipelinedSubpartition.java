@@ -252,8 +252,21 @@ public class PipelinedSubpartition extends ResultSubpartition implements Channel
     @GuardedBy("buffers")
     private boolean needNotifyPriorityEvent() {
         assert Thread.holdsLock(buffers);
-        // if subpartition is blocked then downstream doesn't expect any notifications
-        return buffers.getNumPriorityElements() == 1 && !isBlocked;
+        // Priority events (e.g. unaligned checkpoint barriers) must notify downstream even
+        // when the subpartition is blocked.
+        //
+        // During recovery, once the upstream output channel state is fully restored, a
+        // RECOVERY_COMPLETION event (EndOfOutputChannelStateEvent) is emitted. This event
+        // blocks the subpartition to prevent the upstream from sending new data while the
+        // downstream is still consuming recovered buffers. The subpartition remains blocked
+        // until the downstream finishes consuming all recovered buffers from every channel
+        // and calls resumeConsumption() to unblock.
+        //
+        // If a checkpoint is triggered while the downstream is still consuming recovered
+        // buffers, the upstream receives an unaligned checkpoint barrier and adds it to this
+        // blocked subpartition. The barrier must still be delivered to the downstream
+        // immediately, otherwise the checkpoint will hang until it times out.
+        return buffers.getNumPriorityElements() == 1;
     }
 
     @GuardedBy("buffers")
@@ -456,7 +469,10 @@ public class PipelinedSubpartition extends ResultSubpartition implements Channel
     @Nullable
     BufferAndBacklog pollBuffer() {
         synchronized (buffers) {
-            if (isBlocked) {
+            // When blocked (e.g. by RECOVERY_COMPLETION event), only allow priority buffers
+            // (e.g. unaligned checkpoint barriers) to be polled. Regular buffers remain blocked
+            // until resumeConsumption() is called. See needNotifyPriorityEvent() for details.
+            if (isBlockedForDelivery()) {
                 return null;
             }
 
@@ -603,11 +619,20 @@ public class PipelinedSubpartition extends ResultSubpartition implements Channel
         }
     }
 
+    /**
+     * Blocked for delivery when blocked (e.g. by RECOVERY_COMPLETION) with no priority element
+     * queued; priority buffers (e.g. unaligned barriers) are still delivered while blocked.
+     */
+    @GuardedBy("buffers")
+    private boolean isBlockedForDelivery() {
+        return isBlocked && buffers.getNumPriorityElements() == 0;
+    }
+
     @GuardedBy("buffers")
     private boolean isDataAvailableUnsafe() {
         assert Thread.holdsLock(buffers);
 
-        return !isBlocked && (flushRequested || getNumberOfFinishedBuffers() > 0);
+        return !isBlockedForDelivery() && (flushRequested || getNumberOfFinishedBuffers() > 0);
     }
 
     private Buffer.DataType getNextBufferTypeUnsafe() {
@@ -735,7 +760,7 @@ public class PipelinedSubpartition extends ResultSubpartition implements Channel
     @SuppressWarnings("FieldAccessNotGuarded")
     @Override
     public int getBuffersInBacklogUnsafe() {
-        if (isBlocked || buffers.isEmpty()) {
+        if (isBlockedForDelivery() || buffers.isEmpty()) {
             return 0;
         }
 

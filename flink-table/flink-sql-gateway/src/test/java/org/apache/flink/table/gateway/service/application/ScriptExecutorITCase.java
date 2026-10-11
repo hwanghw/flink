@@ -83,9 +83,12 @@ public class ScriptExecutorITCase extends AbstractSqlGatewayStatementITCaseBase 
                     loader,
                     miniCluster.getConfiguration(),
                     ScriptExecutor.class.getClassLoader(),
+                    Integer.MAX_VALUE,
+                    Integer.MAX_VALUE,
                     false,
-                    false,
-                    null);
+                    null,
+                    null,
+                    Collections.emptyList());
 
             executor =
                     new TestScriptExecutor(

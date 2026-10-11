@@ -97,5 +97,13 @@ public interface LogicalTypeVisitor<R> {
         return visit((LogicalType) variantType);
     }
 
+    default R visit(BitmapType bitmapType) {
+        return visit((LogicalType) bitmapType);
+    }
+
+    default R visit(UuidType uuidType) {
+        return visit((LogicalType) uuidType);
+    }
+
     R visit(LogicalType other);
 }

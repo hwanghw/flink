@@ -69,6 +69,8 @@
     "org.apache.flink.sql.parser.ddl.materializedtable.SqlAlterMaterializedTableSchema.SqlAlterMaterializedTableModifySchema"
     "org.apache.flink.sql.parser.ddl.materializedtable.SqlCreateOrAlterMaterializedTable"
     "org.apache.flink.sql.parser.ddl.materializedtable.SqlDropMaterializedTable"
+    "org.apache.flink.sql.parser.ddl.materializedtable.SqlStartMode"
+    "org.apache.flink.sql.parser.ddl.materializedtable.SqlStartMode.SqlStartModeKind"
     "org.apache.flink.sql.parser.ddl.model.SqlAlterModel"
     "org.apache.flink.sql.parser.ddl.model.SqlAlterModelRename"
     "org.apache.flink.sql.parser.ddl.model.SqlAlterModelReset"
@@ -170,6 +172,7 @@
     "org.apache.flink.sql.parser.dql.SqlDescribeJob"
     "org.apache.flink.sql.parser.type.ExtendedSqlCollectionTypeNameSpec"
     "org.apache.flink.sql.parser.type.ExtendedSqlRowTypeNameSpec"
+    "org.apache.flink.sql.parser.type.SqlBitmapTypeNameSpec"
     "org.apache.flink.sql.parser.type.SqlRawTypeNameSpec"
     "org.apache.flink.sql.parser.type.SqlStructuredTypeNameSpec"
     "org.apache.flink.sql.parser.type.SqlTimestampLtzTypeNameSpec"
@@ -182,6 +185,7 @@
     "org.apache.calcite.sql.SqlDrop"
     "org.apache.calcite.sql.SqlExplicitModelOperator"
     "org.apache.calcite.sql.SqlIntervalLiteral"
+    "org.apache.calcite.runtime.Resources"
     "java.util.ArrayList"
     "java.util.Collections"
     "java.util.HashSet"
@@ -194,6 +198,8 @@
   # Please keep the keyword in alphabetical order if new keyword is added.
   keywords: [
     "ANALYZE"
+    "ARTIFACT"
+    "BITMAP"
     "BUCKETS"
     "BYTES"
     "CATALOGS"
@@ -214,6 +220,9 @@
     "ENFORCED"
     "ESTIMATED_COST"
     "EXTENDED"
+    "FROM_BEGINNING"
+    "FROM_NOW"
+    "FROM_TIMESTAMP"
     "FUNCTIONS"
     "FRESHNESS"
     "HASH"
@@ -242,7 +251,11 @@
     "REFRESH_MODE"
     "REMOVE"
     "RENAME"
+    "RESUME_OR_FROM_BEGINNING"
+    "RESUME_OR_FROM_NOW"
+    "RESUME_OR_FROM_TIMESTAMP"
     "SCALA"
+    "START_MODE"
     "STATISTICS"
     "STOP"
     "STRING"
@@ -273,6 +286,7 @@
     "ALWAYS"
     "APPLY"
     "ARRAY_AGG"
+    "ARTIFACT"
     "ASC"
     "ASSERTION"
     "ASSIGNMENT"
@@ -356,6 +370,9 @@
     "FORTRAN"
     "FOUND"
     "FRAC_SECOND"
+    "FROM_BEGINNING"
+    "FROM_NOW"
+    "FROM_TIMESTAMP"
     "G"
     "GENERAL"
     "GENERATED"
@@ -465,6 +482,9 @@
     "RETURNED_OCTET_LENGTH"
     "RETURNED_SQLSTATE"
     "RETURNING"
+    "RESUME_OR_FROM_BEGINNING"
+    "RESUME_OR_FROM_NOW"
+    "RESUME_OR_FROM_TIMESTAMP"
     "ROLE"
     "ROUTINE"
     "ROUTINE_CATALOG"
@@ -542,6 +562,7 @@
     "SQL_TSI_YEAR"
     "SQL_VARBINARY"
     "SQL_VARCHAR"
+    "START_MODE"
     "STATE"
     "STOP"
     "STRUCTURE"
@@ -612,6 +633,7 @@
     "OVERWRITING"
     "PARTITIONED"
     "PARTITIONS"
+    "UUID"
     "VIRTUAL"
     "ANALYZE"
     "COMPUTE"
@@ -696,6 +718,7 @@
     "SqlRawTypeName()"
     "ExtendedSqlRowTypeName()"
     "SqlStructuredTypeName()"
+    "SqlBitmapTypeName()"
   ]
 
   # List of methods for parsing builtin function calls.
@@ -750,9 +773,13 @@
   joinTypes: [
   ]
 
+  # Method for parsing "SET [OR RESET]" calls.
+  setOptionParserMethod: "SqlSetOption"
+
   includePosixOperators: false
   includeCompoundIdentifier: true
   includeBraces: true
   includeAdditionalDeclarations: false
   includeParsingStringLiteralAsArrayLiteral: false
+  includeIntervalWithoutQualifier: false
 }

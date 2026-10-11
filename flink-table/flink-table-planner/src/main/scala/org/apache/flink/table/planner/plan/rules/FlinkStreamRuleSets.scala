@@ -79,12 +79,9 @@ object FlinkStreamRuleSets {
     CoreRules.JOIN_REDUCE_EXPRESSIONS
   )
 
-  /** RuleSet to simplify coalesce invocations */
   private val SIMPLIFY_COALESCE_RULES: RuleSet = RuleSets.ofList(
-    RemoveUnreachableCoalesceArgumentsRule.PROJECT_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.FILTER_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.JOIN_INSTANCE,
-    RemoveUnreachableCoalesceArgumentsRule.CALC_INSTANCE
+    SimplifyCoalesceWithEquiJoinConditionRule.PROJECT_INSTANCE,
+    SimplifyCoalesceWithEquiJoinConditionRule.CALC_INSTANCE
   )
 
   /** RuleSet to simplify predicate expressions in filters and joins */
@@ -115,11 +112,20 @@ object FlinkStreamRuleSets {
           WindowPropertiesRules.WINDOW_PROPERTIES_RULE,
           WindowPropertiesRules.WINDOW_PROPERTIES_HAVING_RULE,
           // ensure union set operator have the same row type
-          new CoerceInputsRule(classOf[LogicalUnion], false),
+          CoerceInputsRule.Config.DEFAULT
+            .withCoerceNames(false)
+            .withConsumerRelClass(classOf[LogicalUnion])
+            .toRule,
           // ensure intersect set operator have the same row type
-          new CoerceInputsRule(classOf[LogicalIntersect], false),
+          CoerceInputsRule.Config.DEFAULT
+            .withCoerceNames(false)
+            .withConsumerRelClass(classOf[LogicalIntersect])
+            .toRule,
           // ensure except set operator have the same row type
-          new CoerceInputsRule(classOf[LogicalMinus], false),
+          CoerceInputsRule.Config.DEFAULT
+            .withCoerceNames(false)
+            .withConsumerRelClass(classOf[LogicalMinus])
+            .toRule,
           ConvertToNotInOrInRule.INSTANCE,
           // optimize limit 0
           PruneEmptyRules.SORT_FETCH_ZERO_INSTANCE,
@@ -133,7 +139,10 @@ object FlinkStreamRuleSets {
           // rewrite constant table function scan to correlate
           JoinTableFunctionScanToCorrelateRule.INSTANCE,
           // Wrap arguments for JSON aggregate functions
-          WrapJsonAggFunctionArgumentsRule.INSTANCE
+          WrapJsonAggFunctionArgumentsRule.AGGREGATE_INSTANCE,
+          WrapJsonAggFunctionArgumentsRule.WINDOW_AGGREGATE_INSTANCE,
+          // prune COUNT(*) input to project a constant before aggregation
+          PruneCountStarInputRule.INSTANCE
         )
     ).asJava)
 
@@ -183,15 +192,19 @@ object FlinkStreamRuleSets {
 
   /** RuleSet to prune empty results rules */
   val PRUNE_EMPTY_RULES: RuleSet = RuleSets.ofList(
-    FlinkPruneEmptyRules.UNION_INSTANCE,
-    PruneEmptyRules.INTERSECT_INSTANCE,
-    FlinkPruneEmptyRules.MINUS_INSTANCE,
     PruneEmptyRules.PROJECT_INSTANCE,
     PruneEmptyRules.FILTER_INSTANCE,
+    PruneEmptyRules.UNION_INSTANCE,
+    PruneEmptyRules.INTERSECT_INSTANCE,
+    PruneEmptyRules.MINUS_INSTANCE,
     PruneEmptyRules.SORT_INSTANCE,
     PruneEmptyRules.AGGREGATE_INSTANCE,
     PruneEmptyRules.JOIN_LEFT_INSTANCE,
-    PruneEmptyRules.JOIN_RIGHT_INSTANCE
+    PruneEmptyRules.JOIN_RIGHT_INSTANCE,
+    // Replaces global Aggregate over empty Values with default literal values
+    // (e.g. COUNT(*)=0). Handles the plan-time case where the planner can
+    // statically determine the input is empty.
+    CoreRules.AGGREGATE_VALUES
   )
 
   /** RuleSet about project */
@@ -390,12 +403,20 @@ object FlinkStreamRuleSets {
     PushFilterInCalcIntoTableSourceScanRule.INSTANCE,
     // Rule that rewrites temporal join with extracted primary key
     TemporalJoinRewriteWithUniqueKeyRule.INSTANCE,
+    // Rewrites a join over a SNAPSHOT table function call into a dedicated
+    // FlinkLogicalLateralSnapshotJoin for the LATERAL SNAPSHOT operator.
+    LogicalJoinToLateralSnapshotJoinRule.INSTANCE,
+    // Rejects SNAPSHOT scans that survived the rewrite above, i.e. SNAPSHOT calls used outside a
+    // LATERAL context. Must run after LogicalJoinToLateralSnapshotJoinRule.
+    ForbidSnapshotOutsideLateralRule.INSTANCE,
     // Avoids accessing a field from the result (condition).
     PythonCalcSplitRule.SPLIT_CONDITION_REX_FIELD,
     // Avoids accessing a field from the result (projection).
     PythonCalcSplitRule.SPLIT_PROJECTION_REX_FIELD,
     // Avoids dealing with a python call in the condition.
     PythonCalcSplitRule.SPLIT_CONDITION,
+    // Deduplicates Python UDF calls shared between condition and projection.
+    PythonCalcSplitRule.CONDITION_PROJECTION_CSE,
     // Avoids dealing with Java calls in the same Calc as python calls.
     PythonCalcSplitRule.SPLIT_PROJECT,
     // Splits calcs which contain both general Python functions and pandas Python functions
@@ -406,6 +427,8 @@ object FlinkStreamRuleSets {
     PythonCalcSplitRule.PUSH_CONDITION,
     // Orders the projections so that input references are first, followed by python calls.
     PythonCalcSplitRule.REWRITE_PROJECT,
+    // Deduplicates identical deterministic python calls within the projection.
+    PythonCalcSplitRule.PROJECTION_CSE,
     // Renames the field names of the Flatten calc which is right after a calc representing a
     // Python Map operation to the output names of the map function
     PythonMapRenameRule.INSTANCE,
@@ -497,6 +520,7 @@ object FlinkStreamRuleSets {
     StreamPhysicalMultiJoinRule.INSTANCE,
     StreamPhysicalIntervalJoinRule.INSTANCE,
     StreamPhysicalTemporalJoinRule.INSTANCE,
+    StreamPhysicalLateralSnapshotJoinRule.INSTANCE,
     StreamPhysicalLookupJoinRule.SNAPSHOT_ON_TABLESCAN,
     StreamPhysicalLookupJoinRule.SNAPSHOT_ON_CALC_TABLESCAN,
     StreamPhysicalWindowJoinRule.INSTANCE,

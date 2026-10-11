@@ -188,7 +188,8 @@ class FlinkRelMdModifiedMonotonicity private extends MetadataHandler[ModifiedMon
 
   def getRelModifiedMonotonicity(rel: Rank, mq: RelMetadataQuery): RelModifiedMonotonicity = {
     rel match {
-      case physicalRank: StreamPhysicalRank if RankUtil.isDeduplication(rel) =>
+      // Only Ranks that can be converted to a Deduplicate operator are handled here
+      case physicalRank: StreamPhysicalRank if RankUtil.isDeduplicationOnTimeAttribute(rel) =>
         getPhysicalRankModifiedMonotonicity(physicalRank, mq)
 
       case _ =>
@@ -249,8 +250,9 @@ class FlinkRelMdModifiedMonotonicity private extends MetadataHandler[ModifiedMon
   private def getPhysicalRankModifiedMonotonicity(
       rank: StreamPhysicalRank,
       mq: RelMetadataQuery): RelModifiedMonotonicity = {
-    // Can't use RankUtil.canConvertToDeduplicate directly because modifyKindSetTrait is undefined.
     if (allAppend(mq, rank.getInput)) {
+      // A LastRow (ORDER BY time DESC) or rowtime deduplication retracts and re-emits the kept row
+      // when a new winner arrives, hence generates updates; only FirstRow on proctime is append-only.
       if (RankUtil.keepLastDeduplicateRow(rank.orderKey) || rank.sortOnRowTime) {
         val mono = new RelModifiedMonotonicity(
           Array.fill(rank.getRowType.getFieldCount)(NOT_MONOTONIC))

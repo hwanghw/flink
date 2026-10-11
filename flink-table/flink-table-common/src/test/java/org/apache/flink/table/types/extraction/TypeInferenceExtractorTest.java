@@ -26,8 +26,12 @@ import org.apache.flink.table.annotation.FunctionHint;
 import org.apache.flink.table.annotation.InputGroup;
 import org.apache.flink.table.annotation.ProcedureHint;
 import org.apache.flink.table.annotation.StateHint;
+import org.apache.flink.table.annotation.StateKind;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.table.api.dataview.ListView;
+import org.apache.flink.table.api.dataview.MapView;
+import org.apache.flink.table.api.dataview.ValueView;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.functions.AggregateFunction;
 import org.apache.flink.table.functions.AsyncScalarFunction;
@@ -49,6 +53,8 @@ import org.apache.flink.table.types.inference.TypeStrategies;
 import org.apache.flink.table.types.inference.TypeStrategy;
 import org.apache.flink.table.types.utils.DataTypeFactoryMock;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.bitmap.Bitmap;
+import org.apache.flink.types.variant.Variant;
 
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -229,6 +235,17 @@ class TypeInferenceExtractorTest {
                                         }),
                                 TypeStrategies.explicit(
                                         DataTypes.BIGINT().notNull().bridgedTo(long.class))),
+                // ---
+                // test eval method with lambda capture whose synthetic method shares the
+                // same bytecode descriptor, previously causing "Argument name conflict"
+                TestSpec.forScalarFunction(
+                                "ScalarFunctionWithLambdaCapture",
+                                ScalarFunctionWithLambdaCapture.class)
+                        .expectStaticArgument(
+                                StaticArgument.scalar("id", DataTypes.BIGINT(), false))
+                        .expectStaticArgument(
+                                StaticArgument.scalar("field", DataTypes.STRING(), false))
+                        .expectOutput(TypeStrategies.explicit(DataTypes.STRING())),
                 // ---
                 // test overloaded arguments extraction async
                 TestSpec.forAsyncScalarFunction(OverloadedFunctionAsync.class)
@@ -430,6 +447,10 @@ class TypeInferenceExtractorTest {
                         .expectStaticArgument(StaticArgument.scalar("i", DataTypes.INT(), false))
                         .expectState("myAcc", TypeStrategies.explicit(MyState.TYPE))
                         .expectOutput(TypeStrategies.explicit(DataTypes.INT())),
+                // ---
+                TestSpec.forAggregateFunction(BroadcastStateHintAggregateFunction.class)
+                        .expectErrorMessage(
+                                "Broadcast state is only supported for process table functions."),
                 // ---
                 // accumulator with state hint in function hint
                 TestSpec.forAggregateFunction(StateHintInFunctionHintAggregateFunction.class)
@@ -841,7 +862,95 @@ class TypeInferenceExtractorTest {
                 // ---
                 TestSpec.forProcessTableFunction(MultiEvalProcessTableFunction.class)
                         .expectErrorMessage(
-                                "Process table functions require a non-overloaded, non-vararg, and static signature."));
+                                "Process table functions require a non-overloaded, non-vararg, and static signature."),
+                // ---
+                TestSpec.forProcessTableFunction(BroadcastStateProcessTableFunction.class)
+                        .expectStaticArgument(
+                                StaticArgument.table(
+                                        "data",
+                                        Row.class,
+                                        false,
+                                        EnumSet.of(StaticArgumentTrait.SET_SEMANTIC_TABLE)))
+                        .expectStaticArgument(
+                                StaticArgument.table(
+                                        "rules",
+                                        Row.class,
+                                        false,
+                                        EnumSet.of(StaticArgumentTrait.BROADCAST_SEMANTIC_TABLE)))
+                        .expectState("count", TypeStrategies.explicit(MyFirstState.TYPE))
+                        .expectBroadcastState(
+                                "mapRules",
+                                TypeStrategies.explicit(
+                                        MapView.newMapViewDataType(
+                                                DataTypes.STRING(), DataTypes.INT())))
+                        .expectBroadcastState(
+                                "valueRule",
+                                TypeStrategies.explicit(
+                                        ValueView.newValueViewDataType(DataTypes.STRING())))
+                        .expectBroadcastState(
+                                "eagerRule", TypeStrategies.explicit(MySecondState.TYPE))
+                        .expectOutput(TypeStrategies.explicit(DataTypes.INT())),
+                // ---
+                TestSpec.forProcessTableFunction(ListViewBroadcastStateProcessTableFunction.class)
+                        .expectErrorMessage(
+                                "Broadcast state entries must not be a ListView. "
+                                        + "Use a MapView, ValueView, or an eager value state instead."),
+                // ---
+                TestSpec.forProcessTableFunction(TtlBroadcastStateProcessTableFunction.class)
+                        .expectErrorMessage(
+                                "Broadcast state entries must not declare a time-to-live (TTL)."),
+                // ---
+                TestSpec.forProcessTableFunction(
+                                PassThroughBroadcastTableProcessTableFunction.class)
+                        .expectErrorMessage(
+                                "Invalid argument traits for argument 'rules'. "
+                                        + "Trait BROADCAST_SEMANTIC_TABLE is incompatible with PASS_COLUMNS_THROUGH."),
+                TestSpec.forScalarFunction("Bitmap in scalar function", BitmapTypeFunction.class)
+                        .expectStaticArgument(
+                                StaticArgument.scalar("bm", DataTypes.BITMAP(), false))
+                        .expectStaticArgument(
+                                StaticArgument.scalar(
+                                        "array", DataTypes.ARRAY(DataTypes.BITMAP()), false))
+                        .expectStaticArgument(
+                                StaticArgument.scalar(
+                                        "map",
+                                        DataTypes.MAP(DataTypes.INT(), DataTypes.BITMAP()),
+                                        false))
+                        .expectStaticArgument(
+                                StaticArgument.scalar(
+                                        "row",
+                                        DataTypes.ROW(DataTypes.FIELD("a", DataTypes.BITMAP())),
+                                        false))
+                        .expectOutput(TypeStrategies.explicit(DataTypes.BITMAP())),
+                TestSpec.forAsyncScalarFunction(
+                                "Bitmap in async scalar function", BitmapTypeAsyncFunction.class)
+                        .expectStaticArgument(
+                                StaticArgument.scalar("bm", DataTypes.BITMAP(), false))
+                        .expectOutput(TypeStrategies.explicit(DataTypes.BITMAP())),
+                TestSpec.forAggregateFunction(
+                                "Bitmap in aggregate function", BitmapTypeAggFunction.class)
+                        .expectStaticArgument(
+                                StaticArgument.scalar("bitmap", DataTypes.BITMAP(), false))
+                        .expectAccumulator(TypeStrategies.explicit(DataTypes.BITMAP()))
+                        .expectOutput(TypeStrategies.explicit(DataTypes.BITMAP())),
+                // ---
+                TestSpec.forScalarFunction("Variant in scalar function", VariantTypeFunction.class)
+                        .expectStaticArgument(
+                                StaticArgument.scalar("v", DataTypes.VARIANT(), false))
+                        .expectStaticArgument(
+                                StaticArgument.scalar(
+                                        "array", DataTypes.ARRAY(DataTypes.VARIANT()), false))
+                        .expectStaticArgument(
+                                StaticArgument.scalar(
+                                        "map",
+                                        DataTypes.MAP(DataTypes.INT(), DataTypes.VARIANT()),
+                                        false))
+                        .expectStaticArgument(
+                                StaticArgument.scalar(
+                                        "row",
+                                        DataTypes.ROW(DataTypes.FIELD("a", DataTypes.VARIANT())),
+                                        false))
+                        .expectOutput(TypeStrategies.explicit(DataTypes.VARIANT())));
     }
 
     private static Stream<TestSpec> procedureSpecs() {
@@ -1176,7 +1285,11 @@ class TypeInferenceExtractorTest {
                                 ArgumentHintOptionalOnPrimitiveParameterConflictProcedure.class)
                         .expectErrorMessage(
                                 "Considering all hints, the method should comply with the signature:\n"
-                                        + "int[] call(_, java.lang.String, java.lang.Integer)"));
+                                        + "int[] call(_, java.lang.String, java.lang.Integer)"),
+                TestSpec.forProcedure("Bitmap in procedure", BitmapTypeProcedure.class)
+                        .expectStaticArgument(
+                                StaticArgument.scalar("bitmap", DataTypes.BITMAP(), false))
+                        .expectOutput(TypeStrategies.explicit(DataTypes.BITMAP())));
     }
 
     @ParameterizedTest(name = "{index}: {0}")
@@ -1312,8 +1425,13 @@ class TypeInferenceExtractorTest {
         }
 
         static TestSpec forAggregateFunction(Class<? extends AggregateFunction<?, ?>> function) {
+            return forAggregateFunction(null, function);
+        }
+
+        static TestSpec forAggregateFunction(
+                String description, Class<? extends AggregateFunction<?, ?>> function) {
             return new TestSpec(
-                    function.getSimpleName(),
+                    description == null ? function.getSimpleName() : description,
                     () ->
                             TypeInferenceExtractor.forAggregateFunction(
                                     new DataTypeFactoryMock(), function));
@@ -1386,6 +1504,11 @@ class TypeInferenceExtractorTest {
 
         TestSpec expectState(String name, TypeStrategy typeStrategy, @Nullable Duration ttl) {
             this.expectedStateStrategies.put(name, StateTypeStrategy.of(typeStrategy, ttl));
+            return this;
+        }
+
+        TestSpec expectBroadcastState(String name, TypeStrategy typeStrategy) {
+            this.expectedStateStrategies.put(name, StateTypeStrategy.of(typeStrategy, null, true));
             return this;
         }
 
@@ -1544,6 +1667,13 @@ class TypeInferenceExtractorTest {
         }
     }
 
+    private static class ScalarFunctionWithLambdaCapture extends ScalarFunction {
+        public String eval(Long id, String field) {
+            Supplier<String> supplier = () -> String.valueOf(id) + field;
+            return supplier.get();
+        }
+    }
+
     private static class VarArgFunction extends ScalarFunction {
         public String eval(int i, int... more) {
             return null;
@@ -1607,6 +1737,21 @@ class TypeInferenceExtractorTest {
         @Override
         public Row createAccumulator() {
             return null;
+        }
+    }
+
+    private static class BroadcastStateHintAggregateFunction
+            extends AggregateFunction<Integer, MyState> {
+        public void accumulate(@StateHint(StateKind.BROADCAST) MyState acc, Integer i) {}
+
+        @Override
+        public Integer getValue(MyState accumulator) {
+            return null;
+        }
+
+        @Override
+        public MyState createAccumulator() {
+            return new MyState();
         }
     }
 
@@ -2592,6 +2737,41 @@ class TypeInferenceExtractorTest {
         public void eval(String i) {}
     }
 
+    private static class BroadcastStateProcessTableFunction extends ProcessTableFunction<Integer> {
+        public void eval(
+                @StateHint MyFirstState count,
+                @StateHint(StateKind.BROADCAST) MapView<String, Integer> mapRules,
+                @StateHint(StateKind.BROADCAST) ValueView<String> valueRule,
+                @StateHint(StateKind.BROADCAST) MySecondState eagerRule,
+                @ArgumentHint(ArgumentTrait.SET_SEMANTIC_TABLE) Row data,
+                @ArgumentHint(ArgumentTrait.BROADCAST_SEMANTIC_TABLE) Row rules) {}
+    }
+
+    private static class ListViewBroadcastStateProcessTableFunction
+            extends ProcessTableFunction<Integer> {
+        public void eval(
+                @StateHint(StateKind.BROADCAST) ListView<String> rules,
+                @ArgumentHint(ArgumentTrait.SET_SEMANTIC_TABLE) Row data) {}
+    }
+
+    private static class TtlBroadcastStateProcessTableFunction
+            extends ProcessTableFunction<Integer> {
+        public void eval(
+                @StateHint(value = StateKind.BROADCAST, ttl = "1 day") MyFirstState rule,
+                @ArgumentHint(ArgumentTrait.SET_SEMANTIC_TABLE) Row data) {}
+    }
+
+    private static class PassThroughBroadcastTableProcessTableFunction
+            extends ProcessTableFunction<Integer> {
+        public void eval(
+                @ArgumentHint(ArgumentTrait.ROW_SEMANTIC_TABLE) Row data,
+                @ArgumentHint({
+                            ArgumentTrait.BROADCAST_SEMANTIC_TABLE,
+                            ArgumentTrait.PASS_COLUMNS_THROUGH
+                        })
+                        Row rules) {}
+    }
+
     private static class MissingDefaultConstructorStateProcessTableFunction
             extends ProcessTableFunction<Integer> {
 
@@ -2621,6 +2801,52 @@ class TypeInferenceExtractorTest {
     private static class TableArgScalarFunction extends ScalarFunction {
         public int eval(@ArgumentHint(ArgumentTrait.ROW_SEMANTIC_TABLE) Row t) {
             return 0;
+        }
+    }
+
+    @FunctionHint(output = @DataTypeHint("BITMAP"))
+    private static class BitmapTypeFunction extends ScalarFunction {
+        public Bitmap eval(
+                Bitmap bm,
+                Bitmap[] array,
+                Map<Integer, Bitmap> map,
+                @DataTypeHint("ROW<a BITMAP>") Row row) {
+            return null;
+        }
+    }
+
+    private static class BitmapTypeAsyncFunction extends AsyncScalarFunction {
+        public void eval(CompletableFuture<Bitmap> f, Bitmap bm) {}
+    }
+
+    private static class BitmapTypeAggFunction extends AggregateFunction<Bitmap, Bitmap> {
+        public void accumulate(Bitmap accumulator, Bitmap bitmap) {}
+
+        @Override
+        public Bitmap createAccumulator() {
+            return null;
+        }
+
+        @Override
+        public Bitmap getValue(Bitmap accumulator) {
+            return null;
+        }
+    }
+
+    private static class BitmapTypeProcedure implements Procedure {
+        public Bitmap[] call(Object procedureContext, Bitmap bitmap) {
+            return null;
+        }
+    }
+
+    @FunctionHint(output = @DataTypeHint("VARIANT"))
+    private static class VariantTypeFunction extends ScalarFunction {
+        public Variant eval(
+                Variant v,
+                Variant[] array,
+                Map<Integer, Variant> map,
+                @DataTypeHint("ROW<a VARIANT>") Row row) {
+            return null;
         }
     }
 }

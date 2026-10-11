@@ -16,7 +16,9 @@
  */
 package org.apache.calcite.sql.fun;
 
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
+import org.apache.flink.table.planner.plan.schema.BitmapRelDataType;
 import org.apache.flink.table.types.logical.utils.LogicalTypeCasts;
 
 import com.google.common.collect.ImmutableSetMultimap;
@@ -31,12 +33,14 @@ import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlFunctionCategory;
 import org.apache.calcite.sql.SqlIntervalQualifier;
 import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlOperandCountRange;
 import org.apache.calcite.sql.SqlOperatorBinding;
 import org.apache.calcite.sql.SqlSyntax;
 import org.apache.calcite.sql.SqlUtil;
 import org.apache.calcite.sql.SqlWriter;
+import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.sql.type.FlinkSqlTypeMappingRule;
 import org.apache.calcite.sql.type.InferTypes;
 import org.apache.calcite.sql.type.SqlOperandCountRanges;
@@ -72,6 +76,11 @@ import static org.apache.calcite.util.Static.RESOURCE;
  * SqlTypeUtil#canCastFrom(RelDataType, RelDataType, boolean)}. Line 141 in {@link
  * #checkOperandTypes(SqlCallBinding, boolean)} and new method {@link #canCastFrom(RelDataType,
  * RelDataType)}.
+ *
+ * <p>Flink's {@link #deriveType(RelDataTypeFactory, RelDataType, RelDataType, boolean)} preserves
+ * the target type's nested nullability instead of delegating to {@link
+ * #createTypeWithNullabilityFromExpr(RelDataTypeFactory, RelDataType, RelDataType, boolean)}. The
+ * VARIANT rules introduced in Calcite 1.39.0 are also applied in {@code deriveType}.
  *
  * @see SqlCastOperator
  */
@@ -116,7 +125,7 @@ public class SqlCastFunction extends SqlFunction {
 
     static SqlReturnTypeInference returnTypeInference(boolean safe) {
         return opBinding -> {
-            assert opBinding.getOperandCount() == 2;
+            assert opBinding.getOperandCount() <= 3;
             final RelDataType ret =
                     deriveType(
                             opBinding.getTypeFactory(),
@@ -129,7 +138,7 @@ public class SqlCastFunction extends SqlFunction {
                 SqlNode operand0 = callBinding.operand(0);
 
                 // dynamic parameters and null constants need their types assigned
-                // to them using the type they are casted to.
+                // to them using the type they are cast to.
                 if (SqlUtil.isNullLiteral(operand0, false) || operand0 instanceof SqlDynamicParam) {
                     callBinding.getValidator().setValidatedNodeType(operand0, ret);
                 }
@@ -144,6 +153,21 @@ public class SqlCastFunction extends SqlFunction {
             RelDataType expressionType,
             RelDataType targetType,
             boolean safe) {
+        // Flink modification: apply the same VARIANT nullability rules as
+        // createTypeWithNullabilityFromExpr.
+        if (targetType.getSqlTypeName() == SqlTypeName.VARIANT) {
+            // A variant can be cast from any other type, and it inherits
+            // the nullability of the source.
+            // Note that the order of this test and the next one is important.
+            return typeFactory.createTypeWithNullability(targetType, expressionType.isNullable());
+        }
+
+        if (expressionType.getSqlTypeName() == SqlTypeName.VARIANT) {
+            // A variant can be cast to any other type, but the result
+            // is always nullable, like in the case of a safe cast.
+            return typeFactory.createTypeWithNullability(targetType, true);
+        }
+
         return typeFactory.createTypeWithNullability(
                 targetType, expressionType.isNullable() || safe);
     }
@@ -154,6 +178,19 @@ public class SqlCastFunction extends SqlFunction {
             RelDataType targetType,
             boolean safe) {
         boolean isNullable = expressionType.isNullable() || safe;
+
+        if (targetType.getSqlTypeName() == SqlTypeName.VARIANT) {
+            // A variant can be cast from any other type, and it inherits
+            // the nullability of the source.
+            // Note that the order of this test and the next one is important.
+            return typeFactory.createTypeWithNullability(targetType, expressionType.isNullable());
+        }
+
+        if (expressionType.getSqlTypeName() == SqlTypeName.VARIANT) {
+            // A variant can be cast to any other type, but the result
+            // is always nullable, like in the case of a safe cast.
+            return typeFactory.createTypeWithNullability(targetType, true);
+        }
 
         if (isCollection(expressionType)) {
             RelDataType expressionElementType = expressionType.getComponentType();
@@ -208,13 +245,13 @@ public class SqlCastFunction extends SqlFunction {
 
     @Override
     public String getSignatureTemplate(final int operandsCount) {
-        assert operandsCount == 2;
-        return "{0}({1} AS {2})";
+        assert operandsCount <= 3;
+        return "{0}({1} AS {2} [FORMAT {3}])";
     }
 
     @Override
     public SqlOperandCountRange getOperandCountRange() {
-        return SqlOperandCountRanges.of(2);
+        return SqlOperandCountRanges.between(2, 3);
     }
 
     /**
@@ -225,8 +262,16 @@ public class SqlCastFunction extends SqlFunction {
     public boolean checkOperandTypes(SqlCallBinding callBinding, boolean throwOnFailure) {
         final SqlNode left = callBinding.operand(0);
         final SqlNode right = callBinding.operand(1);
+        final SqlLiteral format =
+                callBinding.getOperandCount() > 2
+                        ? (SqlLiteral) callBinding.operand(2)
+                        : SqlLiteral.createNull(SqlParserPos.ZERO);
+
         if (SqlUtil.isNullLiteral(left, false) || left instanceof SqlDynamicParam) {
             return true;
+        }
+        if (!SqlUtil.isNull(format)) {
+            throw new ValidationException("CAST with FORMAT is not yet supported");
         }
         RelDataType validatedNodeType = callBinding.getValidator().getValidatedNodeType(left);
         RelDataType returnType = SqlTypeUtil.deriveType(callBinding, right);
@@ -249,16 +294,29 @@ public class SqlCastFunction extends SqlFunction {
             }
             return false;
         }
-        return true;
+
+        // Validate format argument is string type if included
+        return SqlUtil.isNullLiteral(format, false)
+                || SqlLiteral.valueMatchesType(format.getValue(), SqlTypeName.CHAR);
     }
 
     private boolean canCastFrom(RelDataType toType, RelDataType fromType) {
         SqlTypeName fromTypeName = fromType.getSqlTypeName();
+        SqlTypeName toTypeName = toType.getSqlTypeName();
 
-        // Cast to Variant is not support at the moment.
-        // TODO: Support cast to variant (FLINK-37925，FLINK-37926)
-        if (toType.getSqlTypeName() == SqlTypeName.VARIANT) {
+        // Cast to BITMAP is not supported at the moment.
+        if (toType instanceof BitmapRelDataType) {
             return false;
+        }
+        // UUID and casts to VARIANT are governed entirely by our own checker, because Calcite
+        // only allows a UUID to be cast from another UUID and does not know which types VARIANT
+        // can store.
+        if (toTypeName == SqlTypeName.UUID
+                || fromTypeName == SqlTypeName.UUID
+                || toTypeName == SqlTypeName.VARIANT) {
+            return LogicalTypeCasts.supportsExplicitCast(
+                    FlinkTypeFactory.toLogicalType(fromType),
+                    FlinkTypeFactory.toLogicalType(toType));
         }
         switch (fromTypeName) {
             case ARRAY:
@@ -286,7 +344,7 @@ public class SqlCastFunction extends SqlFunction {
 
     @Override
     public void unparse(SqlWriter writer, SqlCall call, int leftPrec, int rightPrec) {
-        assert call.operandCount() == 2;
+        assert call.operandCount() <= 3;
         final SqlWriter.Frame frame = writer.startFunCall(getName());
         call.operand(0).unparse(writer, 0, 0);
         writer.sep("AS");
@@ -294,6 +352,10 @@ public class SqlCastFunction extends SqlFunction {
             writer.sep("INTERVAL");
         }
         call.operand(1).unparse(writer, 0, 0);
+        if (call.getOperandList().size() > 2) {
+            writer.sep("FORMAT");
+            call.operand(2).unparse(writer, 0, 0);
+        }
         writer.endFunCall(frame);
     }
 

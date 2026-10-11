@@ -19,12 +19,15 @@
 package org.apache.flink.table.api.internal;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.catalog.CatalogBaseTable;
 import org.apache.flink.table.catalog.CatalogBaseTable.TableKind;
+import org.apache.flink.table.catalog.CatalogConnection;
 import org.apache.flink.table.catalog.CatalogDescriptor;
 import org.apache.flink.table.catalog.CatalogView;
 import org.apache.flink.table.catalog.Column;
+import org.apache.flink.table.catalog.Interval;
 import org.apache.flink.table.catalog.IntervalFreshness;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.QueryOperationCatalogView;
@@ -33,44 +36,60 @@ import org.apache.flink.table.catalog.ResolvedCatalogMaterializedTable;
 import org.apache.flink.table.catalog.ResolvedCatalogModel;
 import org.apache.flink.table.catalog.ResolvedCatalogTable;
 import org.apache.flink.table.catalog.ResolvedSchema;
+import org.apache.flink.table.catalog.StartMode;
 import org.apache.flink.table.catalog.TableDistribution;
 import org.apache.flink.table.catalog.UniqueConstraint;
 import org.apache.flink.table.expressions.SqlFactory;
+import org.apache.flink.table.factories.DefaultConnectionFactory;
+import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.utils.EncodingUtils;
 
 import org.apache.commons.lang3.StringUtils;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.TemporalAmount;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 /** SHOW CREATE statement Util. */
 @Internal
 public class ShowCreateUtil {
 
+    private static final DateTimeFormatter TIMESTAMP_FORMATTER =
+            DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
     private static final String PRINT_INDENT = "  ";
 
     private ShowCreateUtil() {}
 
     public static String buildShowCreateModelRow(
-            ResolvedCatalogModel model, ObjectIdentifier modelIdentifier, boolean isTemporary) {
+            ResolvedCatalogModel model,
+            ObjectIdentifier modelIdentifier,
+            boolean isTemporary,
+            List<String> additionalSensitiveKeys) {
         StringBuilder sb =
                 new StringBuilder()
                         .append(
                                 buildCreateFormattedPrefix(
-                                        "MODEL", isTemporary, modelIdentifier, false));
+                                        "MODEL", isTemporary, modelIdentifier, false, false));
         extractFormattedColumns(model.getResolvedInputSchema())
                 .ifPresent(
                         c -> sb.append(String.format("INPUT (%s)%s", c, System.lineSeparator())));
         extractFormattedColumns(model.getResolvedOutputSchema())
                 .ifPresent(
                         c -> sb.append(String.format("OUTPUT (%s)%s", c, System.lineSeparator())));
-        extractComment(model)
+        extractComment(model.getComment())
                 .ifPresent(c -> sb.append(formatComment(c)).append(System.lineSeparator()));
-        extractFormattedOptions(model.getOptions(), PRINT_INDENT)
+        extractFormattedOptions(model.getOptions(), PRINT_INDENT, additionalSensitiveKeys)
                 .ifPresent(
                         v ->
                                 sb.append(String.format("WITH (%s", System.lineSeparator()))
@@ -83,31 +102,67 @@ public class ShowCreateUtil {
         return sb.toString();
     }
 
+    public static String buildShowCreateConnectionRow(
+            CatalogConnection connection,
+            ObjectIdentifier connectionIdentifier,
+            boolean isTemporary,
+            List<String> additionalSensitiveKeys) {
+        StringBuilder sb =
+                new StringBuilder()
+                        .append(
+                                buildCreateFormattedPrefix(
+                                        "CONNECTION",
+                                        isTemporary,
+                                        connectionIdentifier,
+                                        false,
+                                        false));
+        extractComment(connection.getComment())
+                .ifPresent(c -> sb.append(formatComment(c)).append("\n"));
+        final Map<String, String> connectionOptions =
+                withoutConnectionInternalOptions(connection.getOptions());
+        extractFormattedOptions(
+                        connectionOptions.isEmpty()
+                                        && connection
+                                                .getOptions()
+                                                .containsKey(
+                                                        DefaultConnectionFactory
+                                                                .SECRET_REFERENCE_KEY)
+                                ? Map.of(
+                                        FactoryUtil.CONNECTION_TYPE.key(),
+                                        FactoryUtil.CONNECTION_TYPE.defaultValue())
+                                : connectionOptions,
+                        PRINT_INDENT,
+                        additionalSensitiveKeys)
+                .ifPresent(v -> sb.append("WITH (\n").append(v).append("\n)\n"));
+        return sb.toString();
+    }
+
     public static String buildShowCreateTableRow(
             ResolvedCatalogBaseTable<?> table,
             ObjectIdentifier tableIdentifier,
             boolean isTemporary,
-            SqlFactory sqlFactory) {
+            SqlFactory sqlFactory,
+            List<String> additionalSensitiveKeys) {
         validateTableKind(table, tableIdentifier, TableKind.TABLE);
         StringBuilder sb =
                 new StringBuilder()
                         .append(
                                 buildCreateFormattedPrefix(
-                                        "TABLE", isTemporary, tableIdentifier, true));
+                                        "TABLE", isTemporary, tableIdentifier, false, true));
         sb.append(extractFormattedColumns(table, PRINT_INDENT));
         extractFormattedWatermarkSpecs(table, PRINT_INDENT, sqlFactory)
                 .ifPresent(watermarkSpecs -> sb.append(",\n").append(watermarkSpecs));
         extractFormattedPrimaryKey(table, PRINT_INDENT)
                 .ifPresent(pk -> sb.append(",\n").append(pk));
         sb.append("\n)\n");
-        extractComment(table).ifPresent(c -> sb.append(formatComment(c)).append("\n"));
+        extractComment(table.getComment()).ifPresent(c -> sb.append(formatComment(c)).append("\n"));
         extractFormattedDistributedInfo((ResolvedCatalogTable) table)
                 .ifPresent(d -> sb.append(d).append("\n"));
         extractFormattedPartitionedInfo((ResolvedCatalogTable) table)
                 .ifPresent(
                         partitionedInfoFormatted ->
                                 sb.append(formatPartitionedBy(partitionedInfoFormatted)));
-        extractFormattedOptions(table.getOptions(), PRINT_INDENT)
+        extractFormattedOptions(table.getOptions(), PRINT_INDENT, additionalSensitiveKeys)
                 .ifPresent(v -> sb.append("WITH (\n").append(v).append("\n)\n"));
         return sb.toString();
     }
@@ -117,31 +172,120 @@ public class ShowCreateUtil {
             ResolvedCatalogMaterializedTable table,
             ObjectIdentifier tableIdentifier,
             boolean isTemporary,
-            SqlFactory sqlFactory) {
+            boolean createOrAlter,
+            ZoneId timeZoneId,
+            SqlFactory sqlFactory,
+            List<String> additionalSensitiveKeys) {
+        return buildShowCreateMaterializedTableRow(
+                table,
+                tableIdentifier,
+                isTemporary,
+                createOrAlter,
+                timeZoneId,
+                sqlFactory,
+                true,
+                true,
+                additionalSensitiveKeys);
+    }
+
+    /**
+     * Package-private overload of the convenience {@code buildShowCreateMaterializedTableRow}
+     * accepting a {@link Clock}, for the same reason as above.
+     */
+    static String buildShowCreateMaterializedTableRow(
+            ResolvedCatalogMaterializedTable table,
+            ObjectIdentifier tableIdentifier,
+            boolean isTemporary,
+            boolean createOrAlter,
+            ZoneId timeZoneId,
+            SqlFactory sqlFactory,
+            List<String> additionalSensitiveKeys,
+            Clock clock) {
+        return buildShowCreateMaterializedTableRow(
+                table,
+                tableIdentifier,
+                isTemporary,
+                createOrAlter,
+                timeZoneId,
+                sqlFactory,
+                true,
+                true,
+                additionalSensitiveKeys,
+                clock);
+    }
+
+    /** Show create materialized table statement only for materialized tables. */
+    public static String buildShowCreateMaterializedTableRow(
+            ResolvedCatalogMaterializedTable table,
+            ObjectIdentifier tableIdentifier,
+            boolean isTemporary,
+            boolean createOrAlter,
+            ZoneId timeZoneId,
+            SqlFactory sqlFactory,
+            boolean includeFreshness,
+            boolean includeRefreshMode,
+            List<String> additionalSensitiveKeys) {
+        return buildShowCreateMaterializedTableRow(
+                table,
+                tableIdentifier,
+                isTemporary,
+                createOrAlter,
+                timeZoneId,
+                sqlFactory,
+                includeFreshness,
+                includeRefreshMode,
+                additionalSensitiveKeys,
+                Clock.systemUTC());
+    }
+
+    /**
+     * Show create materialized table statement only for materialized tables.
+     *
+     * <p>Package-private overload accepting a {@link Clock} so tests can pin the "Evaluated to
+     * FROM_TIMESTAMP(...)" comment for FROM_NOW/RESUME_OR_FROM_NOW to a deterministic value.
+     */
+    static String buildShowCreateMaterializedTableRow(
+            ResolvedCatalogMaterializedTable table,
+            ObjectIdentifier tableIdentifier,
+            boolean isTemporary,
+            boolean createOrAlter,
+            ZoneId timeZoneId,
+            SqlFactory sqlFactory,
+            boolean includeFreshness,
+            boolean includeRefreshMode,
+            List<String> additionalSensitiveKeys,
+            Clock clock) {
         validateTableKind(table, tableIdentifier, TableKind.MATERIALIZED_TABLE);
         StringBuilder sb =
                 new StringBuilder()
                         .append(
                                 buildCreateFormattedPrefix(
-                                        "MATERIALIZED TABLE", isTemporary, tableIdentifier, true));
+                                        "MATERIALIZED TABLE",
+                                        isTemporary,
+                                        tableIdentifier,
+                                        createOrAlter,
+                                        true));
         sb.append(extractFormattedColumns(table, PRINT_INDENT));
         extractFormattedWatermarkSpecs(table, PRINT_INDENT, sqlFactory)
                 .ifPresent(watermarkSpecs -> sb.append(",\n").append(watermarkSpecs));
         extractFormattedPrimaryKey(table, PRINT_INDENT)
                 .ifPresent(pk -> sb.append(",\n").append(pk));
         sb.append("\n)\n");
-        extractComment(table).ifPresent(c -> sb.append(formatComment(c)).append("\n"));
+        extractComment(table.getComment()).ifPresent(c -> sb.append(formatComment(c)).append("\n"));
         table.getDistribution()
                 .map(TableDistribution::toString)
                 .ifPresent(d -> sb.append(d).append("\n"));
         extractFormattedPartitionedInfo(table)
                 .ifPresent(partitionedBy -> sb.append(formatPartitionedBy(partitionedBy)));
-        extractFormattedOptions(table.getOptions(), PRINT_INDENT)
+        extractFormattedOptions(table.getOptions(), PRINT_INDENT, additionalSensitiveKeys)
                 .ifPresent(v -> sb.append("WITH (\n").append(v).append("\n)\n"));
-        sb.append(extractFreshness(table))
-                .append("\n")
-                .append(extractRefreshMode(table))
-                .append("\n");
+        sb.append(extractStartMode(table, timeZoneId, clock)).append("\n");
+        if (includeFreshness) {
+            sb.append(extractFreshness(table)).append("\n");
+        }
+        if (includeRefreshMode) {
+            sb.append(extractRefreshMode(table)).append("\n");
+        }
         sb.append("AS ").append(table.getExpandedQuery()).append('\n');
         return sb.toString();
     }
@@ -162,22 +306,26 @@ public class ShowCreateUtil {
                 new StringBuilder()
                         .append(
                                 buildCreateFormattedPrefix(
-                                        "VIEW", isTemporary, viewIdentifier, true));
+                                        "VIEW", isTemporary, viewIdentifier, false, true));
         sb.append(extractFormattedColumnNames(view, PRINT_INDENT)).append("\n)\n");
-        extractComment(view).ifPresent(c -> sb.append(formatComment(c)).append("\n"));
+        extractComment(view.getComment()).ifPresent(c -> sb.append(formatComment(c)).append("\n"));
         sb.append("AS ").append(((CatalogView) origin).getExpandedQuery()).append("\n");
 
         return sb.toString();
     }
 
-    public static String buildShowCreateCatalogRow(CatalogDescriptor catalogDescriptor) {
+    public static String buildShowCreateCatalogRow(
+            CatalogDescriptor catalogDescriptor, List<String> additionalSensitiveKeys) {
         final Optional<String> comment = catalogDescriptor.getComment();
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE CATALOG ")
                 .append(EncodingUtils.escapeIdentifier(catalogDescriptor.getCatalogName()))
                 .append("\n");
         comment.ifPresent(c -> sb.append(formatComment(c)).append("\n"));
-        extractFormattedOptions(catalogDescriptor.getConfiguration().toMap(), PRINT_INDENT)
+        extractFormattedOptions(
+                        catalogDescriptor.getConfiguration().toMap(),
+                        PRINT_INDENT,
+                        additionalSensitiveKeys)
                 .ifPresent(o -> sb.append("WITH (\n").append(o).append("\n)\n"));
         return sb.toString();
     }
@@ -186,9 +334,11 @@ public class ShowCreateUtil {
             String type,
             boolean isTemporary,
             ObjectIdentifier identifier,
+            boolean createOrAlter,
             boolean openParenthesis) {
         return String.format(
-                "CREATE %s%s %s%s%s",
+                "CREATE %s%s%s %s%s%s",
+                createOrAlter ? "OR ALTER " : "",
                 isTemporary ? "TEMPORARY " : "",
                 type,
                 identifier.asSerializableString(),
@@ -270,7 +420,7 @@ public class ShowCreateUtil {
                                                         watermarkSpec.getRowtimeAttribute()),
                                                 watermarkSpec
                                                         .getWatermarkExpression()
-                                                        .asSerializableString(sqlFactory)))
+                                                        .asSerializableString()))
                         .collect(Collectors.joining("\n")));
     }
 
@@ -282,16 +432,18 @@ public class ShowCreateUtil {
         return String.format("PARTITIONED BY (%s)\n", partitionedByColumns);
     }
 
-    static Optional<String> extractComment(ResolvedCatalogBaseTable<?> table) {
-        return StringUtils.isEmpty(table.getComment())
-                ? Optional.empty()
-                : Optional.of(table.getComment());
+    private static Optional<String> extractComment(String comment) {
+        return StringUtils.isEmpty(comment) ? Optional.empty() : Optional.of(comment);
     }
 
-    static Optional<String> extractComment(ResolvedCatalogModel model) {
-        return StringUtils.isEmpty(model.getComment())
-                ? Optional.empty()
-                : Optional.of(model.getComment());
+    public static Map<String, String> withoutConnectionInternalOptions(
+            Map<String, String> options) {
+        return options.entrySet().stream()
+                .filter(
+                        entry ->
+                                !DefaultConnectionFactory.SECRET_REFERENCE_KEY.equals(
+                                        entry.getKey()))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
     static Optional<String> extractFormattedDistributedInfo(ResolvedCatalogTable catalogTable) {
@@ -330,21 +482,89 @@ public class ShowCreateUtil {
         return String.format("REFRESH_MODE = %s", materializedTable.getRefreshMode());
     }
 
-    static Optional<String> extractFormattedOptions(Map<String, String> conf, String printIndent) {
+    static String extractStartMode(
+            ResolvedCatalogMaterializedTable materializedTable, ZoneId timeZoneId, Clock clock) {
+        StringBuilder sb = new StringBuilder("START_MODE = ");
+        StartMode startMode = materializedTable.getStartMode().get();
+        switch (startMode.getKind()) {
+            case FROM_BEGINNING:
+            case RESUME_OR_FROM_BEGINNING:
+                sb.append(startMode.getKind().name());
+                break;
+
+            case FROM_NOW:
+            case RESUME_OR_FROM_NOW:
+                Interval interval = startMode.getInterval();
+                if (interval == null) {
+                    sb.append(startMode.getKind().name());
+                    break;
+                }
+
+                final TemporalAmount amount =
+                        interval.getDuration() == null
+                                ? interval.getPeriod()
+                                : interval.getDuration();
+                sb.append(startMode.getKind().name())
+                        .append("(")
+                        .append(interval)
+                        .append(")")
+                        .append(" /* Evaluated to FROM_TIMESTAMP(TIMESTAMP '")
+                        .append(
+                                getFormattedLocalDateTime(
+                                        LocalDateTime.now(clock.withZone(ZoneOffset.UTC))
+                                                .minus(amount)
+                                                .toInstant(ZoneOffset.UTC),
+                                        ZoneOffset.UTC))
+                        .append("') at execution */");
+                break;
+
+            case FROM_TIMESTAMP:
+            case RESUME_OR_FROM_TIMESTAMP:
+                sb.append(startMode.getKind().name());
+                sb.append("(TIMESTAMP");
+                if (startMode.isLocalTimeZone()) {
+                    sb.append(" WITH LOCAL TIME ZONE");
+                }
+                sb.append(" '")
+                        .append(
+                                getFormattedLocalDateTime(
+                                        startMode.getTimestamp(),
+                                        startMode.isLocalTimeZone() ? timeZoneId : ZoneOffset.UTC))
+                        .append("')");
+                break;
+
+            default:
+                throw new TableException(String.format("Unsupported start mode '%s'.", startMode));
+        }
+        return sb.toString();
+    }
+
+    private static String getFormattedLocalDateTime(Instant instant, ZoneId timeZone) {
+        return TIMESTAMP_FORMATTER.format(LocalDateTime.ofInstant(instant, timeZone));
+    }
+
+    static Optional<String> extractFormattedOptions(
+            Map<String, String> conf, String printIndent, List<String> additionalSensitiveKeys) {
         if (Objects.isNull(conf) || conf.isEmpty()) {
             return Optional.empty();
         }
+        TreeSet<String> treeSet = new TreeSet<>(conf.keySet());
+
         return Optional.of(
-                conf.entrySet().stream()
+                treeSet.stream()
                         .map(
                                 entry ->
                                         String.format(
                                                 "%s'%s' = '%s'",
                                                 printIndent,
-                                                EncodingUtils.escapeSingleQuotes(entry.getKey()),
-                                                EncodingUtils.escapeSingleQuotes(entry.getValue())))
-                        .sorted()
-                        .collect(Collectors.joining("," + System.lineSeparator())));
+                                                EncodingUtils.escapeSingleQuotes(entry),
+                                                EncodingUtils.escapeSingleQuotes(
+                                                        GlobalConfiguration.isSensitive(
+                                                                        entry,
+                                                                        additionalSensitiveKeys)
+                                                                ? GlobalConfiguration.HIDDEN_CONTENT
+                                                                : conf.get(entry))))
+                        .collect(Collectors.joining(",\n")));
     }
 
     static String extractFormattedColumnNames(

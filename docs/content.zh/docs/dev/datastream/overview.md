@@ -241,7 +241,7 @@ Source 是你的程序从中读取其输入的地方。你可以用 `StreamExecu
 
 基于集合：
 
-- `fromData(Collection)` - 从 Java Java.util.Collection 创建数据流。集合中的所有元素必须属于同一类型。
+- `fromData(Collection)` - 从 Java `java.util.Collection` 创建数据流。集合中的所有元素必须属于同一类型。
   
 - `fromData(T ...)` - 从给定的对象序列中创建数据流。所有的对象必须属于同一类型。
   
@@ -330,7 +330,7 @@ Data sinks 使用 DataStream 并将它们转发到文件、套接字、外部系
 LocalStreamEnvironment env = StreamExecutionEnvironment.createLocalEnvironment();
 env.setBufferTimeout(timeoutMillis);
 
-env.generateSequence(1,10).map(new MyMapper()).setBufferTimeout(timeoutMillis);
+env.fromSequence(1,10).map(new MyMapper()).setBufferTimeout(timeoutMillis);
 ```
 {{< /tab >}}
 {{< /tabs >}}

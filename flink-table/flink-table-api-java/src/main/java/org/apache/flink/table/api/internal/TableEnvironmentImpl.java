@@ -120,6 +120,9 @@ import org.apache.flink.table.operations.utils.OperationTreeBuilder;
 import org.apache.flink.table.resource.ResourceManager;
 import org.apache.flink.table.resource.ResourceType;
 import org.apache.flink.table.resource.ResourceUri;
+import org.apache.flink.table.secret.SecretStore;
+import org.apache.flink.table.secret.SecretStoreFactory;
+import org.apache.flink.table.secret.WritableSecretStore;
 import org.apache.flink.table.types.AbstractDataType;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.utils.DataTypeUtils;
@@ -258,6 +261,13 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
         final CatalogStore catalogStore = catalogStoreResult.getCatalogStore();
         final CatalogStoreFactory catalogStoreFactory = catalogStoreResult.getCatalogStoreFactory();
 
+        final ApiFactoryUtil.SecretStoreResult secretStoreResult =
+                ApiFactoryUtil.getOrCreateSecretStore(
+                        settings.getSecretStore(), settings.getConfiguration(), userClassLoader);
+        final SecretStore secretStore = secretStoreResult.getSecretStore();
+        final SecretStoreFactory secretStoreFactory = secretStoreResult.getSecretStoreFactory();
+        // TODO (FLINK-38261): pass secret store to catalog manager for encryption/decryption
+
         // use configuration to init table config
         final TableConfig tableConfig = TableConfig.getDefault();
         tableConfig.setRootConfiguration(executor.getConfiguration());
@@ -266,6 +276,11 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
         final ResourceManager resourceManager =
                 new ResourceManager(settings.getConfiguration(), userClassLoader);
         final ModuleManager moduleManager = new ModuleManager();
+        final WritableSecretStore writableSecretStore =
+                secretStore instanceof WritableSecretStore
+                        ? (WritableSecretStore) secretStore
+                        : null;
+
         final CatalogManager catalogManager =
                 CatalogManager.newBuilder()
                         .classLoader(userClassLoader)
@@ -288,6 +303,7 @@ public class TableEnvironmentImpl implements TableEnvironmentInternal {
                         .sqlFactory(
                                 settings.getSqlFactory()
                                         .orElseGet(() -> DefaultSqlFactory.INSTANCE))
+                        .writableSecretStore(writableSecretStore)
                         .build();
 
         final FunctionCatalog functionCatalog =

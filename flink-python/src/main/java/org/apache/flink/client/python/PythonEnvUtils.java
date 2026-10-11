@@ -22,6 +22,7 @@ import org.apache.flink.client.deployment.application.UnsuccessfulExecutionExcep
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.ConfigurationUtils;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.configuration.SecurityOptions;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.python.util.PythonDependencyUtils;
 import org.apache.flink.util.CompressionUtils;
@@ -312,14 +313,15 @@ final class PythonEnvUtils {
                 // add the parent directory of .py file itself to PYTHONPATH
                 pythonPathList.add(targetPath.getParent().toString());
             } else if (Files.isRegularFile(Paths.get(targetPath.toString()).toRealPath())
-                    && sourceFileName.endsWith(".zip")) {
-                // expand the zip file and add the root directory to PYTHONPATH
-                // as not all zip files are importable
+                    && CompressionUtils.isCompressedFile(sourceFileName)) {
+                // expand the compressed file and add the root directory to PYTHONPATH
+                // as not all compressed files are importable
                 Path targetDirectory =
                         new Path(
                                 targetPath.getParent(),
-                                sourceFileName.substring(0, sourceFileName.lastIndexOf(".")));
-                FileUtils.expandDirectory(targetPath, targetDirectory);
+                                CompressionUtils.getBaseNameWithoutExtension(sourceFileName));
+                CompressionUtils.extractFile(
+                        targetPath.toString(), targetDirectory.toString(), sourceFileName);
                 pythonPathList.add(targetDirectory.toString());
             } else {
                 pythonPathList.add(targetPath.toString());
@@ -341,7 +343,10 @@ final class PythonEnvUtils {
      * @throws IOException Thrown if an error occurred when python process start.
      */
     static Process startPythonProcess(
-            PythonEnvironment pythonEnv, List<String> commands, boolean redirectToPipe)
+            PythonEnvironment pythonEnv,
+            List<String> commands,
+            boolean redirectToPipe,
+            List<String> additionalSensitiveKeys)
             throws IOException {
         ProcessBuilder pythonProcessBuilder = new ProcessBuilder();
         Map<String, String> env = pythonProcessBuilder.environment();
@@ -371,12 +376,15 @@ final class PythonEnvUtils {
         }
         LOG.info(
                 "Starting Python process with environment variables: {{}}, command: {}",
-                ConfigurationUtils.hideSensitiveValues(env).entrySet().stream()
+                ConfigurationUtils.hideSensitiveValues(env, additionalSensitiveKeys)
+                        .entrySet()
+                        .stream()
                         .map(e -> e.getKey() + "=" + e.getValue())
                         .collect(Collectors.joining(", ")),
                 String.join(" ", commands));
         Process process = pythonProcessBuilder.start();
-        if (!process.isAlive()) {
+        // Only a non-zero exit is a start failure; a fast process may already have finished.
+        if (!process.isAlive() && process.exitValue() != 0) {
             throw new RuntimeException("Failed to start Python process. ");
         }
 
@@ -494,7 +502,11 @@ final class PythonEnvUtils {
         pythonEnv.systemEnv.put(
                 "PYFLINK_GATEWAY_PORT", String.valueOf(gatewayServer.getListeningPort()));
         // start the python process.
-        return PythonEnvUtils.startPythonProcess(pythonEnv, commands, redirectToPipe);
+        return PythonEnvUtils.startPythonProcess(
+                pythonEnv,
+                commands,
+                redirectToPipe,
+                config.get(SecurityOptions.ADDITIONAL_SENSITIVE_KEYS));
     }
 
     public static void setPythonException(Throwable pythonException) {

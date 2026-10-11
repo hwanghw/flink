@@ -54,17 +54,16 @@ import org.apache.flink.test.junit5.InjectMiniCluster;
 import org.apache.flink.test.util.AbstractTestBase;
 import org.apache.flink.testutils.junit.SharedObjectsExtension;
 import org.apache.flink.testutils.junit.SharedReference;
+import org.apache.flink.util.FileUtils;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.Serializable;
+import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -83,9 +82,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Integration test for {@link org.apache.flink.api.connector.sink2.Sink} run time implementation.
  */
-public class SinkV2ITCase extends AbstractTestBase {
-    private static final Logger LOG = LoggerFactory.getLogger(SinkV2ITCase.class);
-
+class SinkV2ITCase extends AbstractTestBase {
     static final List<Integer> SOURCE_DATA =
             Arrays.asList(
                     895, 127, 148, 161, 148, 662, 822, 491, 275, 122, 850, 630, 682, 765, 434, 970,
@@ -106,10 +103,10 @@ public class SinkV2ITCase extends AbstractTestBase {
                     .collect(Collectors.toList());
 
     @RegisterExtension
-    static final SharedObjectsExtension SHARED_OBJECTS = SharedObjectsExtension.create();
+    private static final SharedObjectsExtension SHARED_OBJECTS = SharedObjectsExtension.create();
 
     @Test
-    public void writerAndCommitterExecuteInStreamingMode() throws Exception {
+    void writerAndCommitterExecuteInStreamingMode() throws Exception {
         final StreamExecutionEnvironment env = buildStreamEnv();
         SharedReference<Queue<Committer.CommitRequest<Record<Integer>>>> committed =
                 SHARED_OBJECTS.add(new ConcurrentLinkedQueue<>());
@@ -131,7 +128,7 @@ public class SinkV2ITCase extends AbstractTestBase {
     }
 
     @Test
-    public void writerAndPrecommitToplogyAndCommitterExecuteInStreamingMode() throws Exception {
+    void writerAndPrecommitToplogyAndCommitterExecuteInStreamingMode() throws Exception {
         final StreamExecutionEnvironment env = buildStreamEnv();
         SharedReference<Queue<Committer.CommitRequest<Record<Integer>>>> committed =
                 SHARED_OBJECTS.add(new ConcurrentLinkedQueue<>());
@@ -162,38 +159,50 @@ public class SinkV2ITCase extends AbstractTestBase {
 
     @ParameterizedTest
     @CsvSource({"1, 2", "2, 1", "1, 1"})
-    public void writerAndCommitterExecuteInStreamingModeWithScaling(
+    void writerAndCommitterExecuteInStreamingModeWithScaling(
             int initialParallelism,
             int scaledParallelism,
-            @TempDir File checkpointDir,
             @InjectMiniCluster MiniCluster miniCluster,
             @InjectClusterClient ClusterClient<?> clusterClient)
             throws Exception {
-        SharedReference<Queue<Committer.CommitRequest<Record<Integer>>>> committed =
-                SHARED_OBJECTS.add(new ConcurrentLinkedQueue<>());
-        final TrackingCommitter trackingCommitter = new TrackingCommitter(committed);
-        final Configuration config = createConfigForScalingTest(checkpointDir, initialParallelism);
+        // Managed explicitly so cleanup survives the shared MiniCluster's asynchronous checkpoint
+        // discard after job termination, which would otherwise race JUnit's @TempDir deletion.
+        final File checkpointDir = Files.createTempDirectory("SinkV2ITCase").toFile();
+        try {
+            SharedReference<Queue<Committer.CommitRequest<Record<Integer>>>> committed =
+                    SHARED_OBJECTS.add(new ConcurrentLinkedQueue<>());
+            final TrackingCommitter trackingCommitter = new TrackingCommitter(committed);
+            final Configuration config =
+                    createConfigForScalingTest(checkpointDir, initialParallelism);
 
-        // first run
-        final JobID jobID =
-                runStreamingWithScalingTest(
-                        config,
-                        initialParallelism,
-                        trackingCommitter,
-                        true,
-                        miniCluster,
-                        clusterClient);
+            // first run
+            final JobID jobID =
+                    runStreamingWithScalingTest(
+                            config,
+                            initialParallelism,
+                            trackingCommitter,
+                            true,
+                            miniCluster,
+                            clusterClient);
 
-        // second run
-        config.set(StateRecoveryOptions.SAVEPOINT_PATH, getCheckpointPath(miniCluster, jobID));
-        config.set(CoreOptions.DEFAULT_PARALLELISM, scaledParallelism);
-        runStreamingWithScalingTest(
-                config, initialParallelism, trackingCommitter, false, miniCluster, clusterClient);
+            // second run
+            config.set(StateRecoveryOptions.SAVEPOINT_PATH, getCheckpointPath(miniCluster, jobID));
+            config.set(CoreOptions.DEFAULT_PARALLELISM, scaledParallelism);
+            runStreamingWithScalingTest(
+                    config,
+                    initialParallelism,
+                    trackingCommitter,
+                    false,
+                    miniCluster,
+                    clusterClient);
 
-        assertThat(committed.get())
-                .extracting(Committer.CommitRequest::getCommittable)
-                .containsExactlyInAnyOrderElementsOf(
-                        duplicate(EXPECTED_COMMITTED_DATA_IN_STREAMING_MODE));
+            assertThat(committed.get())
+                    .extracting(Committer.CommitRequest::getCommittable)
+                    .containsExactlyInAnyOrderElementsOf(
+                            duplicate(EXPECTED_COMMITTED_DATA_IN_STREAMING_MODE));
+        } finally {
+            FileUtils.deleteDirectoryQuietly(checkpointDir);
+        }
     }
 
     private static List<Record<Integer>> duplicate(List<Record<Integer>> values) {
@@ -204,7 +213,7 @@ public class SinkV2ITCase extends AbstractTestBase {
     }
 
     @Test
-    public void writerAndCommitterExecuteInBatchMode() throws Exception {
+    void writerAndCommitterExecuteInBatchMode() throws Exception {
         final StreamExecutionEnvironment env = buildBatchEnv();
         SharedReference<Queue<Committer.CommitRequest<Record<Integer>>>> committed =
                 SHARED_OBJECTS.add(new ConcurrentLinkedQueue<>());
@@ -231,7 +240,7 @@ public class SinkV2ITCase extends AbstractTestBase {
     }
 
     @Test
-    public void writerAndPrecommitToplogyAndCommitterExecuteInBatchMode() throws Exception {
+    void writerAndPrecommitToplogyAndCommitterExecuteInBatchMode() throws Exception {
         final StreamExecutionEnvironment env = buildBatchEnv();
         SharedReference<Queue<Committer.CommitRequest<Record<Integer>>>> committed =
                 SHARED_OBJECTS.add(new ConcurrentLinkedQueue<>());

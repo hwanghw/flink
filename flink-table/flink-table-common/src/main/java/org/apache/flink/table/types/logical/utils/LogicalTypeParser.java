@@ -26,6 +26,7 @@ import org.apache.flink.table.legacy.utils.TypeStringUtils;
 import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.BinaryType;
+import org.apache.flink.table.types.logical.BitmapType;
 import org.apache.flink.table.types.logical.BooleanType;
 import org.apache.flink.table.types.logical.CharType;
 import org.apache.flink.table.types.logical.DateType;
@@ -53,6 +54,7 @@ import org.apache.flink.table.types.logical.TimeType;
 import org.apache.flink.table.types.logical.TimestampType;
 import org.apache.flink.table.types.logical.TinyIntType;
 import org.apache.flink.table.types.logical.UnresolvedUserDefinedType;
+import org.apache.flink.table.types.logical.UuidType;
 import org.apache.flink.table.types.logical.VarBinaryType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.table.types.logical.VariantType;
@@ -334,7 +336,9 @@ public final class LogicalTypeParser {
         NOT,
         DESCRIPTOR,
         STRUCTURED,
-        VARIANT
+        VARIANT,
+        BITMAP,
+        UUID
     }
 
     private static final Set<String> KEYWORDS =
@@ -582,6 +586,10 @@ public final class LogicalTypeParser {
                     return new DescriptorType();
                 case VARIANT:
                     return new VariantType();
+                case BITMAP:
+                    return new BitmapType();
+                case UUID:
+                    return new UuidType();
                 default:
                     throw parsingError("Unsupported type: " + token().value);
             }

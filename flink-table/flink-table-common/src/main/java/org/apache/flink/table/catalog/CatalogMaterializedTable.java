@@ -25,7 +25,6 @@ import org.apache.flink.util.Preconditions;
 import javax.annotation.Nullable;
 
 import java.time.Duration;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -173,12 +172,29 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
     /** Return summary description of refresh handler. */
     Optional<String> getRefreshHandlerDescription();
 
+    /** Get the start mode of materialized table. */
+    default Optional<StartMode> getStartMode() {
+        return Optional.empty();
+    }
+
     /**
      * Return the serialized refresh handler of materialized table. This will not be used for
      * describe table.
      */
     @Nullable
     byte[] getSerializedRefreshHandler();
+
+    /** Convert this object to a {@link CatalogTable} object for planner optimize query. */
+    default CatalogTable toCatalogTable() {
+        return CatalogTable.newBuilder()
+                .schema(getUnresolvedSchema())
+                .comment(getComment())
+                .distribution(getDistribution().orElse(null))
+                .partitionKeys(getPartitionKeys())
+                .options(getOptions())
+                .snapshot(getSnapshot().orElse(null))
+                .build();
+    }
 
     /** The logical refresh mode of materialized table. */
     @PublicEvolving
@@ -226,8 +242,8 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
         private Schema schema;
         private String comment;
         private TableDistribution distribution = null;
-        private List<String> partitionKeys = Collections.emptyList();
-        private Map<String, String> options = Collections.emptyMap();
+        private List<String> partitionKeys = List.of();
+        private Map<String, String> options = Map.of();
         private @Nullable Long snapshot;
         private String originalQuery;
         private String expandedQuery;
@@ -237,6 +253,7 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
         private RefreshStatus refreshStatus;
         private @Nullable String refreshHandlerDescription;
         private @Nullable byte[] serializedRefreshHandler;
+        private StartMode startMode;
 
         private Builder() {}
 
@@ -324,6 +341,11 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
             return this;
         }
 
+        public Builder startMode(StartMode startMode) {
+            this.startMode = startMode;
+            return this;
+        }
+
         public CatalogMaterializedTable build() {
             return new DefaultCatalogMaterializedTable(
                     schema,
@@ -339,7 +361,8 @@ public interface CatalogMaterializedTable extends CatalogBaseTable {
                     refreshMode,
                     refreshStatus,
                     refreshHandlerDescription,
-                    serializedRefreshHandler);
+                    serializedRefreshHandler,
+                    startMode);
         }
     }
 }

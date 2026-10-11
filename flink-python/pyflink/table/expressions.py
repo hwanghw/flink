@@ -20,21 +20,23 @@ from typing import Union
 from pyflink import add_version_doc
 from pyflink.java_gateway import get_gateway
 from pyflink.table.expression import Expression, _get_java_expression, TimePointUnit, JsonOnNull
+from pyflink.table.literal import _to_java_literal_value
 from pyflink.table.types import _to_java_data_type, DataType
 from pyflink.table.udf import UserDefinedFunctionWrapper
 from pyflink.util.api_stability_decorators import PublicEvolving
 from pyflink.util.java_utils import to_jarray, load_java_class
 
-__all__ = ['if_then_else', 'lit', 'col', 'range_', 'and_', 'or_', 'not_', 'UNBOUNDED_ROW',
-           'UNBOUNDED_RANGE', 'CURRENT_ROW', 'CURRENT_RANGE', 'current_database',
+__all__ = ['if_then_else', 'lit', 'col', 'range_', 'and_', 'or_', 'not_', 'is_nan', 'is_not_nan',
+           'UNBOUNDED_ROW', 'UNBOUNDED_RANGE', 'CURRENT_ROW', 'CURRENT_RANGE', 'current_database',
            'current_date', 'current_time', 'current_timestamp',
            'current_watermark', 'local_time', 'local_timestamp',
            'temporal_overlaps', 'date_format', 'timestamp_diff', 'array', 'row', 'map_',
            'row_interval', 'pi', 'e', 'rand', 'rand_integer', 'atan2', 'negative', 'concat',
-           'concat_ws', 'uuid', 'null_of', 'log', 'with_columns', 'without_columns', 'json',
-           'json_string', 'json_object', 'json_object_agg', 'json_array', 'json_array_agg',
+           'concat_ws', 'uuid', 'uuid_v4', 'uuid_v7', 'null_of', 'log', 'with_columns',
+           'without_columns', 'json', 'json_string', 'json_object', 'json_object_agg',
+           'json_array', 'json_array_agg',
            'call', 'call_sql', 'source_watermark', 'to_timestamp_ltz', 'from_unixtime', 'to_date',
-           'to_timestamp', 'convert_tz', 'unix_timestamp']
+           'to_timestamp', 'convert_tz', 'unix_timestamp', 'descriptor']
 
 
 def _leaf_op(op_name: str) -> Expression:
@@ -115,10 +117,14 @@ def lit(v, data_type: DataType = None) -> Expression:
 
         >>> tab.select(col("key"), lit("abc"))
     """
-    if data_type is None:
-        return _unary_op("lit", v)
-    else:
-        return _binary_op("lit", v, _to_java_data_type(data_type))
+    gateway = get_gateway()
+    j_data_type = _to_java_data_type(data_type) if data_type is not None else None
+    _j_literal_value = _to_java_literal_value(v, data_type)
+    return Expression(
+        gateway.jvm.org.apache.flink.table.utils.python.PythonTableUtils.createLiteral(
+            _j_literal_value, j_data_type
+        )
+    )
 
 
 @PublicEvolving()
@@ -178,6 +184,28 @@ def not_(expression: Expression[bool]) -> Expression[bool]:
         >>> not_(lit(None, DataTypes.BOOLEAN())) # None
     """
     return _unary_op("not", expression)
+
+
+@PublicEvolving()
+def is_nan(expr) -> Expression[bool]:
+    """
+    Returns true if the given numeric expression is NaN (Not-a-Number).
+
+    This method supports a three-valued logic by preserving NULL. This means if the
+    input expression is NULL, the result will also be NULL.
+    """
+    return _unary_op("isNan", expr)
+
+
+@PublicEvolving()
+def is_not_nan(expr) -> Expression[bool]:
+    """
+    Returns true if the given numeric expression is not NaN (Not-a-Number).
+
+    This method supports a three-valued logic by preserving NULL. This means if the
+    input expression is NULL, the result will also be NULL.
+    """
+    return _unary_op("isNotNan", expr)
 
 
 """
@@ -325,34 +353,63 @@ def to_timestamp(timestamp_str: Union[str, Expression[str]],
 @PublicEvolving()
 def to_timestamp_ltz(*args) -> Expression:
     """
-    Converts a value to a timestamp with local time zone.
+    Converts a value to a TIMESTAMP_LTZ (timestamp with local time zone).
 
-    Supported functions:
-    1. to_timestamp_ltz(Numeric) -> DataTypes.TIMESTAMP_LTZ
-    Converts a numeric value of epoch milliseconds to a TIMESTAMP_LTZ. The default precision is 3.
-    2. to_timestamp_ltz(Numeric, Integer) -> DataTypes.TIMESTAMP_LTZ
-    Converts a numeric value of epoch seconds or epoch milliseconds to a TIMESTAMP_LTZ.
-    Valid precisions are 0 or 3.
-    3. to_timestamp_ltz(String) -> DataTypes.TIMESTAMP_LTZ
-    Converts a timestamp string using default format 'yyyy-MM-dd HH:mm:ss.SSS' to a TIMESTAMP_LTZ.
-    4. to_timestamp_ltz(String, String) -> DataTypes.TIMESTAMP_LTZ
-    Converts a timestamp string using format (default 'yyyy-MM-dd HH:mm:ss.SSS') to a TIMESTAMP_LTZ.
-    5. to_timestamp_ltz(String, String, String) -> DataTypes.TIMESTAMP_LTZ
-    Converts a timestamp string string1 using format string2 (default 'yyyy-MM-dd HH:mm:ss.SSS')
-    in time zone string3 (default 'UTC') to a TIMESTAMP_LTZ.
-    Supports any timezone that is available in Java's TimeZone database.
+    Supported signatures:
+
+    1. to_timestamp_ltz(numeric) -> TIMESTAMP_LTZ(3)
+       Converts a numeric epoch value to a TIMESTAMP_LTZ. The value is interpreted as
+       milliseconds since epoch (default precision 3).
+
+    2. to_timestamp_ltz(numeric, precision) -> TIMESTAMP_LTZ(max(precision, 3))
+       Converts a numeric epoch value to a TIMESTAMP_LTZ. The precision parameter (0-9)
+       determines the unit of the numeric value:
+
+       - precision 0: the numeric value represents seconds since epoch
+       - precision 3: the numeric value represents milliseconds since epoch
+       - precision 6: the numeric value represents microseconds since epoch
+       - precision 9: the numeric value represents nanoseconds since epoch
+
+       Other precision values between 0 and 9 are also supported, where the numeric
+       value represents units of 10^(-precision) seconds. The output type is
+       TIMESTAMP_LTZ(3) for precision 0-3, and TIMESTAMP_LTZ(precision) for 4-9.
+
+       The output type is determined at plan time. If precision is supplied as a
+       non-literal expression (e.g., a column reference), the output defaults to
+       TIMESTAMP_LTZ(3) and any sub-millisecond digits are truncated to fit the
+       declared type.
+
+    3. to_timestamp_ltz(string) -> TIMESTAMP_LTZ(3)
+       Parses a timestamp string using default format 'yyyy-MM-dd HH:mm:ss'.
+
+    4. to_timestamp_ltz(string, format) -> TIMESTAMP_LTZ(precision)
+       Parses a timestamp string using the given format pattern. The output precision
+       is inferred from the longest run of 'S' characters in the format pattern
+       (outside quoted literal sections), clamped to [3, 9]. E.g., 'SSS' -> 3,
+       'SSSSSS' -> 6, 'SSSSSSSSS' -> 9, 'SSSSSS X' -> 6.
+
+       This inference only applies when the format pattern is a literal at plan time.
+       If the format is supplied as a non-literal expression (e.g., a column
+       reference), the output defaults to TIMESTAMP_LTZ(3) and any sub-millisecond
+       digits are truncated to fit the declared type.
+
+    5. to_timestamp_ltz(string, format, timezone) -> TIMESTAMP_LTZ(precision)
+       Parses a timestamp string using the given format pattern in the specified time zone.
+       The output precision is inferred from the format pattern as in signature 4.
+
+    Returns NULL if any input is NULL. Throws a runtime error if precision is outside [0, 9].
 
     Example:
     ::
 
-        >>> table.select(to_timestamp_ltz(100))  # numeric with default precision
-        >>> table.select(to_timestamp_ltz(100, 0))  # numeric with second precision
-        >>> table.select(to_timestamp_ltz(100, 3))  # numeric with millisecond precision
+        >>> table.select(to_timestamp_ltz(1234567890, 0))   # epoch seconds
+        >>> table.select(to_timestamp_ltz(1234567890123, 3)) # epoch milliseconds
+        >>> table.select(to_timestamp_ltz(1234567890123456789, 9)) # epoch nanoseconds
         >>> table.select(to_timestamp_ltz("2023-01-01 00:00:00"))  # string with default format
         >>> table.select(to_timestamp_ltz("01/01/2023", "MM/dd/yyyy"))  # string with format
         >>> table.select(to_timestamp_ltz("2023-01-01 00:00:00",
-                                        "yyyy-MM-dd HH:mm:ss",
-                                        "UTC"))  # string with format and timezone
+        ...                              "yyyy-MM-dd HH:mm:ss",
+        ...                              "Asia/Shanghai"))  # string with format and timezone
     """
     if len(args) == 1:
         return _unary_op("toTimestampLtz", args[0])
@@ -561,6 +618,26 @@ def map_from_arrays(key, value) -> Expression:
 
 
 @PublicEvolving()
+def descriptor(*column_names: str) -> Expression:
+    """
+    Creates a literal describing an arbitrary, unvalidated list of column names.
+
+    Passing a list of columns can be useful for parameterizing a function. In particular,
+    it enables declaring the ``on_time`` argument for process table functions.
+
+    Example:
+    ::
+
+        >>> descriptor("ts_column")
+        >>> descriptor("col1", "col2")
+
+    :param column_names: One or more column names.
+    :return: A descriptor expression.
+    """
+    return _varargs_op("descriptor", *column_names)
+
+
+@PublicEvolving()
 def object_of(class_name: str, *args) -> Expression:
     """
     Creates a structured object from a list of key-value pairs.
@@ -711,11 +788,33 @@ def concat_ws(separator: Union[str, Expression[str]],
 def uuid() -> Expression[str]:
     """
     Returns an UUID (Universally Unique Identifier) string (e.g.,
-    "3d3c68f7-f608-473f-b60c-b0c44ad4cc4e") according to RFC 4122 type 4 (pseudo randomly
+    "3d3c68f7-f608-473f-b60c-b0c44ad4cc4e") according to RFC 9562 version 4 (pseudo randomly
     generated) UUID. The UUID is generated using a cryptographically strong pseudo random number
     generator.
     """
     return _leaf_op("uuid")
+
+
+@PublicEvolving()
+def uuid_v4() -> Expression:
+    """
+    Returns a random RFC 9562 version 4 (pseudo randomly generated) UUID value. The UUID is
+    generated using a cryptographically strong pseudo random number generator.
+
+    Compared to uuid(), this function returns a value of the UUID data type.
+    """
+    return _leaf_op("uuidV4")
+
+
+@PublicEvolving()
+def uuid_v7() -> Expression:
+    """
+    Returns a time-ordered RFC 9562 version 7 UUID value, generated from the current timestamp
+    and a random component.
+
+    Compared to uuid(), this function returns a value of the UUID data type.
+    """
+    return _leaf_op("uuidV7")
 
 
 @PublicEvolving()

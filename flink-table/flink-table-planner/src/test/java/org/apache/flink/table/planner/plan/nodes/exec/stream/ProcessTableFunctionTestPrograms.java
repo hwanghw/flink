@@ -22,36 +22,55 @@ import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableRuntimeException;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.AtomicTypeWrappingFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BroadcastClearStateFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BroadcastFilterFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BroadcastLookupFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BroadcastStateFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BroadcastTimersFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ChainedReceivingFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ChainedSendingFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ClearStateFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ComplexValueViewFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ContextFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.DescriptorFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.EagerAndValueViewStateTimeFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.EmptyArgFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.EmptyOutputFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.EmptyOutputRowSemanticFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ImplicitCastingFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.IntervalDayArgFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.IntervalYearArgFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.InvalidBroadcastCollectFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.InvalidBroadcastStateWriteFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.InvalidBroadcastTimerFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.InvalidPassThroughTimersFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.InvalidRowKindFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.InvalidRowSemanticTableTimersFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.LateTimersFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ListStateFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.MapStateFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.MultiBroadcastFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.MultiInputFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.MultiInputOrderByFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.MultiInputWithScalarArgsFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.MultiStateFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.NamedTimersFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.NonNullMapStateFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.OptionalOnTimeFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.OptionalPartitionOnTimeFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.OrderByFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.PojoArgsFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.PojoCreatingFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.PojoStateFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.PojoStateTimeFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.PojoWithDefaultStateFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.RequiredTimeFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.RowDataRowSemanticTableFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.RowSemanticTableFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.RowSemanticTablePassThroughFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ScalarArgsFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ScalarArgsTimeFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ScalarBeforeRowSemanticTablePassThroughFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.SetSemanticTableFullDeletesArgFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.SetSemanticTableFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.SetSemanticTableOptionalPartitionFunction;
@@ -67,6 +86,10 @@ import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctio
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.UpdatingJoinFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.UpdatingRetractFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.UpdatingUpsertFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ValueViewFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.VariantFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.VariantStateFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.VariantTableArgFunction;
 import org.apache.flink.table.test.program.SinkTestStep;
 import org.apache.flink.table.test.program.SourceTestStep;
 import org.apache.flink.table.test.program.TableTestProgram;
@@ -82,6 +105,9 @@ import static org.apache.flink.table.api.Expressions.descriptor;
 import static org.apache.flink.table.api.Expressions.lit;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BASE_SINK_SCHEMA;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BASIC_VALUES;
+import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BROADCAST_RESTORE_SOURCE;
+import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BROADCAST_RULES_SOURCE;
+import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BROADCAST_RULES_VALUES;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.CITY_VALUES;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.KEYED_BASE_SINK_SCHEMA;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.KEYED_TIMED_BASE_SINK_SCHEMA;
@@ -91,10 +117,12 @@ import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTable
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.MULTI_VALUES_SOURCE_SCHEMA;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.PASS_THROUGH_BASE_SINK_SCHEMA;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.TIMED_BASE_SINK_SCHEMA;
+import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.TIMED_BROADCAST_RULES_SOURCE;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.TIMED_CITY_SOURCE;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.TIMED_MULTI_BASE_SINK_SCHEMA;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.TIMED_SOURCE;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.TIMED_SOURCE_LATE_EVENTS;
+import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.TIMED_SOURCE_LATE_EVENTS_LARGE;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.TIMED_SOURCE_SCHEMA;
 import static org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.UPDATING_VALUES;
 
@@ -424,6 +452,25 @@ public class ProcessTableFunctionTestPrograms {
                                             "+I[Alice, 42, {+I[Alice, 42], 1}]")
                                     .build())
                     .runSql("INSERT INTO sink SELECT * FROM f(r => TABLE t, i => 1)")
+                    .build();
+
+    // Same as PROCESS_ROW_SEMANTIC_TABLE_PASS_THROUGH but the table argument is at operand
+    // position 1
+    public static final TableTestProgram PROCESS_ROW_SEMANTIC_TABLE_PASS_THROUGH_AFTER_SCALAR =
+            TableTestProgram.of(
+                            "process-row-pass-through-after-scalar",
+                            "pass columns through with table after scalar argument")
+                    .setupTemporarySystemFunction(
+                            "f", ScalarBeforeRowSemanticTablePassThroughFunction.class)
+                    .setupSql(BASIC_VALUES)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(PASS_THROUGH_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[Bob, 12, {+I[Bob, 12], 1}]",
+                                            "+I[Alice, 42, {+I[Alice, 42], 1}]")
+                                    .build())
+                    .runSql("INSERT INTO sink SELECT * FROM f(i => 1, r => TABLE t)")
                     .build();
 
     public static final TableTestProgram PROCESS_SET_SEMANTIC_TABLE_PASS_THROUGH =
@@ -762,6 +809,52 @@ public class ProcessTableFunctionTestPrograms {
                     .runSql("INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name)")
                     .build();
 
+    public static final TableTestProgram PROCESS_EMPTY_OUTPUT =
+            TableTestProgram.of(
+                            "process-empty-output",
+                            "empty function output with pass-through and rowtime columns")
+                    .setupTemporarySystemFunction("f", EmptyOutputFunction.class)
+                    .setupTableSource(TIMED_SOURCE)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema("`name` STRING", "`rowtime` TIMESTAMP_LTZ(3)")
+                                    .consumedValues(
+                                            "+I[Bob, 1970-01-01T00:00:00Z]",
+                                            "+I[Alice, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Bob, 1970-01-01T00:00:00.002Z]",
+                                            "+I[Bob, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, 1970-01-01T00:00:00.004Z]",
+                                            "+I[Bob, 1970-01-01T00:00:00.005Z]",
+                                            "+I[Bob, 1970-01-01T00:00:00.006Z]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM "
+                                    + "f(r => TABLE t PARTITION BY name, on_time => DESCRIPTOR(ts))")
+                    .build();
+
+    public static final TableTestProgram PROCESS_EMPTY_OUTPUT_ROWTIME_ONLY =
+            TableTestProgram.of(
+                            "process-empty-output-rowtime-only",
+                            "empty function output with rowtime column but no partition by")
+                    .setupTemporarySystemFunction("f", EmptyOutputRowSemanticFunction.class)
+                    .setupTableSource(TIMED_SOURCE)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema("`rowtime` TIMESTAMP_LTZ(3)")
+                                    .consumedValues(
+                                            "+I[1970-01-01T00:00:00Z]",
+                                            "+I[1970-01-01T00:00:00.001Z]",
+                                            "+I[1970-01-01T00:00:00.002Z]",
+                                            "+I[1970-01-01T00:00:00.003Z]",
+                                            "+I[1970-01-01T00:00:00.004Z]",
+                                            "+I[1970-01-01T00:00:00.005Z]",
+                                            "+I[1970-01-01T00:00:00.006Z]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM "
+                                    + "f(r => TABLE t, on_time => DESCRIPTOR(ts))")
+                    .build();
+
     public static final TableTestProgram PROCESS_CONTEXT =
             TableTestProgram.of("process-context", "outputs values from function context")
                     .setupTemporarySystemFunction("f", ContextFunction.class)
@@ -901,6 +994,57 @@ public class ProcessTableFunctionTestPrograms {
                                     .build())
                     .runSql(
                             "INSERT INTO sink SELECT * FROM f(columnList1 => NULL, columnList3 => DESCRIPTOR(a, b, c))")
+                    .build();
+
+    public static final TableTestProgram PROCESS_VARIANT =
+            TableTestProgram.of(
+                            "process-variant",
+                            "takes nullable, optional, and not nullable VARIANT arguments")
+                    .setupTemporarySystemFunction("f", VariantFunction.class)
+                    .setupSql(BASIC_VALUES)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(BASE_SINK_SCHEMA)
+                                    .consumedValues("+I[{null, null, {\"a\":[1,\"b\"]}}]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f("
+                                    + "variant1 => NULL, "
+                                    + "variant3 => PARSE_JSON('{\"a\":[1,\"b\"]}'))")
+                    .build();
+
+    public static final TableTestProgram PROCESS_VARIANT_TABLE_ARG =
+            TableTestProgram.of("process-variant-table-arg", "table argument with a VARIANT column")
+                    .setupTemporarySystemFunction("f", VariantTableArgFunction.class)
+                    .setupSql(
+                            "CREATE VIEW t AS SELECT * FROM "
+                                    + "(VALUES ('Bob', PARSE_JSON('{\"a\":1}')), "
+                                    + "('Alice', PARSE_JSON('[1,\"b\"]'))) AS T(name, v)")
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[Bob, {+I[Bob, {\"a\":1}]}]",
+                                            "+I[Alice, {+I[Alice, [1,\"b\"]]}]")
+                                    .build())
+                    .runSql("INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_VARIANT_STATE =
+            TableTestProgram.of("process-variant-state", "state entry with a VARIANT field")
+                    .setupTemporarySystemFunction("f", VariantStateFunction.class)
+                    .setupSql(MULTI_VALUES)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[Bob, {VariantScore(v=null), +I[Bob, 12]}]",
+                                            "+I[Alice, {VariantScore(v=null), +I[Alice, 42]}]",
+                                            "+I[Bob, {VariantScore(v=12), +I[Bob, 99]}]",
+                                            "+I[Bob, {VariantScore(v=99), +I[Bob, 100]}]",
+                                            "+I[Alice, {VariantScore(v=42), +I[Alice, 400]}]")
+                                    .build())
+                    .runSql("INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name)")
                     .build();
 
     public static final TableTestProgram PROCESS_TIME_CONVERSIONS =
@@ -1072,8 +1216,8 @@ public class ProcessTableFunctionTestPrograms {
                                             "+I[Bob, {Processing input row +I[Bob, 4, 1970-01-01T00:00:00.004Z] at time 4 watermark null}, 1970-01-01T00:00:00.004Z]",
                                             "+I[Bob, {Processing input row +I[Bob, 5, 1970-01-01T00:00:00.005Z] at time 5 watermark null}, 1970-01-01T00:00:00.005Z]",
                                             "+I[Bob, {Processing input row +I[Bob, 6, 1970-01-01T00:00:00.006Z] at time 6 watermark null}, 1970-01-01T00:00:00.006Z]",
-                                            "+I[Bob, {Timer timeout2 fired at time 2 watermark 9223372036854775807}, 1970-01-01T00:00:00.002Z]",
-                                            "+I[Bob, {Clearing all timers at time 2 watermark 9223372036854775807}, 1970-01-01T00:00:00.002Z]")
+                                            "+I[Bob, {Timer timeout2 fired at time 5 watermark 9223372036854775807}, 1970-01-01T00:00:00.005Z]",
+                                            "+I[Bob, {Clearing all timers at time 5 watermark 9223372036854775807}, 1970-01-01T00:00:00.005Z]")
                                     .build())
                     .runSql(
                             "INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name, on_time => DESCRIPTOR(ts))")
@@ -1112,7 +1256,7 @@ public class ProcessTableFunctionTestPrograms {
     public static final TableTestProgram PROCESS_LATE_EVENTS =
             TableTestProgram.of(
                             "process-late-events",
-                            "test that late events are dropped in both input and when registering timers")
+                            "test that late events enter PTF (eval and timer registration)")
                     .setupTemporarySystemFunction("f", LateTimersFunction.class)
                     .setupTableSource(TIMED_SOURCE_LATE_EVENTS)
                     .setupTableSink(
@@ -1120,25 +1264,100 @@ public class ProcessTableFunctionTestPrograms {
                                     .addSchema(KEYED_TIMED_BASE_SINK_SCHEMA)
                                     .consumedValues(
                                             "+I[Bob, {Processing input row +I[Bob, 1, 1970-01-01T00:00:00Z] at time 0 watermark null}, 1970-01-01T00:00:00Z]",
-                                            "+I[Bob, {Registering timer t for 0 at time 0 watermark null}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Registering timer bob for 0 at time 0 watermark null}, 1970-01-01T00:00:00Z]",
                                             "+I[Bob, {Registering timer for 0 at time 0 watermark null}, 1970-01-01T00:00:00Z]",
                                             "+I[Alice, {Processing input row +I[Alice, 1, 1970-01-01T00:00:00.001Z] at time 1 watermark -1}, 1970-01-01T00:00:00.001Z]",
-                                            "+I[Alice, {Registering timer t for 0 at time 1 watermark -1}, 1970-01-01T00:00:00.001Z]",
-                                            "+I[Alice, {Registering timer for 0 at time 1 watermark -1}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Alice, {Registering timer alice for 1 at time 1 watermark -1}, 1970-01-01T00:00:00.001Z]",
                                             "+I[Bob, {Timer null fired at time 0 watermark 0}, 1970-01-01T00:00:00Z]",
-                                            "+I[Bob, {Registering timer again for 0 at time 0 watermark 0}, 1970-01-01T00:00:00Z]",
-                                            "+I[Alice, {Timer null fired at time 0 watermark 0}, 1970-01-01T00:00:00Z]",
-                                            "+I[Alice, {Registering timer again for 0 at time 0 watermark 0}, 1970-01-01T00:00:00Z]",
-                                            "+I[Bob, {Timer t fired at time 0 watermark 0}, 1970-01-01T00:00:00Z]",
-                                            "+I[Bob, {Registering timer again for 0 at time 0 watermark 0}, 1970-01-01T00:00:00Z]",
-                                            "+I[Alice, {Timer t fired at time 0 watermark 0}, 1970-01-01T00:00:00Z]",
-                                            "+I[Alice, {Registering timer again for 0 at time 0 watermark 0}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Timer bob fired at time 0 watermark 0}, 1970-01-01T00:00:00Z]",
                                             "+I[Bob, {Processing input row +I[Bob, 2, 1970-01-01T00:01:39.999Z] at time 99999 watermark 0}, 1970-01-01T00:01:39.999Z]",
-                                            "+I[Bob, {Registering timer t for 0 at time 99999 watermark 0}, 1970-01-01T00:01:39.999Z]",
-                                            "+I[Bob, {Registering timer for 0 at time 99999 watermark 0}, 1970-01-01T00:01:39.999Z]")
+                                            "+I[Bob, {Registering timer bob for 0 at time 99999 watermark 0}, 1970-01-01T00:01:39.999Z]",
+                                            "+I[Bob, {Registering timer for 0 at time 99999 watermark 0}, 1970-01-01T00:01:39.999Z]",
+                                            "+I[Bob, {Timer null fired at time 0 watermark 99998}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Timer bob fired at time 0 watermark 99998}, 1970-01-01T00:00:00Z]",
+                                            "+I[Alice, {Timer alice fired at time 1 watermark 99998}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Alice, {Registering timer alice-again for 0 at time 1 watermark 99998}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Alice, {Timer alice-again fired at time 0 watermark 99998}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Processing input row +I[Bob, 3, 1970-01-01T00:00:00.003Z] at time 3 watermark 99998}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {Registering timer bob for 0 at time 3 watermark 99998}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {Registering timer for 0 at time 3 watermark 99998}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {Processing input row +I[Bob, 4, 1970-01-01T00:00:00.004Z] at time 4 watermark 99998}, 1970-01-01T00:00:00.004Z]",
+                                            "+I[Bob, {Registering timer bob for 0 at time 4 watermark 99998}, 1970-01-01T00:00:00.004Z]",
+                                            "+I[Bob, {Registering timer for 0 at time 4 watermark 99998}, 1970-01-01T00:00:00.004Z]",
+                                            "+I[Bob, {Timer null fired at time 0 watermark 9223372036854775807}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Timer bob fired at time 0 watermark 9223372036854775807}, 1970-01-01T00:00:00Z]")
                                     .build())
                     .runSql(
                             "INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name, on_time => DESCRIPTOR(ts))")
+                    .build();
+
+    public static final TableTestProgram PROCESS_LATE_EVENTS_RESTORE =
+            TableTestProgram.of(
+                            "process-late-events-restore",
+                            "test that late events and their past-time timers work correctly after restore")
+                    .setupTemporarySystemFunction("f", LateTimersFunction.class)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema(TIMED_SOURCE_SCHEMA)
+                                    .producedBeforeRestore(
+                                            Row.of("Bob", 1, Instant.ofEpochMilli(0)),
+                                            Row.of("Alice", 1, Instant.ofEpochMilli(1)))
+                                    .producedAfterRestore(
+                                            Row.of("Bob", 2, Instant.ofEpochMilli(99999)),
+                                            Row.of("Bob", 3, Instant.ofEpochMilli(3)),
+                                            Row.of("Bob", 4, Instant.ofEpochMilli(4)))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_TIMED_BASE_SINK_SCHEMA)
+                                    .consumedBeforeRestore(
+                                            "+I[Bob, {Processing input row +I[Bob, 1, 1970-01-01T00:00:00Z] at time 0 watermark null}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Registering timer bob for 0 at time 0 watermark null}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Registering timer for 0 at time 0 watermark null}, 1970-01-01T00:00:00Z]",
+                                            "+I[Alice, {Processing input row +I[Alice, 1, 1970-01-01T00:00:00.001Z] at time 1 watermark -1}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Alice, {Registering timer alice for 1 at time 1 watermark -1}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Bob, {Timer null fired at time 0 watermark 0}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Timer bob fired at time 0 watermark 0}, 1970-01-01T00:00:00Z]")
+                                    .consumedAfterRestore(
+                                            "+I[Bob, {Processing input row +I[Bob, 2, 1970-01-01T00:01:39.999Z] at time 99999 watermark null}, 1970-01-01T00:01:39.999Z]",
+                                            "+I[Bob, {Registering timer bob for 0 at time 99999 watermark null}, 1970-01-01T00:01:39.999Z]",
+                                            "+I[Bob, {Registering timer for 0 at time 99999 watermark null}, 1970-01-01T00:01:39.999Z]",
+                                            "+I[Bob, {Timer null fired at time 0 watermark 99998}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Timer bob fired at time 0 watermark 99998}, 1970-01-01T00:00:00Z]",
+                                            "+I[Alice, {Timer alice fired at time 1 watermark 99998}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Alice, {Registering timer alice-again for 0 at time 1 watermark 99998}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Alice, {Timer alice-again fired at time 0 watermark 99998}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Processing input row +I[Bob, 3, 1970-01-01T00:00:00.003Z] at time 3 watermark 99998}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {Registering timer bob for 0 at time 3 watermark 99998}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {Registering timer for 0 at time 3 watermark 99998}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {Processing input row +I[Bob, 4, 1970-01-01T00:00:00.004Z] at time 4 watermark 99998}, 1970-01-01T00:00:00.004Z]",
+                                            "+I[Bob, {Registering timer bob for 0 at time 4 watermark 99998}, 1970-01-01T00:00:00.004Z]",
+                                            "+I[Bob, {Registering timer for 0 at time 4 watermark 99998}, 1970-01-01T00:00:00.004Z]",
+                                            "+I[Bob, {Timer null fired at time 0 watermark 9223372036854775807}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Timer bob fired at time 0 watermark 9223372036854775807}, 1970-01-01T00:00:00Z]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name, on_time => DESCRIPTOR(ts))")
+                    .build();
+
+    public static final TableTestProgram PROCESS_ROW_LATE_EVENTS =
+            TableTestProgram.of(
+                            "process-row-late-events",
+                            "test that late events enter a PTF with row semantics")
+                    .setupTemporarySystemFunction("f", RequiredTimeFunction.class)
+                    .setupTableSource(TIMED_SOURCE_LATE_EVENTS)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(TIMED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[{+I[Bob, 1, 1970-01-01T00:00:00Z]}, 1970-01-01T00:00:00Z]",
+                                            "+I[{+I[Alice, 1, 1970-01-01T00:00:00.001Z]}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[{+I[Bob, 2, 1970-01-01T00:01:39.999Z]}, 1970-01-01T00:01:39.999Z]",
+                                            "+I[{+I[Bob, 3, 1970-01-01T00:00:00.003Z]}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[{+I[Bob, 4, 1970-01-01T00:00:00.004Z]}, 1970-01-01T00:00:00.004Z]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f(r => TABLE t, on_time => DESCRIPTOR(ts))")
                     .build();
 
     public static final TableTestProgram PROCESS_SCALAR_ARGS_TIME =
@@ -1184,7 +1403,7 @@ public class ProcessTableFunctionTestPrograms {
     public static final TableTestProgram PROCESS_OPTIONAL_ON_TIME =
             TableTestProgram.of(
                             "process-optional-on-time",
-                            "test optional time attribute, fire once for constant timer")
+                            "test optional time attribute, re-fires timer for constant timer registration after time passed")
                     .setupTemporarySystemFunction("f", OptionalOnTimeFunction.class)
                     .setupTableSource(TIMED_SOURCE)
                     .setupTableSink(
@@ -1192,21 +1411,25 @@ public class ProcessTableFunctionTestPrograms {
                                     .addSchema(KEYED_BASE_SINK_SCHEMA)
                                     .consumedValues(
                                             "+I[Bob, {Processing input row +I[Bob, 1, 1970-01-01T00:00:00Z] at time null watermark null}]",
-                                            "+I[Bob, {Registering timer t for 2 at time null watermark null}]",
+                                            "+I[Bob, {Registering timer t for 1 at time null watermark null}]",
                                             "+I[Alice, {Processing input row +I[Alice, 1, 1970-01-01T00:00:00.001Z] at time null watermark -1}]",
-                                            "+I[Alice, {Registering timer t for 2 at time null watermark -1}]",
+                                            "+I[Alice, {Registering timer t for 1 at time null watermark -1}]",
                                             "+I[Bob, {Processing input row +I[Bob, 2, 1970-01-01T00:00:00.002Z] at time null watermark 0}]",
-                                            "+I[Bob, {Registering timer t for 2 at time null watermark 0}]",
+                                            "+I[Bob, {Registering timer t for 1 at time null watermark 0}]",
+                                            "+I[Alice, {Timer t fired at time 1 watermark 1}]",
+                                            "+I[Bob, {Timer t fired at time 1 watermark 1}]",
                                             "+I[Bob, {Processing input row +I[Bob, 3, 1970-01-01T00:00:00.003Z] at time null watermark 1}]",
                                             "+I[Bob, {Registering timer t for 2 at time null watermark 1}]",
-                                            "+I[Alice, {Timer t fired at time 2 watermark 2}]",
                                             "+I[Bob, {Timer t fired at time 2 watermark 2}]",
                                             "+I[Bob, {Processing input row +I[Bob, 4, 1970-01-01T00:00:00.004Z] at time null watermark 2}]",
-                                            "+I[Bob, {Registering timer t for 2 at time null watermark 2}]",
+                                            "+I[Bob, {Registering timer t for 3 at time null watermark 2}]",
+                                            "+I[Bob, {Timer t fired at time 3 watermark 3}]",
                                             "+I[Bob, {Processing input row +I[Bob, 5, 1970-01-01T00:00:00.005Z] at time null watermark 3}]",
-                                            "+I[Bob, {Registering timer t for 2 at time null watermark 3}]",
+                                            "+I[Bob, {Registering timer t for 4 at time null watermark 3}]",
+                                            "+I[Bob, {Timer t fired at time 4 watermark 4}]",
                                             "+I[Bob, {Processing input row +I[Bob, 6, 1970-01-01T00:00:00.006Z] at time null watermark 4}]",
-                                            "+I[Bob, {Registering timer t for 2 at time null watermark 4}]")
+                                            "+I[Bob, {Registering timer t for 5 at time null watermark 4}]",
+                                            "+I[Bob, {Timer t fired at time 5 watermark 5}]")
                                     .build())
                     .runSql("INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name)")
                     .build();
@@ -1232,6 +1455,32 @@ public class ProcessTableFunctionTestPrograms {
                                             "+I[Alice, {Timer t fired at time 3 watermark 3}, 1970-01-01T00:00:00.003Z]",
                                             "+I[Bob, {Score(s='null', i=31), +I[Bob, 5, 1970-01-01T00:00:00.005Z]}, 1970-01-01T00:00:00.005Z]",
                                             "+I[Bob, {Score(s='null', i=32), +I[Bob, 6, 1970-01-01T00:00:00.006Z]}, 1970-01-01T00:00:00.006Z]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name, on_time => DESCRIPTOR(ts))")
+                    .build();
+
+    public static final TableTestProgram PROCESS_EAGER_AND_VALUE_VIEW_STATE_TIME =
+            TableTestProgram.of(
+                            "process-eager-and-value-view-state-time",
+                            "eager value state and value view accessed from both eval() and onTimer()")
+                    .setupTemporarySystemFunction("f", EagerAndValueViewStateTimeFunction.class)
+                    .setupTableSource(TIMED_SOURCE)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_TIMED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[Bob, {Score(s='null', i=null), null, +I[Bob, 1, 1970-01-01T00:00:00Z]}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, {Registering timer t for 2 at time 0 watermark null}, 1970-01-01T00:00:00Z]",
+                                            "+I[Alice, {Score(s='null', i=null), null, +I[Alice, 1, 1970-01-01T00:00:00.001Z]}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Alice, {Registering timer t for 3 at time 1 watermark -1}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Bob, {Score(s='null', i=1), 1, +I[Bob, 2, 1970-01-01T00:00:00.002Z]}, 1970-01-01T00:00:00.002Z]",
+                                            "+I[Bob, {Score(s='null', i=2), 2, +I[Bob, 3, 1970-01-01T00:00:00.003Z]}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {Timer t fired at time 2 watermark 2}, 1970-01-01T00:00:00.002Z]",
+                                            "+I[Bob, {Score(s='null', i=30), 103, +I[Bob, 4, 1970-01-01T00:00:00.004Z]}, 1970-01-01T00:00:00.004Z]",
+                                            "+I[Alice, {Timer t fired at time 3 watermark 3}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {Score(s='null', i=31), 104, +I[Bob, 5, 1970-01-01T00:00:00.005Z]}, 1970-01-01T00:00:00.005Z]",
+                                            "+I[Bob, {Score(s='null', i=32), 105, +I[Bob, 6, 1970-01-01T00:00:00.006Z]}, 1970-01-01T00:00:00.006Z]")
                                     .build())
                     .runSql(
                             "INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name, on_time => DESCRIPTOR(ts))")
@@ -1344,6 +1593,41 @@ public class ProcessTableFunctionTestPrograms {
                             "Timers are not supported in the current PTF declaration.")
                     .build();
 
+    public static final TableTestProgram PROCESS_VALUE_STATE =
+            TableTestProgram.of("process-value-state", "value view state entry")
+                    .setupTemporarySystemFunction("f", ValueViewFunction.class)
+                    .setupSql(MULTI_VALUES)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[Bob, {null, KeyedStateValueView, +I[Bob, 12]}]",
+                                            "+I[Alice, {null, KeyedStateValueView, +I[Alice, 42]}]",
+                                            "+I[Bob, {1, KeyedStateValueView, +I[Bob, 99]}]",
+                                            "+I[Bob, {2, KeyedStateValueView, +I[Bob, 100]}]",
+                                            "+I[Alice, {1, KeyedStateValueView, +I[Alice, 400]}]")
+                                    .build())
+                    .runSql("INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_COMPLEX_VALUE_STATE =
+            TableTestProgram.of(
+                            "process-complex-value-state", "value view with composite value type")
+                    .setupTemporarySystemFunction("f", ComplexValueViewFunction.class)
+                    .setupSql(MULTI_VALUES)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[Bob, {null, KeyedStateValueView, +I[Bob, 12]}]",
+                                            "+I[Alice, {null, KeyedStateValueView, +I[Alice, 42]}]",
+                                            "+I[Bob, {(1970-01-01T00:00:00.001Z,[12]), KeyedStateValueView, +I[Bob, 99]}]",
+                                            "+I[Bob, {(1970-01-01T00:00:00.002Z,[12, 99]), KeyedStateValueView, +I[Bob, 100]}]",
+                                            "+I[Alice, {(1970-01-01T00:00:00.001Z,[42]), KeyedStateValueView, +I[Alice, 400]}]")
+                                    .build())
+                    .runSql("INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name)")
+                    .build();
+
     public static final TableTestProgram PROCESS_LIST_STATE =
             TableTestProgram.of("process-list-state", "list view state entry")
                     .setupTemporarySystemFunction("f", ListStateFunction.class)
@@ -1394,6 +1678,219 @@ public class ProcessTableFunctionTestPrograms {
                                             "+I[Alice, {{Alice=2, oldAlice=1}, KeyedStateMapViewWithKeysNotNull, +I[Alice, 400]}]")
                                     .build())
                     .runSql("INSERT INTO sink SELECT * FROM f(r => TABLE t PARTITION BY name)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_BROADCAST_STATE =
+            TableTestProgram.of(
+                            "process-broadcast-state",
+                            "broadcast table next to a set semantic table")
+                    .setupTemporarySystemFunction("f", BroadcastLookupFunction.class)
+                    .setupSql(MULTI_VALUES)
+                    .setupSql(BROADCAST_RULES_VALUES)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[Bob, {+I[Bob, 12], 1, null, KeyedStateMapViewWithKeysNotNull}]",
+                                            "+I[Alice, {+I[Alice, 42], 1, null, KeyedStateMapViewWithKeysNotNull}]",
+                                            "+I[Bob, {+I[Bob, 99], 2, null, KeyedStateMapViewWithKeysNotNull}]",
+                                            "+I[Bob, {+I[Bob, 100], 3, null, KeyedStateMapViewWithKeysNotNull}]",
+                                            "+I[Alice, {+I[Alice, 400], 2, null, KeyedStateMapViewWithKeysNotNull}]",
+                                            "+I[Bob, {3, {Dave=3, Eve=4}}]",
+                                            "+I[Alice, {2, {Dave=3, Eve=4}}]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f(input => TABLE t PARTITION BY name, rules => TABLE rules)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_BROADCAST_STATE_TABLE_API =
+            TableTestProgram.of(
+                            "process-broadcast-state-table-api",
+                            "broadcast table next to a set semantic table in Table API")
+                    .setupTemporarySystemFunction("f", BroadcastLookupFunction.class)
+                    .setupSql(MULTI_VALUES)
+                    .setupSql(BROADCAST_RULES_VALUES)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[Bob, {+I[Bob, 12], 1, null, KeyedStateMapViewWithKeysNotNull}]",
+                                            "+I[Alice, {+I[Alice, 42], 1, null, KeyedStateMapViewWithKeysNotNull}]",
+                                            "+I[Bob, {+I[Bob, 99], 2, null, KeyedStateMapViewWithKeysNotNull}]",
+                                            "+I[Bob, {+I[Bob, 100], 3, null, KeyedStateMapViewWithKeysNotNull}]",
+                                            "+I[Alice, {+I[Alice, 400], 2, null, KeyedStateMapViewWithKeysNotNull}]",
+                                            "+I[Bob, {3, {Dave=3, Eve=4}}]",
+                                            "+I[Alice, {2, {Dave=3, Eve=4}}]")
+                                    .build())
+                    .runTableApi(
+                            env ->
+                                    env.fromCall(
+                                            "f",
+                                            env.from("t")
+                                                    .partitionBy($("name"))
+                                                    .asArgument("input"),
+                                            env.from("rules").asArgument("rules")),
+                            "sink")
+                    .build();
+
+    public static final TableTestProgram PROCESS_BROADCAST_MULTI_INPUT =
+            TableTestProgram.of(
+                            "process-broadcast-multi-input",
+                            "multiple broadcast tables next to multiple set semantic tables")
+                    .setupTemporarySystemFunction("f", MultiBroadcastFunction.class)
+                    .setupSql(MULTI_VALUES)
+                    .setupSql(CITY_VALUES)
+                    .setupSql(BROADCAST_RULES_VALUES)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(MULTI_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[Bob, Bob, {null, +I[Bob, London], null}]",
+                                            "+I[Bob, Bob, {+I[Bob, 12], null, null}]",
+                                            "+I[Alice, Alice, {null, +I[Alice, Berlin], null}]",
+                                            "+I[Alice, Alice, {+I[Alice, 42], null, null}]",
+                                            "+I[Charly, Charly, {null, +I[Charly, Paris], null}]",
+                                            "+I[Bob, Bob, {+I[Bob, 99], null, null}]",
+                                            "+I[Bob, Bob, {+I[Bob, 100], null, null}]",
+                                            "+I[Alice, Alice, {+I[Alice, 400], null, null}]",
+                                            "+I[Bob, Bob, {{Dave=3, Eve=4}, RuleStats(rules=2, lastName=Eve)}]",
+                                            "+I[Alice, Alice, {{Dave=3, Eve=4}, RuleStats(rules=2, lastName=Eve)}]",
+                                            "+I[Charly, Charly, {{Dave=3, Eve=4}, RuleStats(rules=2, lastName=Eve)}]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f("
+                                    + "in1 => TABLE t PARTITION BY name, "
+                                    + "rules1 => TABLE rules, "
+                                    + "in2 => TABLE city PARTITION BY name, "
+                                    + "rules2 => TABLE rules)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_BROADCAST_ROW_SEMANTIC =
+            TableTestProgram.of(
+                            "process-broadcast-row-semantic",
+                            "broadcast table next to a row semantic table")
+                    .setupTemporarySystemFunction("f", BroadcastFilterFunction.class)
+                    .setupSql(MULTI_VALUES)
+                    .setupSql(BROADCAST_RULES_VALUES)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[not blocked]",
+                                            "+I[not blocked]",
+                                            "+I[not blocked]",
+                                            "+I[not blocked]",
+                                            "+I[not blocked]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f(input => TABLE t, rule => TABLE rules)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_BROADCAST_ON_TIME =
+            TableTestProgram.of(
+                            "process-broadcast-on-time",
+                            "broadcast table with time attribute next to a set semantic table")
+                    .setupTemporarySystemFunction("f", BroadcastTimersFunction.class)
+                    .setupTableSource(TIMED_SOURCE)
+                    .setupTableSource(TIMED_BROADCAST_RULES_SOURCE)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_TIMED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[Bob, {Processing input row +I[Bob, 1, 1970-01-01T00:00:00Z] at time 0}, 1970-01-01T00:00:00Z]",
+                                            "+I[Alice, {Processing input row +I[Alice, 1, 1970-01-01T00:00:00.001Z] at time 1}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Bob, {Processing input row +I[Bob, 2, 1970-01-01T00:00:00.002Z] at time 2}, 1970-01-01T00:00:00.002Z]",
+                                            "+I[Bob, {Processing input row +I[Bob, 3, 1970-01-01T00:00:00.003Z] at time 3}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {Processing input row +I[Bob, 4, 1970-01-01T00:00:00.004Z] at time 4}, 1970-01-01T00:00:00.004Z]",
+                                            "+I[Bob, {Processing input row +I[Bob, 5, 1970-01-01T00:00:00.005Z] at time 5}, 1970-01-01T00:00:00.005Z]",
+                                            "+I[Bob, {Processing input row +I[Bob, 6, 1970-01-01T00:00:00.006Z] at time 6}, 1970-01-01T00:00:00.006Z]",
+                                            "+I[Alice, {{Dave=2, Eve=5}}, 1970-01-01T00:00:01Z]",
+                                            "+I[Bob, {{Dave=2, Eve=5}}, 1970-01-01T00:00:01Z]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f("
+                                    + "input => TABLE t PARTITION BY name, "
+                                    + "rule => TABLE rules, "
+                                    + "on_time => DESCRIPTOR(ts))")
+                    .build();
+
+    public static final TableTestProgram PROCESS_BROADCAST_CLEAR_STATE =
+            TableTestProgram.of(
+                            "process-broadcast-clear-state",
+                            "clearing state for a broadcast table only affects broadcast state")
+                    .setupTemporarySystemFunction("f", BroadcastClearStateFunction.class)
+                    .setupSql(MULTI_VALUES)
+                    .setupSql(BROADCAST_RULES_VALUES)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[Bob, {3, {Eve=4}}]", "+I[Alice, {2, {Eve=4}}]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f(input => TABLE t PARTITION BY name, rule => TABLE rules)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_BROADCAST_STATE_RESTORE =
+            TableTestProgram.of(
+                            "process-broadcast-state-restore",
+                            "broadcast state is restored before main table is processed")
+                    .setupTemporarySystemFunction("f", BroadcastStateFunction.class)
+                    .setupTableSource(BROADCAST_RESTORE_SOURCE)
+                    .setupTableSource(BROADCAST_RULES_SOURCE)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_BASE_SINK_SCHEMA)
+                                    .consumedBeforeRestore(
+                                            "+I[Bob, {+I[Bob, -1, 1970-01-01T00:00:00Z]}]")
+                                    .consumedAfterRestore(
+                                            "+I[Bob, {+I[Bob, 99, 1970-01-01T00:00:00.001Z], 1, 10, 13, RuleStats(rules=3, lastName=Bob)}]",
+                                            "+I[Alice, {+I[Alice, 42, 1970-01-01T00:00:00.002Z], 1, 2, 13, RuleStats(rules=3, lastName=Bob)}]",
+                                            "+I[Charly, {+I[Charly, 7, 1970-01-01T00:00:00.003Z], 1, null, 13, RuleStats(rules=3, lastName=Bob)}]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f(input => TABLE t PARTITION BY name, rule => TABLE rules)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_INVALID_BROADCAST_COLLECT =
+            TableTestProgram.of(
+                            "process-invalid-broadcast-collect",
+                            "error if results are emitted for a broadcast table")
+                    .setupTemporarySystemFunction("f", InvalidBroadcastCollectFunction.class)
+                    .setupSql(BASIC_VALUES)
+                    .setupSql(BROADCAST_RULES_VALUES)
+                    .runFailingSql(
+                            "SELECT * FROM f(input => TABLE t PARTITION BY name, rule => TABLE rules)",
+                            TableRuntimeException.class,
+                            "Emitting results via collect() is not supported while processing a "
+                                    + "table with broadcast semantics.")
+                    .build();
+
+    public static final TableTestProgram PROCESS_INVALID_BROADCAST_TIMER =
+            TableTestProgram.of(
+                            "process-invalid-broadcast-timer",
+                            "error if timers are registered for a broadcast table")
+                    .setupTemporarySystemFunction("f", InvalidBroadcastTimerFunction.class)
+                    .setupSql(BASIC_VALUES)
+                    .setupSql(BROADCAST_RULES_VALUES)
+                    .runFailingSql(
+                            "SELECT * FROM f(input => TABLE t PARTITION BY name, rule => TABLE rules)",
+                            TableRuntimeException.class,
+                            "Timers are not supported while processing a table with broadcast semantics.")
+                    .build();
+
+    public static final TableTestProgram PROCESS_INVALID_BROADCAST_STATE_WRITE =
+            TableTestProgram.of(
+                            "process-invalid-broadcast-state-write",
+                            "error if broadcast state is modified for a set semantic table")
+                    .setupTemporarySystemFunction("f", InvalidBroadcastStateWriteFunction.class)
+                    .setupSql(BASIC_VALUES)
+                    .setupSql(BROADCAST_RULES_VALUES)
+                    .runFailingSql(
+                            "SELECT * FROM f(input => TABLE t PARTITION BY name, rule => TABLE rules)",
+                            TableRuntimeException.class,
+                            "Broadcast state entry 'weights' is read-only while processing a table "
+                                    + "with row or set semantics.")
                     .build();
 
     public static final TableTestProgram PROCESS_MULTI_INPUT =
@@ -1542,18 +2039,409 @@ public class ProcessTableFunctionTestPrograms {
                                             "`out` STRING")
                                     .addOption("sink-changelog-mode-enforced", "I,UA,D")
                                     .addOption("sink.supports-delete-by-key", "true")
-                                    .consumedValues(
-                                            "+I[Bob, score 5 in city London]",
-                                            "+I[Alice, score 2 in city Zurich]",
-                                            "+U[Bob, score 3 in city London]",
-                                            "+U[Bob, score 3 in city Berlin]",
-                                            "-D[Bob, null]",
-                                            "+I[Bob, score 2 in city Berlin]",
-                                            "-D[Alice, null]")
+                                    .consumedValues("+I[Bob, score 2 in city Berlin]")
+                                    .testMaterializedData()
                                     .build())
                     .runSql(
                             "INSERT INTO sink SELECT `name`, `out` FROM f("
                                     + "scoreTable => TABLE scores PARTITION BY name, "
                                     + "cityTable => TABLE city PARTITION BY name)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_ORDER_BY =
+            TableTestProgram.of(
+                            "process-order-by",
+                            "test the ORDER BY clause on watermarked column and secondary ordering, late events are dropped")
+                    .setupTemporarySystemFunction("f", OrderByFunction.class)
+                    .setupTableSource(TIMED_SOURCE_LATE_EVENTS_LARGE)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_TIMED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            // Schema:
+                                            // (key, current watermark, table watermark, current
+                                            // timestamp, captured order, output timestamp)
+                                            //
+                                            // (Alice, 2) triggers flushing the sort buffer
+                                            // Watermark transitions from 1969-12-31T23:59:59.995Z
+                                            // to 1970-01-01T00:00:00.009Z
+                                            // (Bob, 1) arrives
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00Z, [+I[Bob, 1, 1970-01-01T00:00:00Z]]}, 1970-01-01T00:00:00Z]",
+                                            // (Alice, 1) arrives
+                                            "+I[Alice, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.001Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z]]}, 1970-01-01T00:00:00.001Z]",
+                                            // (Bob, 3) arrives, reordered by secondary sorting,
+                                            // not (Bob, 2)
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.003Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z]]}, 1970-01-01T00:00:00.003Z]",
+                                            // (Bob, 2) arrives
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.003Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z]]}, 1970-01-01T00:00:00.003Z]",
+                                            // (Bob, 4) arrives
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.005Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z]]}, 1970-01-01T00:00:00.005Z]",
+                                            // (Bob, 7) triggers flushing the sort buffer
+                                            // Watermark transitions from 1970-01-01T00:00:00.009Z
+                                            // to 1970-01-01T00:00:00.012Z
+                                            // (Bob, 5) arrives
+                                            "+I[Bob, {1970-01-01T00:00:00.009Z, 1970-01-01T00:00:00.009Z, 1970-01-01T00:00:00.010Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z]]}, 1970-01-01T00:00:00.010Z]",
+                                            // (Bob, 6) arrives
+                                            "+I[Bob, {1970-01-01T00:00:00.009Z, 1970-01-01T00:00:00.009Z, 1970-01-01T00:00:00.012Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z], +I[Bob, 6, 1970-01-01T00:00:00.012Z]]}, 1970-01-01T00:00:00.012Z]",
+                                            // Job is terminating, watermark transitions from
+                                            // 1970-01-01T00:00:00.012Z to MAX (end of input)
+                                            // (Alice, 2) arrives
+                                            "+I[Alice, {1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.019Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z], +I[Alice, 2, 1970-01-01T00:00:00.019Z]]}, 1970-01-01T00:00:00.019Z]",
+                                            // (Alice, 3), (Bob, 5), and (Bob, 6) are dropped
+                                            // because they are marked as late
+                                            // (Bob, 7) arrives
+                                            "+I[Bob, {1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.022Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z], +I[Bob, 6, 1970-01-01T00:00:00.012Z], +I[Bob, 7, 1970-01-01T00:00:00.022Z]]}, 1970-01-01T00:00:00.022Z]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f("
+                                    + "r => TABLE t_large PARTITION BY name ORDER BY (ts ASC, score DESC), "
+                                    + "on_time => DESCRIPTOR(ts))")
+                    .build();
+
+    public static final TableTestProgram PROCESS_MULTI_INPUT_ORDER_BY =
+            TableTestProgram.of(
+                            "process-multi-input-order-by",
+                            "test the ORDER BY clause on watermarked column and secondary ordering per input, late events are dropped")
+                    .setupTemporarySystemFunction("f", MultiInputOrderByFunction.class)
+                    .setupTableSource(TIMED_SOURCE_LATE_EVENTS)
+                    .setupTableSource(TIMED_SOURCE_LATE_EVENTS_LARGE)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(TIMED_MULTI_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            // Schema:
+                                            // (key1, key2, input, table watermark, current
+                                            // timestamp,
+                                            // captured order, output timestamp)
+                                            //
+                                            // Input 1: (Alice, 1) triggers flushing the sort buffer
+                                            // Table watermark 1 transitions from
+                                            // 1969-12-31T23:59:59.999Z
+                                            // to 1970-01-01T00:00:00.000Z
+                                            // (Bob, 1) arrives
+                                            "+I[Bob, Bob, {in1, 1969-12-31T23:59:59.999Z, 1970-01-01T00:00:00Z, [+I[Bob, 1, 1970-01-01T00:00:00Z]]}, 1970-01-01T00:00:00Z]",
+                                            // Input 1: (Bob, 1) triggers flushing the sort buffer
+                                            // Table watermark 1 transitions from
+                                            // 1970-01-01T00:00:00.000Z
+                                            // to 1970-01-01T00:01:39.998Z
+                                            // (Alice, 1) arrives
+                                            "+I[Alice, Alice, {in1, 1970-01-01T00:00:00Z, 1970-01-01T00:00:00.001Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z]]}, 1970-01-01T00:00:00.001Z]",
+                                            // Input 1: (Bob, 3) and (Bob, 4) are dropped because
+                                            // they are marked as late
+                                            // Table watermark 1 transitions from
+                                            // 1970-01-01T00:01:39.998Z
+                                            // to MAX (end of input)
+                                            // (Bob, 2) arrives
+                                            "+I[Bob, Bob, {in1, 1970-01-01T00:01:39.998Z, 1970-01-01T00:01:39.999Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 2, 1970-01-01T00:01:39.999Z]]}, 1970-01-01T00:01:39.999Z]",
+                                            // Input 2: (Alice, 2) triggers flushing the sort buffer
+                                            // Table watermark 2 transitions from
+                                            // 1969-12-31T23:59:59.995Z
+                                            // to 1970-01-01T00:00:00.009Z
+                                            // (Bob, 1) to (Bob, 4) and (Alice, 1) arrives
+                                            "+I[Bob, Bob, {in2, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00Z, [+I[Bob, 1, 1970-01-01T00:00:00Z]]}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, Bob, {in2, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.003Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z]]}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, Bob, {in2, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.003Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z]]}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, Bob, {in2, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.005Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z]]}, 1970-01-01T00:00:00.005Z]",
+                                            "+I[Alice, Alice, {in2, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.001Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z]]}, 1970-01-01T00:00:00.001Z]",
+                                            // Input 2: (Bob, 7) triggers flushing the sort buffer
+                                            // Table watermark 2 transitions from
+                                            // 1970-01-01T00:00:00.009Z
+                                            // to 1970-01-01T00:00:00.012Z
+                                            // (Bob, 5) and (Bob, 6) arrives
+                                            "+I[Bob, Bob, {in2, 1970-01-01T00:00:00.009Z, 1970-01-01T00:00:00.010Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z]]}, 1970-01-01T00:00:00.010Z]",
+                                            "+I[Bob, Bob, {in2, 1970-01-01T00:00:00.009Z, 1970-01-01T00:00:00.012Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z], +I[Bob, 6, 1970-01-01T00:00:00.012Z]]}, 1970-01-01T00:00:00.012Z]",
+                                            // Table watermark 2 transitions from
+                                            // 1970-01-01T00:00:00.012Z
+                                            // to MAX (end of input)
+                                            // (Bob, 7) and (Alice, 2) arrives
+                                            "+I[Bob, Bob, {in2, 1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.022Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z], +I[Bob, 6, 1970-01-01T00:00:00.012Z], +I[Bob, 7, 1970-01-01T00:00:00.022Z]]}, 1970-01-01T00:00:00.022Z]",
+                                            "+I[Alice, Alice, {in2, 1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.019Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z], +I[Alice, 2, 1970-01-01T00:00:00.019Z]]}, 1970-01-01T00:00:00.019Z]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f("
+                                    + "in1 => TABLE t PARTITION BY name ORDER BY (ts ASC, score DESC), "
+                                    + "in2 => TABLE t_large PARTITION BY name ORDER BY (ts ASC, score DESC), "
+                                    + "on_time => DESCRIPTOR(ts))")
+                    .build();
+
+    public static final TableTestProgram PROCESS_ORDER_BY_TABLE_API =
+            TableTestProgram.of(
+                            "process-order-by-table-api",
+                            "test the ORDER BY clause via Table API on watermarked column and secondary ordering, late events are dropped")
+                    .setupTemporarySystemFunction("f", OrderByFunction.class)
+                    .setupTableSource(TIMED_SOURCE_LATE_EVENTS_LARGE)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_TIMED_BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            // Schema:
+                                            // (key, current watermark, table watermark, current
+                                            // timestamp, captured order, output timestamp)
+                                            // Same expected output as PROCESS_ORDER_BY
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00Z, [+I[Bob, 1, 1970-01-01T00:00:00Z]]}, 1970-01-01T00:00:00Z]",
+                                            "+I[Alice, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.001Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z]]}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.003Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z]]}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.003Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z]]}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.005Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z]]}, 1970-01-01T00:00:00.005Z]",
+                                            "+I[Bob, {1970-01-01T00:00:00.009Z, 1970-01-01T00:00:00.009Z, 1970-01-01T00:00:00.010Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z]]}, 1970-01-01T00:00:00.010Z]",
+                                            "+I[Bob, {1970-01-01T00:00:00.009Z, 1970-01-01T00:00:00.009Z, 1970-01-01T00:00:00.012Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z], +I[Bob, 6, 1970-01-01T00:00:00.012Z]]}, 1970-01-01T00:00:00.012Z]",
+                                            "+I[Alice, {1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.019Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z], +I[Alice, 2, 1970-01-01T00:00:00.019Z]]}, 1970-01-01T00:00:00.019Z]",
+                                            "+I[Bob, {1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.022Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z], +I[Bob, 6, 1970-01-01T00:00:00.012Z], +I[Bob, 7, 1970-01-01T00:00:00.022Z]]}, 1970-01-01T00:00:00.022Z]")
+                                    .build())
+                    .runTableApi(
+                            env ->
+                                    env.fromCall(
+                                            OrderByFunction.class,
+                                            env.from("t_large")
+                                                    .partitionBy($("name"))
+                                                    .orderBy($("ts").asc(), $("score").desc())
+                                                    .asArgument("r"),
+                                            descriptor("ts").asArgument("on_time")),
+                            "sink")
+                    .build();
+
+    public static final TableTestProgram PROCESS_ORDER_BY_RESTORE =
+            TableTestProgram.of(
+                            "process-order-by-restore",
+                            "test the ORDER BY clause on watermarked column for restore tests")
+                    .setupTemporarySystemFunction("f", OrderByFunction.class)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t_large")
+                                    .addSchema(
+                                            "name STRING",
+                                            "score INT",
+                                            "ts TIMESTAMP_LTZ(3)",
+                                            "WATERMARK FOR ts AS ts - INTERVAL '0.010' SECOND")
+                                    .producedBeforeRestore(
+                                            Row.of("Bob", 1, Instant.ofEpochMilli(0)),
+                                            Row.of("Alice", 1, Instant.ofEpochMilli(1)),
+                                            Row.of("Bob", 2, Instant.ofEpochMilli(3)),
+                                            Row.of("Bob", 3, Instant.ofEpochMilli(3)),
+                                            Row.of("Bob", 4, Instant.ofEpochMilli(5)),
+                                            Row.of("Alice", 2, Instant.ofEpochMilli(19)),
+                                            Row.of("Alice", 3, Instant.ofEpochMilli(1)))
+                                    .producedAfterRestore(
+                                            Row.of("Bob", 5, Instant.ofEpochMilli(10)),
+                                            Row.of("Bob", 6, Instant.ofEpochMilli(12)),
+                                            Row.of("Bob", 7, Instant.ofEpochMilli(22)))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(KEYED_TIMED_BASE_SINK_SCHEMA)
+                                    .consumedBeforeRestore(
+                                            // Schema:
+                                            // (key, current watermark, table watermark, current
+                                            // timestamp, captured order, output timestamp)
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00Z, [+I[Bob, 1, 1970-01-01T00:00:00Z]]}, 1970-01-01T00:00:00Z]",
+                                            "+I[Alice, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.001Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z]]}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.003Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z]]}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.003Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z]]}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, {1969-12-31T23:59:59.995Z, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.005Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z]]}, 1970-01-01T00:00:00.005Z]")
+                                    .consumedAfterRestore(
+                                            // Currently, we don't checkpoint watermarks. Thus, the
+                                            // logical clock will go backwards after restore. If the
+                                            // watermark strategy is not chosen well, it can mess up
+                                            // the initial ordering right after restore. This
+                                            // is the intended behavior for PTFs for now and should
+                                            // be addressed upstream (most likely in source splits).
+                                            "+I[Bob, {1970-01-01T00:00:00.002Z, 1970-01-01T00:00:00.002Z, 1970-01-01T00:00:00.010Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z]]}, 1970-01-01T00:00:00.010Z]",
+                                            "+I[Bob, {1970-01-01T00:00:00.002Z, 1970-01-01T00:00:00.002Z, 1970-01-01T00:00:00.012Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z], +I[Bob, 6, 1970-01-01T00:00:00.012Z]]}, 1970-01-01T00:00:00.012Z]",
+                                            "+I[Alice, {1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.019Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z], +I[Alice, 2, 1970-01-01T00:00:00.019Z]]}, 1970-01-01T00:00:00.019Z]",
+                                            "+I[Bob, {1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.022Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z], +I[Bob, 6, 1970-01-01T00:00:00.012Z], +I[Bob, 7, 1970-01-01T00:00:00.022Z]]}, 1970-01-01T00:00:00.022Z]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f("
+                                    + "r => TABLE t_large PARTITION BY name ORDER BY (ts ASC, score DESC), "
+                                    + "on_time => DESCRIPTOR(ts))")
+                    .build();
+
+    public static final TableTestProgram PROCESS_MULTI_INPUT_ORDER_BY_RESTORE =
+            TableTestProgram.of(
+                            "process-multi-input-order-by-restore",
+                            "test the multi-input ORDER BY clause on watermarked column for restore tests")
+                    .setupTemporarySystemFunction("f", MultiInputOrderByFunction.class)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema(
+                                            "name STRING",
+                                            "score INT",
+                                            "ts TIMESTAMP_LTZ(3)",
+                                            "WATERMARK FOR ts AS ts - INTERVAL '0.001' SECOND")
+                                    .producedBeforeRestore(
+                                            Row.of("Bob", 1, Instant.ofEpochMilli(0)),
+                                            Row.of("Alice", 1, Instant.ofEpochMilli(1)),
+                                            Row.of("Bob", 2, Instant.ofEpochMilli(99999)),
+                                            Row.of("Bob", 3, Instant.ofEpochMilli(3)),
+                                            Row.of("Bob", 4, Instant.ofEpochMilli(4)))
+                                    .producedAfterRestore()
+                                    .build())
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t_large")
+                                    .addSchema(
+                                            "name STRING",
+                                            "score INT",
+                                            "ts TIMESTAMP_LTZ(3)",
+                                            "WATERMARK FOR ts AS ts - INTERVAL '0.010' SECOND")
+                                    .producedBeforeRestore(
+                                            Row.of("Bob", 1, Instant.ofEpochMilli(0)),
+                                            Row.of("Alice", 1, Instant.ofEpochMilli(1)),
+                                            Row.of("Bob", 2, Instant.ofEpochMilli(3)),
+                                            Row.of("Bob", 3, Instant.ofEpochMilli(3)),
+                                            Row.of("Bob", 4, Instant.ofEpochMilli(5)),
+                                            Row.of("Alice", 2, Instant.ofEpochMilli(19)),
+                                            Row.of("Alice", 3, Instant.ofEpochMilli(1)))
+                                    .producedAfterRestore(
+                                            Row.of("Bob", 5, Instant.ofEpochMilli(10)),
+                                            Row.of("Bob", 6, Instant.ofEpochMilli(12)),
+                                            Row.of("Bob", 7, Instant.ofEpochMilli(22)))
+                                    .build())
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(TIMED_MULTI_BASE_SINK_SCHEMA)
+                                    .consumedBeforeRestore(
+                                            // Schema:
+                                            // (key1, key2, input, table watermark, current
+                                            // timestamp, captured order, output timestamp)
+                                            "+I[Bob, Bob, {in1, 1969-12-31T23:59:59.999Z, 1970-01-01T00:00:00Z, [+I[Bob, 1, 1970-01-01T00:00:00Z]]}, 1970-01-01T00:00:00Z]",
+                                            "+I[Alice, Alice, {in1, 1970-01-01T00:00:00Z, 1970-01-01T00:00:00.001Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z]]}, 1970-01-01T00:00:00.001Z]",
+                                            "+I[Bob, Bob, {in2, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00Z, [+I[Bob, 1, 1970-01-01T00:00:00Z]]}, 1970-01-01T00:00:00Z]",
+                                            "+I[Bob, Bob, {in2, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.003Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z]]}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, Bob, {in2, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.003Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z]]}, 1970-01-01T00:00:00.003Z]",
+                                            "+I[Bob, Bob, {in2, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.005Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z]]}, 1970-01-01T00:00:00.005Z]",
+                                            "+I[Alice, Alice, {in2, 1969-12-31T23:59:59.995Z, 1970-01-01T00:00:00.001Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z]]}, 1970-01-01T00:00:00.001Z]")
+                                    .consumedAfterRestore(
+                                            // Watermark resets after restore but captured order is
+                                            // still accurate.
+                                            // (Bob, 2) is flushed because the source for input 1
+                                            // shuts down
+                                            "+I[Bob, Bob, {in1, null, 1970-01-01T00:01:39.999Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 2, 1970-01-01T00:01:39.999Z]]}, 1970-01-01T00:01:39.999Z]",
+                                            // (Bob, 7) triggers watermark up to (Bob, 6)
+                                            "+I[Bob, Bob, {in2, 1970-01-01T00:00:00.002Z, 1970-01-01T00:00:00.010Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z]]}, 1970-01-01T00:00:00.010Z]",
+                                            "+I[Bob, Bob, {in2, 1970-01-01T00:00:00.002Z, 1970-01-01T00:00:00.012Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z], +I[Bob, 6, 1970-01-01T00:00:00.012Z]]}, 1970-01-01T00:00:00.012Z]",
+                                            // Source for input 2 shuts down
+                                            "+I[Bob, Bob, {in2, 1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.022Z, [+I[Bob, 1, 1970-01-01T00:00:00Z], +I[Bob, 3, 1970-01-01T00:00:00.003Z], +I[Bob, 2, 1970-01-01T00:00:00.003Z], +I[Bob, 4, 1970-01-01T00:00:00.005Z], +I[Bob, 5, 1970-01-01T00:00:00.010Z], +I[Bob, 6, 1970-01-01T00:00:00.012Z], +I[Bob, 7, 1970-01-01T00:00:00.022Z]]}, 1970-01-01T00:00:00.022Z]",
+                                            "+I[Alice, Alice, {in2, 1970-01-01T00:00:00.012Z, 1970-01-01T00:00:00.019Z, [+I[Alice, 1, 1970-01-01T00:00:00.001Z], +I[Alice, 2, 1970-01-01T00:00:00.019Z]]}, 1970-01-01T00:00:00.019Z]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f("
+                                    + "in1 => TABLE t PARTITION BY name ORDER BY (ts ASC, score DESC), "
+                                    + "in2 => TABLE t_large PARTITION BY name ORDER BY (ts ASC, score DESC), "
+                                    + "on_time => DESCRIPTOR(ts))")
+                    .build();
+
+    public static final TableTestProgram PROCESS_IMPLICIT_CASTS =
+            TableTestProgram.of(
+                            "process-implicit-casts",
+                            "implicits casts for both scalar and table args")
+                    .setupTemporarySystemFunction("f", ImplicitCastingFunction.class)
+                    .setupSql(
+                            "CREATE VIEW v AS SELECT 'Bob', 12, (42, TIMESTAMP '2020-01-01 12:12:12')")
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(BASE_SINK_SCHEMA)
+                                    .consumedValues(
+                                            "+I[{CastingPojo(s='Bob', b=12, r=+I[42, 2020-01-01T12:12:12]), 42}]")
+                                    .build())
+                    // The function expects wider types (BIGINT and TIMESTAMP(6)),
+                    // implicit casts are added to fix the mismatch between INT vs. BIGINT and
+                    // TIMESTAMP(0) vs. TIMESTAMP(6).
+                    // Also in constructed types: ROW (table input) vs. STRUCTURED (expected).
+                    .runSql("INSERT INTO sink SELECT * FROM f(p => TABLE v, b => 42)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_MULTI_PARTITION_BY =
+            TableTestProgram.of(
+                            "process-set-from-session-view-with-multi-partition-by",
+                            "set semantic table partitioned by multiple columns, sourced from a view wrapping a SESSION window aggregate")
+                    .setupTemporarySystemFunction("f", SetSemanticTableFunction.class)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema(
+                                            "suite_name STRING",
+                                            "test_name STRING",
+                                            "ts TIMESTAMP_LTZ(3)",
+                                            "WATERMARK FOR ts AS ts - INTERVAL '0.001' SECOND")
+                                    .producedValues(
+                                            Row.of("suiteA", "test1", Instant.ofEpochMilli(0)),
+                                            Row.of("suiteB", "test2", Instant.ofEpochMilli(1)),
+                                            Row.of("suiteA", "test1", Instant.ofEpochMilli(2)),
+                                            Row.of("suiteA", "test1", Instant.ofEpochMilli(3)),
+                                            Row.of("suiteA", "test1", Instant.ofEpochMilli(4)),
+                                            Row.of("suiteA", "test1", Instant.ofEpochMilli(5)),
+                                            Row.of("suiteA", "test1", Instant.ofEpochMilli(6)))
+                                    .build())
+                    .setupSql(
+                            "CREATE VIEW v AS "
+                                    + "SELECT suite_name, test_name, COUNT(*) AS c "
+                                    + "FROM SESSION(TABLE t PARTITION BY (suite_name, test_name), DESCRIPTOR(ts), INTERVAL '0.002' SECOND) "
+                                    + "GROUP BY suite_name, test_name, window_start, window_end")
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(
+                                            "`suite_name` STRING",
+                                            "`test_name` STRING",
+                                            "`out` STRING")
+                                    .consumedValues(
+                                            "+I[suiteB, test2, {+I[suiteB, test2, 1], 1}]",
+                                            "+I[suiteA, test1, {+I[suiteA, test1, 6], 1}]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f(r => TABLE v PARTITION BY (suite_name, test_name), i => 1)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_MULTI_PARTITION_BY_AND_ORDER_BY =
+            TableTestProgram.of(
+                            "process-order-by-multi-partition-key-and-order-by",
+                            "set semantic table partitioned and ordered by multiple columns, sourced from a view wrapping a SESSION window aggregate")
+                    .setupTemporarySystemFunction("f", SetSemanticTableFunction.class)
+                    .setupTableSource(
+                            SourceTestStep.newBuilder("t")
+                                    .addSchema(
+                                            "suite_name STRING",
+                                            "test_name STRING",
+                                            "`group` STRING",
+                                            "ts TIMESTAMP_LTZ(3)",
+                                            "WATERMARK FOR ts AS ts - INTERVAL '0.001' SECOND")
+                                    .producedValues(
+                                            // group is only used to force two independent SESSION
+                                            // windows for suiteA/test1 whose window_time ties.
+                                            Row.of("suiteA", "test1", "x", Instant.ofEpochMilli(0)),
+                                            Row.of("suiteB", "test2", "x", Instant.ofEpochMilli(1)),
+                                            Row.of("suiteA", "test1", "x", Instant.ofEpochMilli(2)),
+                                            Row.of("suiteA", "test1", "y", Instant.ofEpochMilli(2)))
+                                    .build())
+                    .setupSql(
+                            "CREATE VIEW v AS "
+                                    + "SELECT suite_name, test_name, window_time, COUNT(*) AS c "
+                                    + "FROM SESSION(TABLE t PARTITION BY (suite_name, test_name, `group`), DESCRIPTOR(ts), INTERVAL '0.002' SECOND) "
+                                    + "GROUP BY suite_name, test_name, `group`, window_start, window_end, window_time")
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(
+                                            "`suite_name` STRING",
+                                            "`test_name` STRING",
+                                            "`out` STRING")
+                                    .consumedValues(
+                                            "+I[suiteB, test2, {+I[suiteB, test2, 1970-01-01T00:00:00.002Z, 1], 1}]",
+                                            "+I[suiteA, test1, {+I[suiteA, test1, 1970-01-01T00:00:00.003Z, 2], 1}]",
+                                            "+I[suiteA, test1, {+I[suiteA, test1, 1970-01-01T00:00:00.003Z, 1], 1}]")
+                                    .build())
+                    .runSql(
+                            "INSERT INTO sink SELECT * FROM f("
+                                    + "r => TABLE v PARTITION BY (suite_name, test_name) ORDER BY (window_time ASC, c DESC), i => 1)")
+                    .build();
+
+    public static final TableTestProgram PROCESS_ROW_DATA_CONVERSION_TABLE =
+            TableTestProgram.of(
+                            "process-row-data-conversion",
+                            "table argument with a non-default RowData conversion class")
+                    .setupTemporarySystemFunction("f", RowDataRowSemanticTableFunction.class)
+                    .setupSql(BASIC_VALUES)
+                    .setupTableSink(
+                            SinkTestStep.newBuilder("sink")
+                                    .addSchema(BASE_SINK_SCHEMA)
+                                    .consumedValues("+I[{Hello Bob!}]", "+I[{Hello Alice!}]")
+                                    .build())
+                    .runSql("INSERT INTO sink SELECT * FROM f(input => TABLE t)")
                     .build();
 }

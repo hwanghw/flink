@@ -63,8 +63,13 @@ public class LiteralExpressionsSerializationITCase {
         final LocalDateTime localDateTimeWithoutSeconds =
                 LocalDateTime.of(localDate, localTimeWithoutSeconds);
         final Instant instant = Instant.ofEpochMilli(1234567);
-        final Duration duration = Duration.ofDays(99).plusSeconds(34).plusMillis(999);
-        final Period period = Period.ofMonths(470);
+        final Duration defaultDuration = Duration.ofDays(99).plusSeconds(34).plusMillis(999);
+        final Period defaultPeriod = Period.ofMonths(470);
+        final Period yearMonthPeriod = Period.ofMonths(9999 * 12 + 11);
+        final Duration dayHourDuration = Duration.ofDays(100).plusHours(5);
+        final Duration secondPrecisionDuration = Duration.ofSeconds(45).plusMillis(750);
+        final Duration maxDayDuration = Duration.ofDays(999_999);
+        final Period derivedLargePeriod = Period.ofMonths(1200);
         final Table t =
                 env.fromValues(1)
                         .select(
@@ -85,15 +90,32 @@ public class LiteralExpressionsSerializationITCase {
                                 lit(localTimeWithoutSeconds, DataTypes.TIME().notNull()),
                                 lit(localDateTime, DataTypes.TIMESTAMP(3).notNull()),
                                 lit(localDateTimeWithoutSeconds, DataTypes.TIMESTAMP(3).notNull()),
+                                lit(instant, DataTypes.TIMESTAMP_LTZ(0).notNull()),
                                 lit(instant, DataTypes.TIMESTAMP_LTZ(3).notNull()),
+                                lit(instant, DataTypes.TIMESTAMP_LTZ(6).notNull()),
+                                lit(instant, DataTypes.TIMESTAMP_LTZ(9).notNull()),
                                 lit(
-                                        duration,
+                                        defaultDuration,
                                         DataTypes.INTERVAL(DataTypes.DAY(), DataTypes.SECOND(9))
                                                 .notNull()),
                                 lit(
-                                        period,
+                                        defaultPeriod,
                                         DataTypes.INTERVAL(DataTypes.YEAR(), DataTypes.MONTH())
-                                                .notNull()));
+                                                .notNull()),
+                                lit(
+                                        yearMonthPeriod,
+                                        DataTypes.INTERVAL(DataTypes.YEAR(4), DataTypes.MONTH())
+                                                .notNull()),
+                                lit(
+                                        dayHourDuration,
+                                        DataTypes.INTERVAL(DataTypes.DAY(3), DataTypes.HOUR())
+                                                .notNull()),
+                                lit(
+                                        secondPrecisionDuration,
+                                        DataTypes.INTERVAL(DataTypes.SECOND(4)).notNull()),
+                                lit(maxDayDuration, DataTypes.INTERVAL(DataTypes.DAY(6)).notNull()),
+                                lit(defaultPeriod),
+                                lit(derivedLargePeriod));
         final ProjectQueryOperation operation = (ProjectQueryOperation) t.getQueryOperation();
         final String exprStr =
                 operation.getProjectList().stream()
@@ -122,9 +144,18 @@ public class LiteralExpressionsSerializationITCase {
                                 + "TIME '12:12:00',\n"
                                 + "TIMESTAMP '2024-02-03 12:12:12.333',\n"
                                 + "TIMESTAMP '2024-02-03 12:12:00',\n"
+                                + "CAST(TO_TIMESTAMP_LTZ(1234, 0) AS TIMESTAMP_LTZ(0)),\n"
                                 + "TO_TIMESTAMP_LTZ(1234567, 3),\n"
-                                + "INTERVAL '99 00:00:34.999' DAY TO SECOND(3),\n"
-                                + "INTERVAL '39-2' YEAR TO MONTH");
+                                + "TO_TIMESTAMP_LTZ(1234567000, 6),\n"
+                                + "TO_TIMESTAMP_LTZ(1234567000000, 9),\n"
+                                + "INTERVAL '99 00:00:34.999000000' DAY(2) TO SECOND(9),\n"
+                                + "INTERVAL '39-2' YEAR(2) TO MONTH,\n"
+                                + "INTERVAL '9999-11' YEAR(4) TO MONTH,\n"
+                                + "INTERVAL '100 05:00:00.000000' DAY(3) TO SECOND(6),\n"
+                                + "INTERVAL '0 00:00:45.7500' DAY(2) TO SECOND(4),\n"
+                                + "INTERVAL '999999 00:00:00.000000' DAY(6) TO SECOND(6),\n"
+                                + "INTERVAL '39-2' YEAR(2) TO MONTH,\n"
+                                + "INTERVAL '100-0' YEAR(3) TO MONTH");
 
         final TableResult tableResult = env.sqlQuery(String.format("SELECT %s", exprStr)).execute();
         final List<Row> results = CollectionUtil.iteratorToList(tableResult.collect());
@@ -148,8 +179,17 @@ public class LiteralExpressionsSerializationITCase {
                                 localTimeWithoutSeconds,
                                 localDateTime,
                                 localDateTimeWithoutSeconds,
+                                Instant.ofEpochSecond(1234),
                                 instant,
-                                duration,
-                                period));
+                                instant,
+                                instant,
+                                defaultDuration,
+                                defaultPeriod,
+                                yearMonthPeriod,
+                                dayHourDuration,
+                                secondPrecisionDuration,
+                                maxDayDuration,
+                                defaultPeriod,
+                                derivedLargePeriod));
     }
 }

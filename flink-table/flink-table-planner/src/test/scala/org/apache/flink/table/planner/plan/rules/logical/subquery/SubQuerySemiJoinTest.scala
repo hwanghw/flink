@@ -39,7 +39,7 @@ class SubQuerySemiJoinTest extends SubQueryTestBase {
   @Test
   def testInOnWhere_NotSubQuery(): Unit = {
     val sqlQuery = "SELECT * FROM l WHERE a IN (1, 2, 3, 4)"
-    util.verifyRelPlanNotExpected(sqlQuery, "joinType=[semi]")
+    util.verifyRelPlan(sqlQuery)
   }
 
   @Test
@@ -210,9 +210,7 @@ class SubQuerySemiJoinTest extends SubQueryTestBase {
     val sqlQuery = "SELECT b FROM l WHERE" +
       " (CASE WHEN a IN (SELECT i FROM t1 WHERE l.a = t1.i) THEN 1 ELSE 2 END) IN (SELECT d FROM r)"
 
-    // TODO some bugs in SubQueryRemoveRule
-    assertThatExceptionOfType(classOf[RuntimeException])
-      .isThrownBy(() => util.verifyRelPlanNotExpected(sqlQuery, "joinType=[semi]"))
+    util.verifyRelPlan(sqlQuery)
   }
 
   @Test
@@ -964,25 +962,9 @@ class SubQuerySemiJoinTest extends SubQueryTestBase {
 
   @Test
   def testInWithCorrelatedOnHaving(): Unit = {
-    // TODO There are some bugs when converting SqlNode to RelNode:
     val sqlQuery = "SELECT SUM(a) AS s FROM x GROUP BY b " +
       "HAVING MAX(a) IN (SELECT d FROM y WHERE y.d = x.b)"
-
-    // the logical plan is:
-    //
-    // LogicalProject(s=[$1])
-    //  LogicalFilter(condition=[IN($2, {
-    //   LogicalProject(d=[$1])
-    //    LogicalFilter(condition=[=($1, $cor0.b)])
-    //     LogicalTableScan(table=[[builtin, default, r]])
-    //  })])
-    //   LogicalAggregate(group=[{0}], s=[SUM($1)], agg#1=[MAX($1)])
-    //    LogicalProject(b=[$1], a=[$0])
-    //     LogicalTableScan(table=[[builtin, default, l]])
-    //
-    // LogicalFilter lost variablesSet information.
-
-    util.verifyRelPlanNotExpected(sqlQuery, "joinType=[semi]")
+    util.verifyRelPlan(sqlQuery)
   }
 
   @Test
@@ -1324,6 +1306,51 @@ class SubQuerySemiJoinTest extends SubQueryTestBase {
   }
 
   @Test
+  def testExistsWithCorrelatedOnWhere_Having1(): Unit = {
+    // Correlated WHERE plus HAVING on a single aggregate output.
+    // Regression for SubQueryDecorrelator: the non-correlated HAVING predicate must be
+    // re-indexed against the rewritten Aggregate (which receives the correlated column
+    // injected into its group key).
+    val sqlQuery = "SELECT * FROM l WHERE EXISTS " +
+      "(SELECT 1 FROM r WHERE l.a = r.d GROUP BY r.f HAVING SUM(r.e) >= 3)"
+    util.verifyRelPlan(sqlQuery)
+  }
+
+  @Test
+  def testExistsWithCorrelatedOnWhere_Having2(): Unit = {
+    // Compound HAVING with multiple aggregate refs.
+    val sqlQuery = "SELECT * FROM l WHERE EXISTS " +
+      "(SELECT 1 FROM r WHERE l.a = r.d GROUP BY r.f HAVING SUM(r.e) >= 3 AND MAX(r.e) < 100)"
+    util.verifyRelPlan(sqlQuery)
+  }
+
+  @Test
+  def testExistsWithCorrelatedOnWhere_Having3(): Unit = {
+    // HAVING that mixes an aggregate ref with COUNT(*).
+    val sqlQuery = "SELECT * FROM l WHERE EXISTS " +
+      "(SELECT 1 FROM r WHERE l.a = r.d GROUP BY r.f HAVING SUM(r.e) >= 3 AND COUNT(*) > 1)"
+    util.verifyRelPlan(sqlQuery)
+  }
+
+  @Test
+  def testExistsWithCorrelatedOnWhere_Having4(): Unit = {
+    // Multiple correlated WHERE columns combined with a HAVING on aggregate output.
+    val sqlQuery = "SELECT * FROM l WHERE EXISTS " +
+      "(SELECT 1 FROM r WHERE l.a = r.d AND l.b = r.e GROUP BY r.f HAVING COUNT(r.d) >= 2)"
+    util.verifyRelPlan(sqlQuery)
+  }
+
+  @Test
+  def testExistsWithCorrelatedOnWhere_Aggregate_LocalWhere(): Unit = {
+    // Mixed correlated + local WHERE, no HAVING. Guards against an over-eager fix:
+    // the local predicate `r.e > 10` sits below the Aggregate, so its RexInputRef must
+    // remain stable through decorrelation.
+    val sqlQuery = "SELECT * FROM l WHERE EXISTS " +
+      "(SELECT 1 FROM r WHERE l.a = r.d AND r.e > 10 GROUP BY r.f)"
+    util.verifyRelPlan(sqlQuery)
+  }
+
+  @Test
   def testExistsWithCorrelatedOnWhere_UnsupportedAggregate1(): Unit = {
     util.addTableSource[(Int, Long)]("l1", 'a, 'b)
     util.addTableSource[(Int, Long, Double, String)]("r1", 'c, 'd, 'e, 'f)
@@ -1577,28 +1604,9 @@ class SubQuerySemiJoinTest extends SubQueryTestBase {
 
   @Test
   def testExistsWithCorrelatedOnHaving(): Unit = {
-    // TODO There are some bugs when converting SqlNode to RelNode:
-    val sqlQuery1 =
+    val sqlQuery =
       "SELECT SUM(a) AS s FROM x GROUP BY b HAVING EXISTS (SELECT * FROM y WHERE y.d = x.b)"
-
-    // the logical plan is:
-    //
-    // LogicalProject(s=[$1])
-    //  LogicalFilter(condition=[IN($2, {
-    //   LogicalProject(d=[$1])
-    //    LogicalFilter(condition=[=($1, $cor0.b)])
-    //     LogicalTableScan(table=[[builtin, default, r]])
-    //  })])
-    //   LogicalAggregate(group=[{0}], s=[SUM($1)], agg#1=[MAX($1)])
-    //    LogicalProject(b=[$1], a=[$0])
-    //     LogicalTableScan(table=[[builtin, default, l]])
-    //
-    // LogicalFilter lost variablesSet information.
-
-    util.verifyRelPlanNotExpected(sqlQuery1, "joinType=[semi]")
-
-    val sqlQuery2 = "SELECT MAX(a) FROM x GROUP BY 1 HAVING EXISTS (SELECT 1 FROM y WHERE d < b)"
-    util.verifyRelPlanNotExpected(sqlQuery2, "joinType=[semi]")
+    util.verifyRelPlan(sqlQuery)
   }
 
   @Test
@@ -1666,11 +1674,7 @@ class SubQuerySemiJoinTest extends SubQueryTestBase {
       " (CASE WHEN b IN (SELECT m FROM t2) THEN 3 ELSE 4 END)) " +
       " IN (SELECT d, e FROM r)"
 
-    // TODO some bugs in SubQueryRemoveRule
-    //  the result RelNode (LogicalJoin(condition=[=($1, $8)], joinType=[left]))
-    //  after SubQueryRemoveRule is unexpected
-    assertThatExceptionOfType(classOf[AssertionError])
-      .isThrownBy(() => util.verifyRelPlanNotExpected(sqlQuery, "joinType=[semi]"))
+    util.verifyRelPlan(sqlQuery)
   }
 
 }

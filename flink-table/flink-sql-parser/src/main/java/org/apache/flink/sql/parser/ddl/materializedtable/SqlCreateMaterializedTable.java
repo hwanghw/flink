@@ -29,19 +29,23 @@ import org.apache.flink.sql.parser.ddl.SqlWatermark;
 import org.apache.flink.sql.parser.ddl.constraint.SqlTableConstraint;
 import org.apache.flink.sql.parser.error.SqlValidateException;
 
+import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlCharStringLiteral;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlIntervalLiteral;
 import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlSpecialOperator;
+import org.apache.calcite.sql.SqlTimestampLiteral;
 import org.apache.calcite.sql.SqlWriter;
 import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.util.ImmutableNullableList;
 
 import javax.annotation.Nullable;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -51,7 +55,49 @@ import static java.util.Objects.requireNonNull;
 public class SqlCreateMaterializedTable extends SqlCreateObject implements ExtendedSqlNode {
 
     public static final SqlSpecialOperator CREATE_OPERATOR =
-            new SqlSpecialOperator("CREATE MATERIALIZED TABLE", SqlKind.CREATE_TABLE);
+            new SqlSpecialOperator("CREATE MATERIALIZED TABLE", SqlKind.CREATE_TABLE) {
+                @Override
+                public SqlCall createCall(
+                        SqlLiteral functionQualifier, SqlParserPos pos, SqlNode... operands) {
+                    return buildCreateCall(CREATE_OPERATOR, pos, operands);
+                }
+            };
+
+    static SqlCreateMaterializedTable buildCreateCall(
+            SqlSpecialOperator operator, SqlParserPos pos, SqlNode[] operands) {
+        List<SqlTableConstraint> constraints = new ArrayList<>();
+        for (SqlNode c : (SqlNodeList) operands[2]) {
+            constraints.add((SqlTableConstraint) c);
+        }
+        SqlRefreshMode refreshMode =
+                operands[10] == null
+                        ? null
+                        : ((SqlLiteral) operands[10]).getValueAs(SqlRefreshMode.class);
+        SqlStartMode startMode =
+                operands[11] == null
+                        ? null
+                        : new SqlStartMode(
+                                ((SqlLiteral) operands[11])
+                                        .getValueAs(SqlStartMode.SqlStartModeKind.class),
+                                (SqlIntervalLiteral) operands[12],
+                                (SqlTimestampLiteral) operands[13]);
+        return new SqlCreateMaterializedTable(
+                operator,
+                pos,
+                (SqlIdentifier) operands[0],
+                (SqlNodeList) operands[1],
+                constraints,
+                (SqlWatermark) operands[3],
+                (SqlCharStringLiteral) operands[4],
+                (SqlDistribution) operands[9],
+                (SqlNodeList) operands[5],
+                (SqlNodeList) operands[6],
+                (SqlIntervalLiteral) operands[7],
+                refreshMode,
+                startMode,
+                operands[8],
+                SqlParserPos.ZERO);
+    }
 
     private final SqlNodeList columnList;
 
@@ -67,7 +113,11 @@ public class SqlCreateMaterializedTable extends SqlCreateObject implements Exten
 
     private final @Nullable SqlRefreshMode refreshMode;
 
+    private final @Nullable SqlStartMode startMode;
+
     private final SqlNode asQuery;
+
+    private final SqlParserPos asQueryKeywordPos;
 
     public SqlCreateMaterializedTable(
             SqlSpecialOperator operator,
@@ -82,7 +132,9 @@ public class SqlCreateMaterializedTable extends SqlCreateObject implements Exten
             SqlNodeList propertyList,
             @Nullable SqlIntervalLiteral freshness,
             @Nullable SqlRefreshMode refreshMode,
-            SqlNode asQuery) {
+            @Nullable SqlStartMode startMode,
+            SqlNode asQuery,
+            SqlParserPos asQueryKeywordPos) {
         super(operator, pos, tableName, false, false, false, propertyList, comment);
         this.columnList = columnList;
         this.tableConstraints = tableConstraints;
@@ -93,7 +145,9 @@ public class SqlCreateMaterializedTable extends SqlCreateObject implements Exten
         requireNonNull(propertyList, "propertyList should not be null");
         this.freshness = freshness;
         this.refreshMode = refreshMode;
+        this.startMode = startMode;
         this.asQuery = requireNonNull(asQuery, "asQuery should not be null");
+        this.asQueryKeywordPos = asQueryKeywordPos;
     }
 
     @Override
@@ -107,11 +161,24 @@ public class SqlCreateMaterializedTable extends SqlCreateObject implements Exten
                 partitionKeyList,
                 properties,
                 freshness,
-                asQuery);
+                asQuery,
+                distribution,
+                refreshMode == null
+                        ? null
+                        : SqlLiteral.createSymbol(refreshMode, SqlParserPos.ZERO),
+                startMode == null
+                        ? null
+                        : SqlLiteral.createSymbol(startMode.getKind(), SqlParserPos.ZERO),
+                startMode == null ? null : startMode.getIntervalLiteral(),
+                startMode == null ? null : startMode.getTimestampLiteral());
     }
 
     public SqlNodeList getColumnList() {
         return columnList;
+    }
+
+    public List<SqlTableConstraint> getTableConstraints() {
+        return tableConstraints;
     }
 
     public Optional<SqlWatermark> getWatermark() {
@@ -136,8 +203,18 @@ public class SqlCreateMaterializedTable extends SqlCreateObject implements Exten
         return refreshMode;
     }
 
+    @Nullable
+    public SqlStartMode getStartMode() {
+        return startMode;
+    }
+
     public SqlNode getAsQuery() {
         return asQuery;
+    }
+
+    /** Returns the parser position of the {@code AS} keyword. */
+    public SqlParserPos getAsQueryKeywordPos() {
+        return asQueryKeywordPos;
     }
 
     /** Returns the column constraints plus the table constraints. */
@@ -173,6 +250,7 @@ public class SqlCreateMaterializedTable extends SqlCreateObject implements Exten
         SqlUnparseUtils.unparseDistribution(distribution, writer, leftPrec, rightPrec);
         SqlUnparseUtils.unparsePartitionKeyList(partitionKeyList, writer, leftPrec, rightPrec);
         SqlUnparseUtils.unparseProperties(properties, writer, leftPrec, rightPrec);
+        SqlUnparseUtils.unparseStartMode(startMode, writer);
         SqlUnparseUtils.unparseFreshness(freshness, true, writer, leftPrec, rightPrec);
         SqlUnparseUtils.unparseRefreshMode(refreshMode, writer);
         SqlUnparseUtils.unparseAsQuery(asQuery, writer, leftPrec, rightPrec);

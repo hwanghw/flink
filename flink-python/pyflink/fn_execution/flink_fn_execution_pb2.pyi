@@ -19,7 +19,8 @@ from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
+from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -32,28 +33,32 @@ class JobParameter(_message.Message):
     def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
 
 class Input(_message.Message):
-    __slots__ = ("udf", "inputOffset", "inputConstant")
+    __slots__ = ("udf", "inputOffset", "inputConstant", "refIndex")
     UDF_FIELD_NUMBER: _ClassVar[int]
     INPUTOFFSET_FIELD_NUMBER: _ClassVar[int]
     INPUTCONSTANT_FIELD_NUMBER: _ClassVar[int]
+    REFINDEX_FIELD_NUMBER: _ClassVar[int]
     udf: UserDefinedFunction
     inputOffset: int
     inputConstant: bytes
-    def __init__(self, udf: _Optional[_Union[UserDefinedFunction, _Mapping]] = ..., inputOffset: _Optional[int] = ..., inputConstant: _Optional[bytes] = ...) -> None: ...
+    refIndex: int
+    def __init__(self, udf: _Optional[_Union[UserDefinedFunction, _Mapping]] = ..., inputOffset: _Optional[int] = ..., inputConstant: _Optional[bytes] = ..., refIndex: _Optional[int] = ...) -> None: ...
 
 class UserDefinedFunction(_message.Message):
-    __slots__ = ("payload", "inputs", "window_index", "takes_row_as_input", "is_pandas_udf")
+    __slots__ = ("payload", "inputs", "window_index", "takes_row_as_input", "is_pandas_udf", "is_arrow_udf")
     PAYLOAD_FIELD_NUMBER: _ClassVar[int]
     INPUTS_FIELD_NUMBER: _ClassVar[int]
     WINDOW_INDEX_FIELD_NUMBER: _ClassVar[int]
     TAKES_ROW_AS_INPUT_FIELD_NUMBER: _ClassVar[int]
     IS_PANDAS_UDF_FIELD_NUMBER: _ClassVar[int]
+    IS_ARROW_UDF_FIELD_NUMBER: _ClassVar[int]
     payload: bytes
     inputs: _containers.RepeatedCompositeFieldContainer[Input]
     window_index: int
     takes_row_as_input: bool
     is_pandas_udf: bool
-    def __init__(self, payload: _Optional[bytes] = ..., inputs: _Optional[_Iterable[_Union[Input, _Mapping]]] = ..., window_index: _Optional[int] = ..., takes_row_as_input: bool = ..., is_pandas_udf: bool = ...) -> None: ...
+    is_arrow_udf: bool
+    def __init__(self, payload: _Optional[bytes] = ..., inputs: _Optional[_Iterable[_Union[Input, _Mapping]]] = ..., window_index: _Optional[int] = ..., takes_row_as_input: bool = ..., is_pandas_udf: bool = ..., is_arrow_udf: bool = ...) -> None: ...
 
 class AsyncOptions(_message.Message):
     __slots__ = ("max_concurrent_operations", "timeout_ms", "retry_enabled", "retry_max_attempts", "retry_delay_ms")
@@ -70,20 +75,24 @@ class AsyncOptions(_message.Message):
     def __init__(self, max_concurrent_operations: _Optional[int] = ..., timeout_ms: _Optional[int] = ..., retry_enabled: bool = ..., retry_max_attempts: _Optional[int] = ..., retry_delay_ms: _Optional[int] = ...) -> None: ...
 
 class UserDefinedFunctions(_message.Message):
-    __slots__ = ("udfs", "metric_enabled", "windows", "profile_enabled", "job_parameters", "async_options")
+    __slots__ = ("udfs", "metric_enabled", "windows", "profile_enabled", "job_parameters", "async_options", "runtime_context", "output_indices")
     UDFS_FIELD_NUMBER: _ClassVar[int]
     METRIC_ENABLED_FIELD_NUMBER: _ClassVar[int]
     WINDOWS_FIELD_NUMBER: _ClassVar[int]
     PROFILE_ENABLED_FIELD_NUMBER: _ClassVar[int]
     JOB_PARAMETERS_FIELD_NUMBER: _ClassVar[int]
     ASYNC_OPTIONS_FIELD_NUMBER: _ClassVar[int]
+    RUNTIME_CONTEXT_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_INDICES_FIELD_NUMBER: _ClassVar[int]
     udfs: _containers.RepeatedCompositeFieldContainer[UserDefinedFunction]
     metric_enabled: bool
     windows: _containers.RepeatedCompositeFieldContainer[OverWindow]
     profile_enabled: bool
     job_parameters: _containers.RepeatedCompositeFieldContainer[JobParameter]
     async_options: AsyncOptions
-    def __init__(self, udfs: _Optional[_Iterable[_Union[UserDefinedFunction, _Mapping]]] = ..., metric_enabled: bool = ..., windows: _Optional[_Iterable[_Union[OverWindow, _Mapping]]] = ..., profile_enabled: bool = ..., job_parameters: _Optional[_Iterable[_Union[JobParameter, _Mapping]]] = ..., async_options: _Optional[_Union[AsyncOptions, _Mapping]] = ...) -> None: ...
+    runtime_context: UserDefinedDataStreamFunction.RuntimeContext
+    output_indices: _containers.RepeatedScalarFieldContainer[int]
+    def __init__(self, udfs: _Optional[_Iterable[_Union[UserDefinedFunction, _Mapping]]] = ..., metric_enabled: bool = ..., windows: _Optional[_Iterable[_Union[OverWindow, _Mapping]]] = ..., profile_enabled: bool = ..., job_parameters: _Optional[_Iterable[_Union[JobParameter, _Mapping]]] = ..., async_options: _Optional[_Union[AsyncOptions, _Mapping]] = ..., runtime_context: _Optional[_Union[UserDefinedDataStreamFunction.RuntimeContext, _Mapping]] = ..., output_indices: _Optional[_Iterable[int]] = ...) -> None: ...
 
 class OverWindow(_message.Message):
     __slots__ = ("window_type", "lower_boundary", "upper_boundary")
@@ -195,7 +204,7 @@ class GroupWindow(_message.Message):
     def __init__(self, window_type: _Optional[_Union[GroupWindow.WindowType, str]] = ..., is_time_window: bool = ..., window_slide: _Optional[int] = ..., window_size: _Optional[int] = ..., window_gap: _Optional[int] = ..., is_row_time: bool = ..., time_field_index: _Optional[int] = ..., allowedLateness: _Optional[int] = ..., namedProperties: _Optional[_Iterable[_Union[GroupWindow.WindowProperty, str]]] = ..., shift_timezone: _Optional[str] = ...) -> None: ...
 
 class UserDefinedAggregateFunctions(_message.Message):
-    __slots__ = ("udfs", "metric_enabled", "grouping", "generate_update_before", "key_type", "index_of_count_star", "state_cleaning_enabled", "state_cache_size", "map_state_read_cache_size", "map_state_write_cache_size", "count_star_inserted", "group_window", "profile_enabled", "job_parameters")
+    __slots__ = ("udfs", "metric_enabled", "grouping", "generate_update_before", "key_type", "index_of_count_star", "state_cleaning_enabled", "state_cache_size", "map_state_read_cache_size", "map_state_write_cache_size", "count_star_inserted", "group_window", "profile_enabled", "job_parameters", "runtime_context")
     UDFS_FIELD_NUMBER: _ClassVar[int]
     METRIC_ENABLED_FIELD_NUMBER: _ClassVar[int]
     GROUPING_FIELD_NUMBER: _ClassVar[int]
@@ -210,6 +219,7 @@ class UserDefinedAggregateFunctions(_message.Message):
     GROUP_WINDOW_FIELD_NUMBER: _ClassVar[int]
     PROFILE_ENABLED_FIELD_NUMBER: _ClassVar[int]
     JOB_PARAMETERS_FIELD_NUMBER: _ClassVar[int]
+    RUNTIME_CONTEXT_FIELD_NUMBER: _ClassVar[int]
     udfs: _containers.RepeatedCompositeFieldContainer[UserDefinedAggregateFunction]
     metric_enabled: bool
     grouping: _containers.RepeatedScalarFieldContainer[int]
@@ -224,7 +234,8 @@ class UserDefinedAggregateFunctions(_message.Message):
     group_window: GroupWindow
     profile_enabled: bool
     job_parameters: _containers.RepeatedCompositeFieldContainer[JobParameter]
-    def __init__(self, udfs: _Optional[_Iterable[_Union[UserDefinedAggregateFunction, _Mapping]]] = ..., metric_enabled: bool = ..., grouping: _Optional[_Iterable[int]] = ..., generate_update_before: bool = ..., key_type: _Optional[_Union[Schema.FieldType, _Mapping]] = ..., index_of_count_star: _Optional[int] = ..., state_cleaning_enabled: bool = ..., state_cache_size: _Optional[int] = ..., map_state_read_cache_size: _Optional[int] = ..., map_state_write_cache_size: _Optional[int] = ..., count_star_inserted: bool = ..., group_window: _Optional[_Union[GroupWindow, _Mapping]] = ..., profile_enabled: bool = ..., job_parameters: _Optional[_Iterable[_Union[JobParameter, _Mapping]]] = ...) -> None: ...
+    runtime_context: UserDefinedDataStreamFunction.RuntimeContext
+    def __init__(self, udfs: _Optional[_Iterable[_Union[UserDefinedAggregateFunction, _Mapping]]] = ..., metric_enabled: bool = ..., grouping: _Optional[_Iterable[int]] = ..., generate_update_before: bool = ..., key_type: _Optional[_Union[Schema.FieldType, _Mapping]] = ..., index_of_count_star: _Optional[int] = ..., state_cleaning_enabled: bool = ..., state_cache_size: _Optional[int] = ..., map_state_read_cache_size: _Optional[int] = ..., map_state_write_cache_size: _Optional[int] = ..., count_star_inserted: bool = ..., group_window: _Optional[_Union[GroupWindow, _Mapping]] = ..., profile_enabled: bool = ..., job_parameters: _Optional[_Iterable[_Union[JobParameter, _Mapping]]] = ..., runtime_context: _Optional[_Union[UserDefinedDataStreamFunction.RuntimeContext, _Mapping]] = ...) -> None: ...
 
 class Schema(_message.Message):
     __slots__ = ("fields",)
@@ -636,10 +647,18 @@ class CoderInfoDescriptor(_message.Message):
         schema: Schema
         def __init__(self, schema: _Optional[_Union[Schema, _Mapping]] = ...) -> None: ...
     class ArrowType(_message.Message):
-        __slots__ = ("schema",)
+        __slots__ = ("schema", "batch_format")
+        class BatchFormat(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+            __slots__ = ()
+            PANDAS: _ClassVar[CoderInfoDescriptor.ArrowType.BatchFormat]
+            ARROW: _ClassVar[CoderInfoDescriptor.ArrowType.BatchFormat]
+        PANDAS: CoderInfoDescriptor.ArrowType.BatchFormat
+        ARROW: CoderInfoDescriptor.ArrowType.BatchFormat
         SCHEMA_FIELD_NUMBER: _ClassVar[int]
+        BATCH_FORMAT_FIELD_NUMBER: _ClassVar[int]
         schema: Schema
-        def __init__(self, schema: _Optional[_Union[Schema, _Mapping]] = ...) -> None: ...
+        batch_format: CoderInfoDescriptor.ArrowType.BatchFormat
+        def __init__(self, schema: _Optional[_Union[Schema, _Mapping]] = ..., batch_format: _Optional[_Union[CoderInfoDescriptor.ArrowType.BatchFormat, str]] = ...) -> None: ...
     class OverWindowArrowType(_message.Message):
         __slots__ = ("schema",)
         SCHEMA_FIELD_NUMBER: _ClassVar[int]

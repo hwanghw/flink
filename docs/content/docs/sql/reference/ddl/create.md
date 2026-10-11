@@ -33,6 +33,7 @@ Flink SQL supports the following CREATE statements for now:
 
 - CREATE TABLE
 - [CREATE OR] REPLACE TABLE
+- CREATE [OR ALTER ]MATERIALIZED TABLE
 - CREATE CATALOG
 - CREATE DATABASE
 - CREATE VIEW
@@ -149,7 +150,7 @@ Flink SQL> INSERT INTO RubberOrders SELECT product, amount FROM Orders WHERE pro
 The following grammar gives an overview about the available syntax:
 
 ```text
-CREATE TABLE [IF NOT EXISTS] [catalog_name.][db_name.]table_name
+CREATE [TEMPORARY] TABLE [IF NOT EXISTS] [catalog_name.][db_name.]table_name
   (
     { <physical_column_definition> | <metadata_column_definition> | <computed_column_definition> }[ , ...n]
     [ <watermark_definition> ]
@@ -199,6 +200,13 @@ CREATE TABLE [IF NOT EXISTS] [catalog_name.][db_name.]table_name
 The statement above creates a table with the given name. If a table with the same name already exists
 in the catalog, an exception is thrown.
 
+**TEMPORARY**
+
+Temporary tables are always stored in memory and only exist for the duration of
+the Flink session they are created within.
+
+Check out more details at [Temporary vs Permanent tables]({{< ref "docs/dev/table/common" >}}#temporary-vs-permanent-tables).
+
 ### Columns
 
 **Physical / Regular Columns**
@@ -224,7 +232,7 @@ CREATE TABLE MyTable (
 
 Metadata columns are an extension to the SQL standard and allow to access connector and/or format specific
 fields for every row of a table. A metadata column is indicated by the `METADATA` keyword. For example,
-a metadata column can be be used to read and write the timestamp from and to Kafka records for time-based
+a metadata column can be used to read and write the timestamp from and to Kafka records for time-based
 operations. The [connector and format documentation]({{< ref "docs/connectors/table/overview" >}}) lists the
 available metadata fields for every component. However, declaring a metadata column in a table's schema
 is optional.
@@ -289,7 +297,7 @@ CREATE TABLE MyTable (
   `timestamp` BIGINT METADATA,       -- part of the query-to-sink schema
   `offset` BIGINT METADATA VIRTUAL,  -- not part of the query-to-sink schema
   `user_id` BIGINT,
-  `name` STRING,
+  `name` STRING
 ) WITH (
   'connector' = 'kafka'
   ...
@@ -596,7 +604,7 @@ CREATE TABLE my_ctas_table (
     desc STRING,
     quantity DOUBLE,   
     cost AS price * quantity,
-    WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND,
+    WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND
 ) WITH (
     'connector' = 'kafka',
     ...
@@ -792,6 +800,9 @@ If you want to enable atomicity for RTAS, then you should make sure:
 
 {{< top >}}
 
+## CREATE [OR ALTER ]MATERIALIZED TABLE
+See a dedicated page for [Materialized tables]({{< ref "docs/sql/materialized-table/statements" >}}#create-materialized-table).
+
 ## CREATE CATALOG
 
 ```sql
@@ -857,10 +868,10 @@ If the view already exists, nothing happens.
 
 ## CREATE FUNCTION
 ```sql
-CREATE [TEMPORARY|TEMPORARY SYSTEM] FUNCTION 
-  [IF NOT EXISTS] [catalog_name.][db_name.]function_name 
-  AS identifier [LANGUAGE JAVA|SCALA|PYTHON] 
-  [USING JAR '<path_to_filename>.jar' [, JAR '<path_to_filename>.jar']* ]
+CREATE [TEMPORARY|TEMPORARY SYSTEM] FUNCTION
+  [IF NOT EXISTS] [catalog_name.][db_name.]function_name
+  AS identifier [LANGUAGE JAVA|SCALA|PYTHON]
+  [USING [JAR|ARTIFACT] '<path_to_filename>.jar' [, JAR '<path_to_filename>.jar']* ]
   [WITH (key1=val1, key2=val2, ...)]
 ```
 
@@ -949,6 +960,21 @@ WITH (
     'api-key' = '<YOUR KEY>',
     'model'='gpt-3.5-turbo',
     'system-prompt' = 'Classify the text below into one of the following labels: [positive, negative, neutral, mixed]. Output only the label.'
+);
+```
+
+```sql
+CREATE MODEL triton_text_classifier
+INPUT (input STRING COMMENT 'Input text for classification')
+OUTPUT (output STRING COMMENT 'Classification result')
+COMMENT 'A Triton-based text classification model'
+WITH (
+    'provider' = 'triton',
+    'endpoint' = 'http://localhost:8000/v2/models',
+    'model-name' = 'text-classification',
+    'model-version' = '1',
+    'timeout' = '10000',
+    'max-retries' = '3'
 );
 ```
 

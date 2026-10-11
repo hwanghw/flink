@@ -31,16 +31,20 @@ import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows;
+import org.apache.flink.test.junit5.MiniClusterExtension;
 import org.apache.flink.test.testdata.WordCountData;
-import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.test.util.TestBaseUtils;
 import org.apache.flink.util.CollectionUtil;
 import org.apache.flink.util.Collector;
-import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.TestLoggerExtension;
 
-import org.junit.AssumptionViolatedException;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIf;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.Inet6Address;
@@ -52,36 +56,45 @@ import java.util.Enumeration;
 import java.util.List;
 
 /** Test proper handling of IPv6 address literals in URLs. */
-@SuppressWarnings("serial")
-public class IPv6HostnamesITCase extends TestLogger {
+@ExtendWith(TestLoggerExtension.class)
+// The job uses a GlobalWindow with an end-of-stream trigger, which results in a blocking
+// (non-pipelined) data exchange. The AdaptiveScheduler only supports pipelined data exchanges.
+@Tag("org.apache.flink.testutils.junit.FailsWithAdaptiveScheduler")
+// Skip the whole class when the host has no usable IPv6 address for the cluster to bind to.
+// Evaluating this condition triggers class initialization (and thus the address probing), but the
+// MiniCluster is only started afterwards in beforeAll, so a disabled class never starts one.
+@EnabledIf("hasBindableIpv6Address")
+class IPv6HostnamesITCase {
+    private static final Logger LOG = LoggerFactory.getLogger(IPv6HostnamesITCase.class);
 
-    @Rule
-    public final MiniClusterWithClientResource miniClusterResource =
-            new MiniClusterWithClientResource(
+    @RegisterExtension
+    private static final MiniClusterExtension MINI_CLUSTER_RESOURCE =
+            new MiniClusterExtension(
                     new MiniClusterResourceConfiguration.Builder()
                             .setConfiguration(getConfiguration())
                             .setNumberTaskManagers(2)
                             .setNumberSlotsPerTaskManager(2)
                             .build());
 
-    private Configuration getConfiguration() {
-        final Inet6Address ipv6address = getLocalIPv6Address();
-        if (ipv6address == null) {
-            throw new AssumptionViolatedException(
-                    "--- Cannot find a non-loopback local IPv6 address that Pekko/Netty can bind to; skipping IPv6HostnamesITCase");
-        }
-        final String addressString = ipv6address.getHostAddress();
-        log.info("Test will use IPv6 address " + addressString + " for connection tests");
-
+    private static Configuration getConfiguration() {
+        final Inet6Address ipv6Address = Ipv6AddressHolder.ADDRESS;
         Configuration config = new Configuration();
-        config.set(JobManagerOptions.ADDRESS, addressString);
-        config.set(TaskManagerOptions.HOST, addressString);
+        if (ipv6Address != null) {
+            final String addressString = ipv6Address.getHostAddress();
+            LOG.info("Test will use IPv6 address {} for connection tests", addressString);
+            config.set(JobManagerOptions.ADDRESS, addressString);
+            config.set(TaskManagerOptions.HOST, addressString);
+        }
         config.set(TaskManagerOptions.MANAGED_MEMORY_SIZE, MemorySize.parse("16m"));
         return config;
     }
 
+    private static boolean hasBindableIpv6Address() {
+        return Ipv6AddressHolder.ADDRESS != null;
+    }
+
     @Test
-    public void testClusterWithIPv6host() throws Exception {
+    void testClusterWithIPv6host() throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(4);
 
@@ -121,7 +134,14 @@ public class IPv6HostnamesITCase extends TestLogger {
         TestBaseUtils.compareResultAsText(result, WordCountData.COUNTS_AS_TUPLES);
     }
 
-    private Inet6Address getLocalIPv6Address() {
+    // Resolves a bindable non-loopback IPv6 address lazily and once. Holding it in a nested class
+    // lets getConfiguration() and the @EnabledIf guard share a single result without depending on
+    // the declaration order of the extension/config fields above.
+    private static final class Ipv6AddressHolder {
+        static final Inet6Address ADDRESS = getLocalIPv6Address();
+    }
+
+    private static Inet6Address getLocalIPv6Address() {
         try {
             Enumeration<NetworkInterface> e = NetworkInterface.getNetworkInterfaces();
             while (e.hasMoreElements()) {
@@ -139,16 +159,16 @@ public class IPv6HostnamesITCase extends TestLogger {
                         InetSocketAddress socketAddress = new InetSocketAddress(addr, 0);
 
                         try {
-                            log.info("Considering address " + addr);
+                            LOG.info("Considering address {}", addr);
 
                             // test whether we can bind a socket to that address
-                            log.info("Testing whether sockets can bind to " + addr);
+                            LOG.info("Testing whether sockets can bind to {}", addr);
                             ServerSocket sock = new ServerSocket();
                             sock.bind(socketAddress);
                             sock.close();
 
                             // test whether Pekko's netty can bind to the address
-                            log.info("Testing whether Pekko can use " + addr);
+                            LOG.info("Testing whether Pekko can use {}", addr);
                             final RpcService rpcService =
                                     RpcSystem.load()
                                             // this port is only used for advertising (==no port
@@ -159,7 +179,7 @@ public class IPv6HostnamesITCase extends TestLogger {
                                             .createAndStart();
                             rpcService.closeAsync().get();
 
-                            log.info("Using address " + addr);
+                            LOG.info("Using address {}", addr);
                             return (Inet6Address) addr;
                         } catch (IOException ignored) {
                             // fall through the loop
@@ -170,6 +190,7 @@ public class IPv6HostnamesITCase extends TestLogger {
 
             return null;
         } catch (Exception e) {
+            LOG.debug("No bindable non-loopback IPv6 address available", e);
             return null;
         }
     }

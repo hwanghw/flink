@@ -51,6 +51,12 @@
             <td>This parameter defines whether the adaptive scheduler prioritizes using the minimum number of <code class="highlighter-rouge">TaskManagers</code> when scheduling tasks.<br />Note, this parameter is suitable if <code class="highlighter-rouge">execution.state-recovery.from-local</code> is not enabled. More details about this configuration are available at <a href="https://issues.apache.org/jira/browse/FLINK-33977">FLINK-33977</a>.</td>
         </tr>
         <tr>
+            <td><h5>jobmanager.adaptive-scheduler.rescale-trigger.active-checkpoint.enabled</h5></td>
+            <td style="word-wrap: break-word;">true</td>
+            <td>Boolean</td>
+            <td>When enabled, the Adaptive Scheduler actively triggers a checkpoint when resources change and rescaling is desired, rather than waiting for the next periodic checkpoint. This reduces rescaling latency, especially when checkpoint intervals are large. The active trigger respects the configured minimum pause between checkpoints and will not fire if a checkpoint is already in progress or being triggered.</td>
+        </tr>
+        <tr>
             <td><h5>jobmanager.adaptive-scheduler.rescale-trigger.max-checkpoint-failures</h5></td>
             <td style="word-wrap: break-word;">2</td>
             <td>Integer</td>
@@ -79,6 +85,12 @@
             <td style="word-wrap: break-word;">(none)</td>
             <td>String</td>
             <td>Directory for JobManager to store the archives of completed jobs.</td>
+        </tr>
+        <tr>
+            <td><h5>jobmanager.archive.only-failed-jobs</h5></td>
+            <td style="word-wrap: break-word;">false</td>
+            <td>Boolean</td>
+            <td>Whether to only archive jobs that reached the <code class="highlighter-rouge">FAILED</code> terminal state to <code class="highlighter-rouge">jobmanager.archive.fs.dir</code>. When enabled, jobs that finished or were canceled are not archived to the history server, reducing the number of files written for large clusters running many short-lived batch jobs. This option has no effect unless <code class="highlighter-rouge">jobmanager.archive.fs.dir</code> is configured.</td>
         </tr>
         <tr>
             <td><h5>jobmanager.bind-host</h5></td>
@@ -157,6 +169,12 @@
             <td style="word-wrap: break-word;">Default</td>
             <td><p>Enum</p></td>
             <td>Determines which scheduler implementation is used to schedule tasks. If this option is not explicitly set, batch jobs will use the 'AdaptiveBatch' scheduler as the default, while streaming jobs will default to the 'Default' scheduler. <br /><br />Possible values:<ul><li>"Default": Default scheduler</li><li>"Adaptive": Adaptive scheduler. More details can be found <a href="{{.Site.BaseURL}}{{.Site.LanguagePrefix}}/docs/deployment/elastic_scaling#adaptive-scheduler">here</a>.</li><li>"AdaptiveBatch": Adaptive batch scheduler. More details can be found <a href="{{.Site.BaseURL}}{{.Site.LanguagePrefix}}/docs/deployment/elastic_scaling#adaptive-batch-scheduler">here</a>.</li></ul></td>
+        </tr>
+        <tr>
+            <td><h5>web.adaptive-scheduler.rescale-history.size</h5></td>
+            <td style="word-wrap: break-word;">0</td>
+            <td>Integer</td>
+            <td>The maximum number of the rescale records per job whose scheduler is <code class="highlighter-rouge">Adaptive</code>. The feature will be disabled when the configuration value is smaller or equals to 0.<br />Note that high numbers may cause memory issues on the JobManager side.</td>
         </tr>
         <tr>
             <td><h5>web.exception-history-size</h5></td>

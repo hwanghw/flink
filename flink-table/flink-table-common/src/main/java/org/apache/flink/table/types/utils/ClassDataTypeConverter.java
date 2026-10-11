@@ -28,7 +28,7 @@ import org.apache.flink.table.types.extraction.DataTypeExtractor;
 import org.apache.flink.table.types.logical.SymbolType;
 import org.apache.flink.types.ColumnList;
 import org.apache.flink.types.Row;
-import org.apache.flink.types.variant.BinaryVariant;
+import org.apache.flink.types.bitmap.Bitmap;
 import org.apache.flink.types.variant.Variant;
 
 import java.math.BigDecimal;
@@ -78,8 +78,7 @@ public final class ClassDataTypeConverter {
         addDefaultDataType(
                 java.time.Period.class, DataTypes.INTERVAL(DataTypes.YEAR(4), DataTypes.MONTH()));
         addDefaultDataType(ColumnList.class, DataTypes.DESCRIPTOR());
-        addDefaultDataType(BinaryVariant.class, DataTypes.VARIANT());
-        addDefaultDataType(Variant.class, DataTypes.VARIANT());
+        addDefaultDataType(java.util.UUID.class, DataTypes.UUID());
     }
 
     private static void addDefaultDataType(Class<?> clazz, DataType rootType) {
@@ -110,6 +109,14 @@ public final class ClassDataTypeConverter {
 
         if (TableSymbol.class.isAssignableFrom(clazz)) {
             return Optional.of(new AtomicDataType(new SymbolType<>(), clazz));
+        }
+
+        if (Variant.class.isAssignableFrom(clazz)) {
+            return Optional.of(DataTypes.VARIANT());
+        }
+
+        if (Bitmap.class.isAssignableFrom(clazz)) {
+            return Optional.of(DataTypes.BITMAP());
         }
 
         return Optional.ofNullable(defaultDataTypes.get(clazz.getName()));

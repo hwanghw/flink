@@ -46,7 +46,7 @@ fi
 
 # setup materialized table data dir
 echo "[INFO] Start S3 env"
-source "$(dirname "$0")"/common_s3_minio.sh
+source "$(dirname "$0")"/common_s3_seaweedfs.sh
 s3_setup hadoop
 S3_TEST_DATA_WORDS_URI="s3://$IT_CASE_S3_BUCKET/"
 MATERIALIZED_TABLE_DATA_DIR="${S3_TEST_DATA_WORDS_URI}/test_materialized_table-$(uuidgen)"
@@ -192,8 +192,8 @@ session_options="{\"table.catalog-store.kind\": \"file\",
                  \"kubernetes.container.image.ref\": \"${FLINK_IMAGE_NAME}\",
                  \"jobmanager.memory.process.size\": \"1088m\",
                  \"taskmanager.memory.process.size\": \"1000m\",
-                 \"kubernetes.jobmanager.cpu\": \"0.5\",
-                 \"kubernetes.taskmanager.cpu\": \"0.5\",
+                 \"kubernetes.jobmanager.cpu.amount\": \"0.5\",
+                 \"kubernetes.taskmanager.cpu.amount\": \"0.5\",
                  \"kubernetes.rest-service.exposed.type\": \"NodePort\",
                  \"s3.endpoint\": \"$S3_ENDPOINT\",
                  \"workflow-scheduler.type\": \"embedded\"}"

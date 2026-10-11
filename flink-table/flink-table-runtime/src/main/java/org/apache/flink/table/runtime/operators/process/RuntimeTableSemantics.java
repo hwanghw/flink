@@ -21,9 +21,11 @@ package org.apache.flink.table.runtime.operators.process;
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.functions.ProcessTableFunction;
 import org.apache.flink.table.functions.TableSemantics;
+import org.apache.flink.table.runtime.util.RuntimeChangelogMode;
 import org.apache.flink.table.types.DataType;
 
 import java.io.Serializable;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -38,10 +40,14 @@ public class RuntimeTableSemantics implements TableSemantics, Serializable {
     private final int inputIndex;
     private final DataType dataType;
     private final int[] partitionByColumns;
+    private final int[] orderByColumns;
+    private final SortDirection[] orderByDirections;
     private final RuntimeChangelogMode consumedChangelogMode;
     private final boolean passColumnsThrough;
     private final boolean hasSetSemantics;
+    private final boolean hasBroadcastSemantics;
     private final int timeColumn;
+    private final List<int[]> upsertKeyColumns;
 
     private transient ChangelogMode changelogMode;
 
@@ -50,18 +56,26 @@ public class RuntimeTableSemantics implements TableSemantics, Serializable {
             int inputIndex,
             DataType dataType,
             int[] partitionByColumns,
+            int[] orderByColumns,
+            SortDirection[] orderByDirections,
             RuntimeChangelogMode consumedChangelogMode,
             boolean passColumnsThrough,
             boolean hasSetSemantics,
-            int timeColumn) {
+            boolean hasBroadcastSemantics,
+            int timeColumn,
+            List<int[]> upsertKeyColumns) {
         this.argName = argName;
         this.inputIndex = inputIndex;
         this.dataType = dataType;
         this.partitionByColumns = partitionByColumns;
+        this.orderByColumns = orderByColumns;
+        this.orderByDirections = orderByDirections;
         this.consumedChangelogMode = consumedChangelogMode;
         this.passColumnsThrough = passColumnsThrough;
         this.hasSetSemantics = hasSetSemantics;
+        this.hasBroadcastSemantics = hasBroadcastSemantics;
         this.timeColumn = timeColumn;
+        this.upsertKeyColumns = upsertKeyColumns;
     }
 
     public String getArgName() {
@@ -78,6 +92,10 @@ public class RuntimeTableSemantics implements TableSemantics, Serializable {
 
     public boolean hasSetSemantics() {
         return hasSetSemantics;
+    }
+
+    public boolean hasBroadcastSemantics() {
+        return hasBroadcastSemantics;
     }
 
     public ChangelogMode getChangelogMode() {
@@ -99,7 +117,12 @@ public class RuntimeTableSemantics implements TableSemantics, Serializable {
 
     @Override
     public int[] orderByColumns() {
-        return new int[0];
+        return orderByColumns;
+    }
+
+    @Override
+    public SortDirection[] orderByDirections() {
+        return orderByDirections;
     }
 
     @Override
@@ -110,5 +133,10 @@ public class RuntimeTableSemantics implements TableSemantics, Serializable {
     @Override
     public Optional<ChangelogMode> changelogMode() {
         return Optional.of(getChangelogMode());
+    }
+
+    @Override
+    public List<int[]> upsertKeyColumns() {
+        return upsertKeyColumns;
     }
 }

@@ -31,6 +31,7 @@ import { JobDetailCorrect } from '@flink-runtime-web/interfaces';
 import { JobLocalService } from '@flink-runtime-web/pages/job/job-local.service';
 import { JOB_MODULE_CONFIG, JOB_MODULE_DEFAULT_CONFIG, JobModuleConfig } from '@flink-runtime-web/pages/job/job.config';
 import { JobManagerService, JobService, StatusService } from '@flink-runtime-web/services';
+import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzDescriptionsModule } from 'ng-zorro-antd/descriptions';
 import { NzDividerModule } from 'ng-zorro-antd/divider';
 import { NzPopconfirmModule } from 'ng-zorro-antd/popconfirm';
@@ -43,6 +44,7 @@ import { NzSkeletonModule } from 'ng-zorro-antd/skeleton';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
     NgIf,
+    NzButtonModule,
     NzPopconfirmModule,
     NzDescriptionsModule,
     NzDividerModule,
@@ -78,7 +80,8 @@ export class JobStatusComponent implements OnInit, OnDestroy {
     private readonly router: Router,
     @Inject(JOB_MODULE_CONFIG) readonly moduleConfig: JobModuleConfig
   ) {
-    this.listOfNavigation = moduleConfig.routerTabs || JOB_MODULE_DEFAULT_CONFIG.routerTabs;
+    // Create a copy to avoid mutating the shared config
+    this.listOfNavigation = [...(moduleConfig.routerTabs || JOB_MODULE_DEFAULT_CONFIG.routerTabs)];
     this.checkpointIndexOfNavigation = this.checkpointIndexOfNav();
   }
 
@@ -126,16 +129,38 @@ export class JobStatusComponent implements OnInit, OnDestroy {
     return this.listOfNavigation.findIndex(item => item.path === 'checkpoints');
   }
 
+  rescalesIndexOfNav(): number {
+    return this.listOfNavigation.findIndex(item => item.path === 'rescales');
+  }
+
+  private getRescalesTabIndexAfter(path: string): number {
+    const index = this.listOfNavigation.findIndex(item => item.path === path);
+    return index >= 0 ? index + 1 : this.listOfNavigation.length;
+  }
+
   private handleJobDetailChanged(data: JobDetailCorrect): void {
     this.jobDetail = data;
-    const index = this.checkpointIndexOfNav();
-    if (data.plan.type == 'STREAMING' && index == -1) {
+    const checkpointNavIndex = this.checkpointIndexOfNav();
+    if (data.plan.type == 'STREAMING' && checkpointNavIndex == -1) {
       this.listOfNavigation.splice(this.checkpointIndexOfNavigation, 0, {
         path: 'checkpoints',
         title: 'Checkpoints'
       });
-    } else if (data.plan.type == 'BATCH' && index > -1) {
-      this.listOfNavigation.splice(index, 1);
+    } else if (data.plan.type == 'BATCH' && checkpointNavIndex > -1) {
+      this.listOfNavigation.splice(checkpointNavIndex, 1);
+    }
+
+    const rescalesNavIndex = this.rescalesIndexOfNav();
+    const shouldShowRescales = data.plan.type == 'STREAMING' && data.schedulerType == 'Adaptive';
+    if (!shouldShowRescales && rescalesNavIndex > -1) {
+      this.listOfNavigation.splice(rescalesNavIndex, 1);
+    } else if (shouldShowRescales && rescalesNavIndex == -1) {
+      // Insert deterministically after configuration to avoid stale index issues across job transitions.
+      const insertIndex = this.getRescalesTabIndexAfter('configuration');
+      this.listOfNavigation.splice(insertIndex, 0, {
+        path: 'rescales',
+        title: 'Rescales'
+      });
     }
     this.cdr.markForCheck();
   }

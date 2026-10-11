@@ -149,6 +149,8 @@ public class TestStreamEnvironment extends StreamExecutionEnvironment {
             randomize(
                     conf, CheckpointingOptions.UNALIGNED_RECOVER_OUTPUT_ON_DOWNSTREAM, true, false);
             randomize(
+                    conf, CheckpointingOptions.CHECKPOINTING_DURING_RECOVERY_ENABLED, true, false);
+            randomize(
                     conf,
                     CheckpointingOptions.ALIGNED_CHECKPOINT_TIMEOUT,
                     Duration.ofSeconds(0),
@@ -161,6 +163,11 @@ public class TestStreamEnvironment extends StreamExecutionEnvironment {
             if (!conf.contains(CheckpointingOptions.FILE_MERGING_ENABLED)) {
                 randomize(conf, CheckpointingOptions.FILE_MERGING_ENABLED, true);
             }
+            randomize(
+                    conf,
+                    CheckpointingOptions.CHECKPOINTING_SYNC_PHASE_TIMEOUT,
+                    CheckpointingOptions.CHECKPOINTING_TIMEOUT.defaultValue(),
+                    Duration.ofMillis(0));
         }
 
         randomize(

@@ -18,7 +18,9 @@
 
 package org.apache.flink.runtime.taskexecutor;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.configuration.ThreadDumpMode;
 import org.apache.flink.runtime.blob.TransientBlobKey;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
@@ -77,6 +79,7 @@ public class TaskExecutorGatewayDecoratorBase implements TaskExecutorGateway {
     public CompletableFuture<Acknowledge> requestSlot(
             SlotID slotId,
             JobID jobId,
+            ApplicationID applicationId,
             AllocationID allocationId,
             ResourceProfile resourceProfile,
             String targetAddress,
@@ -85,6 +88,7 @@ public class TaskExecutorGatewayDecoratorBase implements TaskExecutorGateway {
         return originalGateway.requestSlot(
                 slotId,
                 jobId,
+                applicationId,
                 allocationId,
                 resourceProfile,
                 targetAddress,
@@ -235,8 +239,9 @@ public class TaskExecutorGatewayDecoratorBase implements TaskExecutorGateway {
     }
 
     @Override
-    public CompletableFuture<ThreadDumpInfo> requestThreadDump(Duration timeout) {
-        return originalGateway.requestThreadDump(timeout);
+    public CompletableFuture<ThreadDumpInfo> requestThreadDump(
+            ThreadDumpMode mode, Duration timeout) {
+        return originalGateway.requestThreadDump(mode, timeout);
     }
 
     @Override

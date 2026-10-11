@@ -28,9 +28,11 @@ import org.apache.flink.table.functions.FunctionIdentifier;
 import org.apache.flink.table.functions.UserDefinedFunction;
 import org.apache.flink.table.functions.UserDefinedFunctionHelper;
 import org.apache.flink.table.planner.calcite.RexTableArgCall;
+import org.apache.flink.table.planner.calcite.RexTableArgCall.SortOrder;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlAggFunction;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.functions.sql.BuiltInSqlOperator;
+import org.apache.flink.table.planner.functions.sql.SqlDefaultArgOperator;
 import org.apache.flink.table.planner.typeutils.SymbolUtil.SerializableSymbol;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonParser;
@@ -67,6 +69,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Function;
 
 import static com.google.common.collect.ImmutableRangeSet.Builder;
 import static com.google.common.collect.ImmutableRangeSet.builder;
@@ -94,6 +97,7 @@ import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSe
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_NAME;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_NULL_AS;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_OPERANDS;
+import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_ORDER_DIRECTIONS;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_ORDER_KEYS;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_PARTITION_KEYS;
 import static org.apache.flink.table.planner.plan.nodes.exec.serde.RexNodeJsonSerializer.FIELD_NAME_RANGES;
@@ -249,12 +253,14 @@ final class RexNodeJsonDeserializer extends StdDeserializer<RexNode> {
         switch (sqlTypeName) {
             case BOOLEAN:
                 return valueNode.booleanValue();
+            case FLOAT:
+            case DOUBLE:
+            case REAL:
+                return Double.parseDouble(valueNode.asText());
             case TINYINT:
             case SMALLINT:
             case INTEGER:
             case BIGINT:
-            case FLOAT:
-            case DOUBLE:
             case DECIMAL:
             case INTERVAL_YEAR:
             case INTERVAL_YEAR_MONTH:
@@ -326,19 +332,43 @@ final class RexNodeJsonDeserializer extends StdDeserializer<RexNode> {
 
         final int inputIndex = jsonNode.required(FIELD_NAME_INPUT_INDEX).intValue();
 
-        final JsonNode partitionKeysNode = jsonNode.required(FIELD_NAME_PARTITION_KEYS);
-        final int[] partitionKeys = new int[partitionKeysNode.size()];
-        for (int i = 0; i < partitionKeysNode.size(); ++i) {
-            partitionKeys[i] = partitionKeysNode.get(i).asInt();
-        }
+        final int[] partitionKeys = deserializeIntArray(jsonNode, FIELD_NAME_PARTITION_KEYS);
+        final int[] orderKeys = deserializeIntArray(jsonNode, FIELD_NAME_ORDER_KEYS);
+        final SortOrder[] sortOrders =
+                deserializeArray(
+                        jsonNode,
+                        FIELD_NAME_ORDER_DIRECTIONS,
+                        node -> SortOrder.valueOf(node.asText()),
+                        new SortOrder[0]);
 
-        final JsonNode orderKeysNode = jsonNode.required(FIELD_NAME_ORDER_KEYS);
-        final int[] orderKeys = new int[orderKeysNode.size()];
-        for (int i = 0; i < orderKeysNode.size(); ++i) {
-            orderKeys[i] = orderKeysNode.get(i).asInt();
-        }
+        return new RexTableArgCall(callType, inputIndex, partitionKeys, orderKeys, sortOrders);
+    }
 
-        return new RexTableArgCall(callType, inputIndex, partitionKeys, orderKeys);
+    private static int[] deserializeIntArray(JsonNode jsonNode, String fieldName) {
+        return deserializeListOrEmpty(jsonNode, fieldName, JsonNode::asInt).stream()
+                .mapToInt(Integer::intValue)
+                .toArray();
+    }
+
+    private static <T> T[] deserializeArray(
+            JsonNode jsonNode,
+            String fieldName,
+            Function<JsonNode, T> elementDeserializer,
+            T[] emptyArray) {
+        return deserializeListOrEmpty(jsonNode, fieldName, elementDeserializer).toArray(emptyArray);
+    }
+
+    private static <T> List<T> deserializeListOrEmpty(
+            JsonNode jsonNode, String fieldName, Function<JsonNode, T> elementDeserializer) {
+        final JsonNode arrayNode = jsonNode.get(fieldName);
+        if (arrayNode == null || arrayNode.isEmpty()) {
+            return List.of();
+        }
+        final List<T> result = new ArrayList<>(arrayNode.size());
+        for (final JsonNode element : arrayNode) {
+            result.add(elementDeserializer.apply(element));
+        }
+        return result;
     }
 
     private static RexNode deserializeCall(JsonNode jsonNode, SerdeContext serdeContext)
@@ -361,7 +391,13 @@ final class RexNodeJsonDeserializer extends StdDeserializer<RexNode> {
         } else {
             callType = serdeContext.getRexBuilder().deriveReturnType(operator, rexOperands);
         }
-        return serdeContext.getRexBuilder().makeCall(callType, operator, rexOperands);
+        // SqlDefaultArgOperator is constructed per-call site by FlinkSqlCallBinding and not
+        // registered in any operator table. Rebuild the typed Flink instance here.
+        final SqlOperator effectiveOperator =
+                operator.getKind() == SqlKind.DEFAULT
+                        ? new SqlDefaultArgOperator(callType)
+                        : operator;
+        return serdeContext.getRexBuilder().makeCall(callType, effectiveOperator, rexOperands);
     }
 
     // --------------------------------------------------------------------------------------------

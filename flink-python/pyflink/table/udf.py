@@ -36,12 +36,21 @@ class FunctionContext(object):
     """
     Used to obtain global runtime information about the context in which the
     user-defined function is executed. The information includes the metric group,
-    and global job parameters, etc.
+    global job parameters, and runtime task information such as task name, parallelism, etc.
     """
 
-    def __init__(self, base_metric_group, job_parameters):
+    def __init__(self, base_metric_group, job_parameters,
+                 task_name=None, task_name_with_subtasks=None,
+                 number_of_parallel_subtasks=None, max_number_of_parallel_subtasks=None,
+                 index_of_this_subtask=None, attempt_number=None):
         self._base_metric_group = base_metric_group
         self._job_parameters = job_parameters
+        self._task_name = task_name
+        self._task_name_with_subtasks = task_name_with_subtasks
+        self._number_of_parallel_subtasks = number_of_parallel_subtasks
+        self._max_number_of_parallel_subtasks = max_number_of_parallel_subtasks
+        self._index_of_this_subtask = index_of_this_subtask
+        self._attempt_number = attempt_number
 
     def get_metric_group(self) -> MetricGroup:
         """
@@ -65,6 +74,57 @@ class FunctionContext(object):
         .. versionadded:: 1.17.0
         """
         return self._job_parameters[key] if key in self._job_parameters else default_value
+
+    def get_task_name(self) -> str:
+        """
+        Returns the name of the task in which the UDF runs, as assigned during plan construction.
+
+        .. versionadded:: 2.3.0
+        """
+        return self._task_name
+
+    def get_task_name_with_subtasks(self) -> str:
+        """
+        Returns the name of the task, appended with the subtask indicator, such as "MyTask (3/6)",
+        where 3 would be (:func:`get_index_of_this_subtask` + 1), and 6 would be
+        :func:`get_number_of_parallel_subtasks`.
+
+        .. versionadded:: 2.3.0
+        """
+        return self._task_name_with_subtasks
+
+    def get_number_of_parallel_subtasks(self) -> int:
+        """
+        Gets the parallelism with which the parallel task runs.
+
+        .. versionadded:: 2.3.0
+        """
+        return self._number_of_parallel_subtasks
+
+    def get_max_number_of_parallel_subtasks(self) -> int:
+        """
+        Gets the number of max-parallelism with which the parallel task runs.
+
+        .. versionadded:: 2.3.0
+        """
+        return self._max_number_of_parallel_subtasks
+
+    def get_index_of_this_subtask(self) -> int:
+        """
+        Gets the number of this parallel subtask. The numbering starts from 0 and goes up to
+        parallelism-1 (parallelism as returned by :func:`get_number_of_parallel_subtasks`).
+
+        .. versionadded:: 2.3.0
+        """
+        return self._index_of_this_subtask
+
+    def get_attempt_number(self) -> int:
+        """
+        Gets the attempt number of this parallel subtask. First attempt is numbered 0.
+
+        .. versionadded:: 2.3.0
+        """
+        return self._attempt_number
 
 
 @PublicEvolving()
@@ -447,6 +507,8 @@ class UserDefinedFunctionWrapper(object):
                     return JPythonFunctionKind.GENERAL
                 elif self._func_type == "pandas":
                     return JPythonFunctionKind.PANDAS
+                elif self._func_type == "arrow":
+                    return JPythonFunctionKind.ARROW
                 else:
                     raise TypeError("Unsupported func_type: %s." % self._func_type)
 
@@ -700,10 +762,19 @@ def _get_python_env():
 
 
 def _create_udf(f, input_types, result_type, func_type, deterministic, name):
+    if func_type in ('pandas', 'arrow'):
+        target = f
+        while isinstance(target, functools.partial):
+            target = target.func
+        if isinstance(target, ScalarFunction):
+            target = target.eval
+        if inspect.iscoroutinefunction(target) or inspect.iscoroutinefunction(
+                getattr(target, '__call__', None)):
+            raise ValueError(f"Async scalar functions do not support {func_type} func_type.")
     if isinstance(f, AsyncScalarFunction) or inspect.iscoroutinefunction(f):
-        if func_type == 'pandas':
+        if func_type in ('pandas', 'arrow'):
             raise ValueError(
-                "Async scalar functions do not support pandas func_type. "
+                f"Async scalar functions do not support {func_type} func_type. "
                 "Please use func_type='general' (default) for async functions.")
         return UserDefinedAsyncScalarFunctionWrapper(
             f, input_types, result_type, func_type, deterministic, name)
@@ -778,16 +849,15 @@ def udf(f: Union[Callable, ScalarFunction, AsyncScalarFunction, Type] = None,
                           this function is guaranteed to always return the same result given the
                           same parameters. (default True)
     :param name: the function name.
-    :param func_type: the type of the python function, available value: general, pandas,
+    :param func_type: the type of the python function, available value: general, pandas, arrow,
                      (default: general)
     :return: UserDefinedScalarFunctionWrapper, UserDefinedAsyncScalarFunctionWrapper, or function.
 
     .. versionadded:: 1.10.0
     """
 
-    if func_type not in ('general', 'pandas'):
-        raise ValueError("The func_type must be one of 'general, pandas', got %s."
-                         % func_type)
+    if func_type not in ('general', 'pandas', 'arrow'):
+        raise ValueError(f"The func_type must be one of 'general, pandas, arrow', got {func_type}.")
 
     # decorator
     if f is None:

@@ -66,7 +66,7 @@ public class RemoteRecoveredInputChannel extends RecoveredInputChannel {
     }
 
     @Override
-    protected InputChannel toInputChannelInternal() throws IOException {
+    protected InputChannel toInputChannelInternal(boolean needsRecovery) throws IOException {
         RemoteInputChannel remoteInputChannel =
                 new RemoteInputChannel(
                         inputGate,
@@ -81,8 +81,8 @@ public class RemoteRecoveredInputChannel extends RecoveredInputChannel {
                         networkBuffersPerChannel,
                         numBytesIn,
                         numBuffersIn,
-                        channelStateWriter);
-        remoteInputChannel.setup();
+                        channelStateWriter,
+                        needsRecovery);
         return remoteInputChannel;
     }
 }

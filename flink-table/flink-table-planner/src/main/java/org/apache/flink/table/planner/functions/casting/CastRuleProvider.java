@@ -87,6 +87,7 @@ public class CastRuleProvider {
                 .addRule(TimeToTimestampCastRule.INSTANCE)
                 .addRule(NumericToTimestampCastRule.INSTANCE)
                 .addRule(TimestampToNumericCastRule.INSTANCE)
+                .addRule(TimeToTimeCastRule.INSTANCE)
                 // To binary rules
                 .addRule(BinaryToBinaryCastRule.INSTANCE)
                 .addRule(RawToBinaryCastRule.INSTANCE)
@@ -96,6 +97,19 @@ public class CastRuleProvider {
                 .addRule(RowToRowCastRule.INSTANCE)
                 // Variant rules
                 .addRule(VariantToStringCastRule.INSTANCE)
+                .addRule(VariantToPrimitiveCastRule.INSTANCE)
+                .addRule(VariantToArrayCastRule.INSTANCE)
+                .addRule(VariantToRowCastRule.INSTANCE)
+                .addRule(VariantToMapCastRule.INSTANCE)
+                .addRule(ToVariantCastRule.INSTANCE)
+                // Bitmap rules
+                .addRule(BitmapToStringCastRule.INSTANCE)
+                .addRule(BitmapToBinaryCastRule.INSTANCE)
+                // UUID rules
+                .addRule(UuidToStringCastRule.INSTANCE)
+                .addRule(UuidToBinaryCastRule.INSTANCE)
+                .addRule(StringToUuidCastRule.INSTANCE)
+                .addRule(BinaryToUuidCastRule.INSTANCE)
                 // Special rules
                 .addRule(CharVarCharTrimPadCastRule.INSTANCE)
                 .addRule(NullToStringCastRule.INSTANCE);

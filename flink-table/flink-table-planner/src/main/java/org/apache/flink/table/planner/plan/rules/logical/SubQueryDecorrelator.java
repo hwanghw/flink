@@ -485,7 +485,10 @@ public class SubQueryDecorrelator extends RelShuttleImpl {
                 }
             }
             RelNode newProject = RelOptUtil.createProject(newInput, projects, false);
-            newProject = ((LogicalProject) newProject).withHints(rel.getHints());
+            // The projection may be simplified to a Values node.
+            if (newProject instanceof Hintable) {
+                newProject = ((Hintable) newProject).withHints(rel.getHints());
+            }
 
             final RexNode newCorCondition;
             if (frame.c != null) {
@@ -532,8 +535,19 @@ public class SubQueryDecorrelator extends RelShuttleImpl {
                     unsupportedCorConditions);
             assert unsupportedCorConditions.isEmpty();
 
-            final RexNode remainingCondition =
+            RexNode remainingCondition =
                     RexUtil.composeConjunction(rexBuilder, nonCorConditions, false);
+
+            // Re-index the remaining (non-correlated) condition against the rewritten input.
+            // The child may have shifted its row type during decorrelation (e.g. an Aggregate
+            // injects correlated columns into its group key), so RexInputRefs in HAVING /
+            // Filter predicates that survive in nonCorConditions must be remapped through
+            // frame.oldToNewOutputs. Otherwise they silently point at the wrong column.
+            if (remainingCondition != null) {
+                remainingCondition =
+                        adjustInputRefs(
+                                remainingCondition, frame.oldToNewOutputs, frame.r.getRowType());
+            }
 
             // Using LogicalFilter.create instead of RelBuilder.filter to create Filter
             // because RelBuilder.filter method does not have VariablesSet arg.
@@ -886,8 +900,8 @@ public class SubQueryDecorrelator extends RelShuttleImpl {
          * @param rel Values to be rewritten
          */
         public Frame decorrelateRel(Values rel) {
-            // There are no inputs, so rel does not need to be changed.
-            return null;
+            // Preserve the Values node while allowing its parents to be decorrelated.
+            return new Frame(rel, rel, null, identityMap(rel.getRowType().getFieldCount()));
         }
 
         public Frame decorrelateRel(LogicalCorrelate rel) {

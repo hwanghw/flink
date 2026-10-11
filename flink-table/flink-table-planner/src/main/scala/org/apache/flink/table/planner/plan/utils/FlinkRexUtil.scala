@@ -348,7 +348,7 @@ object FlinkRexUtil {
               "null:" + l.getType
             } else {
               l.getTypeName match {
-                case SqlTypeName.DOUBLE => Util.toScientificNotation(value.asInstanceOf[BigDecimal])
+                case SqlTypeName.DOUBLE => Util.toScientificNotation(value.asInstanceOf[Double])
                 case SqlTypeName.BIGINT => s"${value.asInstanceOf[BigDecimal].longValue()}L"
                 case SqlTypeName.BINARY => s"X'${value.asInstanceOf[ByteString].toString(16)}'"
                 case SqlTypeName.VARCHAR | SqlTypeName.CHAR =>
@@ -524,6 +524,14 @@ object FlinkRexUtil {
       rexBuilder,
       RexUtil.expandSearch(rexBuilder, program, program.expandLocalRef(program.getCondition)))
     RelOptUtil.conjunctions(condition)
+  }
+
+  def expandLocalRef(operand: RexNode, localRefs: util.List[RexNode]): RexNode = {
+    var expanded = operand
+    while (expanded.isInstanceOf[RexLocalRef] && localRefs != null) {
+      expanded = localRefs.get(expanded.asInstanceOf[RexLocalRef].getIndex)
+    }
+    expanded
   }
 }
 

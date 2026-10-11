@@ -700,6 +700,29 @@ public class ExecutionConfigOptions {
                                     + " is set true, its value must be positive.");
 
     // ------------------------------------------------------------------------
+    //  UDF Options
+    // ------------------------------------------------------------------------
+    @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
+    public static final ConfigOption<Boolean> TABLE_EXEC_UDF_METRIC_ENABLED =
+            key("table.exec.udf-metric-enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "When enabled, per-operator UDF metrics (udfProcessingTime, "
+                                    + "udfExceptionCount) are registered for SQL/Table user-defined functions. "
+                                    + "Disabled by default; nothing is registered and there is zero overhead when off.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
+    public static final ConfigOption<Integer> TABLE_EXEC_UDF_METRIC_SAMPLE_INTERVAL =
+            key("table.exec.udf-metric.sample-interval")
+                    .intType()
+                    .defaultValue(100)
+                    .withDescription(
+                            "When UDF metrics are enabled, udfProcessingTime is measured once every N "
+                                    + "invocations (default 100). Must be at least 1; a value of 1 measures every "
+                                    + "invocation. The non-sampled fast path is a single integer increment.");
+
+    // ------------------------------------------------------------------------
     //  Other Exec Options
     // ------------------------------------------------------------------------
     @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH)
@@ -730,6 +753,18 @@ public class ExecutionConfigOptions {
                     .withDescription(
                             "Determines whether CAST will operate following the legacy behaviour "
                                     + "or the new one that introduces various fixes and improvements.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
+    public static final ConfigOption<Boolean> TABLE_EXEC_LEGACY_BYTES_TO_STRING_CAST =
+            key("table.exec.legacy-bytes-to-string-cast")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "When true, CAST(bytes AS STRING) for BINARY/VARBINARY/BYTES inputs "
+                                    + "silently substitutes the Unicode replacement character "
+                                    + "U+FFFD for invalid UTF-8 sequences. When false (the default), "
+                                    + "invalid input fails the job; use MAKE_VALID_UTF8 or TRY_CAST to handle "
+                                    + "malformed bytes.");
 
     @Documentation.TableOption(execMode = Documentation.ExecMode.STREAMING)
     public static final ConfigOption<Long> TABLE_EXEC_RANK_TOPN_CACHE_SIZE =

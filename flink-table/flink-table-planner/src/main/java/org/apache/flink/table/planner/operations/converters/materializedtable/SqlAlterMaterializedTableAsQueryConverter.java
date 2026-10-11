@@ -19,18 +19,25 @@
 package org.apache.flink.table.planner.operations.converters.materializedtable;
 
 import org.apache.flink.sql.parser.ddl.materializedtable.SqlAlterMaterializedTableAsQuery;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.ResolvedCatalogMaterializedTable;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.TableChange;
 import org.apache.flink.table.operations.Operation;
 import org.apache.flink.table.operations.materializedtable.AlterMaterializedTableAsQueryOperation;
+import org.apache.flink.table.planner.calcite.FlinkPlannerImpl;
 import org.apache.flink.table.planner.operations.PlannerQueryOperation;
+import org.apache.flink.table.planner.operations.converters.SqlNodeConvertUtils;
 import org.apache.flink.table.planner.utils.MaterializedTableUtils;
 
 import org.apache.calcite.sql.SqlNode;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
+
+import static org.apache.flink.table.planner.operations.converters.SqlNodeConvertUtils.toQueryOperation;
 
 /** A converter for {@link SqlAlterMaterializedTableAsQuery}. */
 public class SqlAlterMaterializedTableAsQueryConverter
@@ -41,23 +48,51 @@ public class SqlAlterMaterializedTableAsQueryConverter
             SqlAlterMaterializedTableAsQuery sqlAlterTableAsQuery,
             ResolvedCatalogMaterializedTable oldTable,
             ConvertContext context) {
-        ObjectIdentifier identifier = resolveIdentifier(sqlAlterTableAsQuery, context);
+        final ObjectIdentifier identifier = resolveIdentifier(sqlAlterTableAsQuery, context);
+        final FlinkPlannerImpl flinkPlanner = context.getFlinkPlanner();
+        final SqlNode asQuerySqlNode = sqlAlterTableAsQuery.getAsQuery();
+        final SqlNode validatedAsQuery = flinkPlanner.validate(asQuerySqlNode);
+        final PlannerQueryOperation asQuery = toQueryOperation(validatedAsQuery, context);
 
-        // Validate and extract schema from query
-        String originalQuery = context.toQuotedSqlString(sqlAlterTableAsQuery.getAsQuery());
-        SqlNode validatedQuery =
-                context.getSqlValidator().validate(sqlAlterTableAsQuery.getAsQuery());
-        String definitionQuery = context.toQuotedSqlString(validatedQuery);
-        PlannerQueryOperation queryOperation =
-                new PlannerQueryOperation(
-                        context.toRelRoot(validatedQuery).project(), () -> definitionQuery);
-        ResolvedSchema oldSchema = oldTable.getResolvedSchema();
-        ResolvedSchema newSchema = queryOperation.getResolvedSchema();
+        return new AlterMaterializedTableAsQueryOperation(
+                identifier, gatherTableChanges(sqlAlterTableAsQuery, context), oldTable, asQuery);
+    }
 
-        List<TableChange> tableChanges =
-                MaterializedTableUtils.buildSchemaTableChanges(oldSchema, newSchema);
-        tableChanges.add(TableChange.modifyDefinitionQuery(originalQuery, definitionQuery));
+    @Override
+    protected Function<ResolvedCatalogMaterializedTable, List<TableChange>> gatherTableChanges(
+            SqlAlterMaterializedTableAsQuery sqlAlterTableAsQuery, ConvertContext context) {
+        return oldTable -> {
+            // Validate and extract schema from query
+            SqlNode asQuery = sqlAlterTableAsQuery.getAsQuery();
+            SqlNode validatedQuery = context.getSqlValidator().validate(asQuery);
+            String expandedQuery = context.toQuotedSqlString(validatedQuery);
+            PlannerQueryOperation queryOperation =
+                    new PlannerQueryOperation(
+                            context.toRelRoot(validatedQuery).project(), () -> expandedQuery);
 
-        return new AlterMaterializedTableAsQueryOperation(identifier, tableChanges, oldTable);
+            ResolvedSchema oldSchema = oldTable.getResolvedSchema();
+            ResolvedSchema newSchema = queryOperation.getResolvedSchema();
+            List<TableChange> tableChanges =
+                    new ArrayList<>(
+                            MaterializedTableUtils.validateAndExtractColumnChanges(
+                                    oldSchema, newSchema, false));
+
+            if (!tableChanges.isEmpty()) {
+                final boolean hasNonPersistedColumn =
+                        oldSchema.getColumns().stream().anyMatch(c -> !c.isPersisted());
+                if (hasNonPersistedColumn) {
+                    throw new ValidationException(
+                            "ALTER query for MATERIALIZED TABLE "
+                                    + "with schema containing non persisted columns is not supported, "
+                                    + "consider using CREATE OR ALTER MATERIALIZED TABLE instead");
+                }
+            }
+            String originalQuery =
+                    SqlNodeConvertUtils.extractOriginalAsQueryText(
+                                    context, sqlAlterTableAsQuery.getAsQueryKeywordPos())
+                            .orElse(context.toQuotedSqlString(asQuery));
+            tableChanges.add(TableChange.modifyDefinitionQuery(originalQuery, expandedQuery));
+            return tableChanges;
+        };
     }
 }

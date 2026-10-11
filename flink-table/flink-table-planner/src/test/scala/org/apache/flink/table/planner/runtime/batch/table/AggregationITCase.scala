@@ -243,14 +243,14 @@ class AggregationITCase extends BatchTestBase {
     val myAgg = new NonMergableCount
 
     val t1 = BatchTableEnvUtil
-      .fromCollection(tEnv, new mutable.MutableList[(Int, String)], "a, b")
+      .fromCollection(tEnv, new mutable.ListBuffer[(Int, String)], "a, b")
       .select('a.sum, 'a.count)
     val t2 = BatchTableEnvUtil
-      .fromCollection(tEnv, new mutable.MutableList[(Int, String)], "a, b")
+      .fromCollection(tEnv, new mutable.ListBuffer[(Int, String)], "a, b")
       .select('a.sum, myAgg('b), 'a.count)
     // test agg with empty parameter
     val t3 = BatchTableEnvUtil
-      .fromCollection(tEnv, new mutable.MutableList[(Int, String)], "a, b")
+      .fromCollection(tEnv, new mutable.ListBuffer[(Int, String)], "a, b")
       .select('a.sum, myAgg(), 'a.count)
 
     val expected1 = "null,0"
@@ -468,7 +468,7 @@ class Top10 extends AggregateFunction[Array[JTuple2[JInt, JFloat]], Array[JTuple
    * @param revenue
    *   The revenue for the ad
    */
-  def accumulate(acc: Array[JTuple2[JInt, JFloat]], adId: Int, revenue: Float) {
+  def accumulate(acc: Array[JTuple2[JInt, JFloat]], adId: Int, revenue: Float): Unit = {
 
     var i = 9
     var skipped = 0

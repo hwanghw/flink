@@ -31,7 +31,18 @@
   }
 
   .operate-action {
-    font-size: 24px;
+    font-size: @font-size-base;
+
+    button {
+      transition: all 0.3s ease;
+
+      &:hover {
+        border-color: @error-color;
+        background-color: @error-color;
+        box-shadow: 0 2px 6px fade(@error-color, 30%);
+        color: #fff;
+      }
+    }
   }
 
   .status-wrapper {
@@ -42,10 +53,10 @@
   .back-link {
     display: inline-flex;
     align-items: center;
-    color: @link-color;
-    text-decoration: none;
     margin-right: @margin-xs;
+    color: @link-color;
     font-size: @font-size-base;
+    text-decoration: none;
     cursor: pointer;
 
     &:hover {

@@ -100,7 +100,7 @@ object LookupJoinCodeGenerator {
       lookupKeys: util.List[FunctionParam],
       asyncLookupFunction: AsyncTableFunction[_],
       functionName: String): GeneratedTableFunctionWithDataType[AsyncFunction[RowData, AnyRef]] = {
-    FunctionCallCodeGenerator.generateAsyncFunctionCall(
+    FunctionCallCodeGenerator.generateAsyncFunctionTimeoutCall(
       tableConfig,
       classLoader,
       dataTypeFactory,
@@ -109,7 +109,7 @@ object LookupJoinCodeGenerator {
       returnType,
       lookupKeys,
       asyncLookupFunction,
-      generateCallWithDataType(
+      generateCallWithTimeoutAndDataType(
         dataTypeFactory,
         functionName,
         tableSourceType,
@@ -129,13 +129,31 @@ object LookupJoinCodeGenerator {
       callContext: FunctionCallContext,
       udf: UserDefinedFunction,
       operands: Seq[GeneratedExpression]) => {
-    def inferCallWithDataType(
+    val (call, _, dataType) = generateCallWithTimeoutAndDataType(
+      dataTypeFactory,
+      functionName,
+      tableSourceType,
+      baseClass)(ctx, callContext, udf, operands)
+    (call, dataType)
+  }
+
+  private def generateCallWithTimeoutAndDataType(
+      dataTypeFactory: DataTypeFactory,
+      functionName: String,
+      tableSourceType: LogicalType,
+      baseClass: Class[_]
+  ) = (
+      ctx: CodeGeneratorContext,
+      callContext: FunctionCallContext,
+      udf: UserDefinedFunction,
+      operands: Seq[GeneratedExpression]) => {
+    def inferCallWithTimeoutAndDataType(
         ctx: CodeGeneratorContext,
         callContext: FunctionCallContext,
         udf: UserDefinedFunction,
         operands: Seq[GeneratedExpression],
         legacy: Boolean,
-        e: Exception = null): (GeneratedExpression, DataType) = {
+        e: Exception = null): (GeneratedExpression, Option[GeneratedExpression], DataType) = {
       val inference = createLookupTypeInference(
         dataTypeFactory,
         callContext,
@@ -144,10 +162,9 @@ object LookupJoinCodeGenerator {
         functionName,
         legacy,
         e)
-
       // TODO: filter all records when there is any nulls on the join key, because
       //  "IS NOT DISTINCT FROM" is not supported yet.
-      val callWithDataType = BridgingFunctionGenUtil.generateFunctionAwareCallWithDataType(
+      BridgingFunctionGenUtil.generateFunctionAwareCallWithDataTypeAndTimeout(
         ctx,
         operands,
         tableSourceType,
@@ -155,18 +172,14 @@ object LookupJoinCodeGenerator {
         callContext,
         udf,
         functionName,
-        skipIfArgsNull = true
-      )
-      callWithDataType
+        skipIfArgsNull = true)
     }
 
     try {
-      // user provided type inference has precedence
-      // this ensures that all functions work in the same way
-      inferCallWithDataType(ctx, callContext, udf, operands, legacy = false)
+      inferCallWithTimeoutAndDataType(ctx, callContext, udf, operands, legacy = false)
     } catch {
       case e: Exception =>
-        inferCallWithDataType(ctx, callContext, udf, operands, legacy = true, e)
+        inferCallWithTimeoutAndDataType(ctx, callContext, udf, operands, legacy = true, e)
     }
   }
 
@@ -354,14 +367,16 @@ object LookupJoinCodeGenerator {
       projection: Seq[RexNode],
       condition: RexNode,
       outputType: RelDataType,
-      tableSourceRowType: RowType): GeneratedFunction[FlatMapFunction[RowData, RowData]] = {
+      tableSourceRowType: RowType,
+      typeFactory: FlinkTypeFactory): GeneratedFunction[FlatMapFunction[RowData, RowData]] = {
     generateCalcMapFunction(
       tableConfig,
       classLoader,
       projection,
       condition,
       FlinkTypeFactory.toLogicalRowType(outputType),
-      tableSourceRowType
+      tableSourceRowType,
+      typeFactory
     )
   }
 
@@ -375,16 +390,42 @@ object LookupJoinCodeGenerator {
       projection: Seq[RexNode],
       condition: RexNode,
       outputType: RowType,
-      tableSourceRowType: RowType): GeneratedFunction[FlatMapFunction[RowData, RowData]] = {
-    CalcCodeGenerator.generateFunction(
+      tableSourceRowType: RowType,
+      typeFactory: FlinkTypeFactory): GeneratedFunction[FlatMapFunction[RowData, RowData]] = {
+    generateCalcMapFunction(
+      tableConfig,
+      classLoader,
+      projection,
+      condition,
+      outputType,
       tableSourceRowType,
       "TableCalcMapFunction",
+      typeFactory)
+  }
+
+  /**
+   * Generates calculate flatmap function for temporal join which is used to projection/filter the
+   * dimension table results
+   */
+  def generateCalcMapFunction(
+      tableConfig: ReadableConfig,
+      classLoader: ClassLoader,
+      projection: Seq[RexNode],
+      condition: RexNode,
+      outputType: RowType,
+      tableSourceRowType: RowType,
+      name: String,
+      typeFactory: FlinkTypeFactory): GeneratedFunction[FlatMapFunction[RowData, RowData]] = {
+    CalcCodeGenerator.generateFunction(
+      tableSourceRowType,
+      name,
       outputType,
       classOf[GenericRowData],
       projection,
       Option(condition),
       tableConfig,
-      classLoader
+      classLoader,
+      typeFactory
     )
   }
 }

@@ -60,6 +60,7 @@ import org.apache.flink.table.operations.materializedtable.AlterMaterializedTabl
 import org.apache.flink.table.operations.materializedtable.AlterMaterializedTableRefreshOperation;
 import org.apache.flink.table.operations.materializedtable.AlterMaterializedTableResumeOperation;
 import org.apache.flink.table.operations.materializedtable.AlterMaterializedTableSuspendOperation;
+import org.apache.flink.table.operations.materializedtable.ConvertTableToMaterializedTableOperation;
 import org.apache.flink.table.operations.materializedtable.CreateMaterializedTableOperation;
 import org.apache.flink.table.operations.materializedtable.DropMaterializedTableOperation;
 import org.apache.flink.table.operations.materializedtable.MaterializedTableOperation;
@@ -186,6 +187,9 @@ public class MaterializedTableManager {
         } else if (op instanceof AlterMaterializedTableChangeOperation) {
             return callAlterMaterializedTableChangeOperation(
                     operationExecutor, handle, (AlterMaterializedTableChangeOperation) op);
+        } else if (op instanceof ConvertTableToMaterializedTableOperation) {
+            return callConvertTableToMaterializedTableOperation(
+                    operationExecutor, handle, (ConvertTableToMaterializedTableOperation) op);
         }
 
         throw new SqlExecutionException(
@@ -206,7 +210,7 @@ public class MaterializedTableManager {
             createMaterializedTableInFullMode(
                     operationExecutor, handle, createMaterializedTableOperation);
         }
-        // Just return ok for unify different refresh job info of continuous and full mode, user
+        // Just return ok to unify different refresh job info of continuous and full mode, user
         // should get the refresh job info via desc table.
         return ResultFetcher.fromTableResult(handle, TABLE_RESULT_OK, false);
     }
@@ -229,16 +233,17 @@ public class MaterializedTableManager {
                     handle,
                     catalogMaterializedTable,
                     materializedTableIdentifier,
-                    Collections.emptyMap(),
+                    Map.of(),
                     Optional.empty());
         } catch (Exception e) {
-            // drop materialized table while submit flink streaming job occur exception. Thus, weak
+            // drop materialized table if submitting the Flink streaming job encounters an
+            // exception. Thus, weak
             // atomicity is guaranteed
             operationExecutor.callExecutableOperation(
                     handle, new DropMaterializedTableOperation(materializedTableIdentifier, true));
             throw new SqlExecutionException(
                     String.format(
-                            "Submit continuous refresh job for materialized table %s occur exception.",
+                            "Failed to submit continuous refresh job for materialized table %s.",
                             materializedTableIdentifier),
                     e);
         }
@@ -260,36 +265,15 @@ public class MaterializedTableManager {
         ResolvedCatalogMaterializedTable catalogMaterializedTable =
                 createMaterializedTableOperation.getCatalogMaterializedTable();
 
-        final IntervalFreshness freshness = catalogMaterializedTable.getDefinitionFreshness();
-        String cronExpression = convertFreshnessToCron(freshness);
-        // create full refresh job
-        CreateRefreshWorkflow createRefreshWorkflow =
-                new CreatePeriodicRefreshWorkflow(
-                        materializedTableIdentifier,
-                        catalogMaterializedTable.getExpandedQuery(),
-                        cronExpression,
-                        getSessionInitializationConf(operationExecutor),
-                        Collections.emptyMap(),
-                        restEndpointUrl);
-
         try {
-            RefreshHandler refreshHandler =
-                    workflowScheduler.createRefreshWorkflow(createRefreshWorkflow);
-            RefreshHandlerSerializer refreshHandlerSerializer =
-                    workflowScheduler.getRefreshHandlerSerializer();
-            byte[] serializedRefreshHandler = refreshHandlerSerializer.serialize(refreshHandler);
-
-            updateRefreshHandler(
+            createPeriodicRefreshWorkflow(
                     operationExecutor,
                     handle,
                     materializedTableIdentifier,
-                    catalogMaterializedTable,
-                    RefreshStatus.ACTIVATED,
-                    refreshHandler.asSummaryString(),
-                    serializedRefreshHandler);
+                    catalogMaterializedTable);
         } catch (Exception e) {
-            // drop materialized table while create refresh workflow occur exception. Thus, weak
-            // atomicity is guaranteed
+            // drop materialized table if creating the refresh workflow encounters an exception, so
+            // weak atomicity is guaranteed
             operationExecutor.callExecutableOperation(
                     handle, new DropMaterializedTableOperation(materializedTableIdentifier, true));
             throw new SqlExecutionException(
@@ -298,6 +282,145 @@ public class MaterializedTableManager {
                             materializedTableIdentifier),
                     e);
         }
+    }
+
+    private ResultFetcher callConvertTableToMaterializedTableOperation(
+            OperationExecutor operationExecutor,
+            OperationHandle handle,
+            ConvertTableToMaterializedTableOperation convertOperation) {
+        ResolvedCatalogMaterializedTable materializedTable =
+                convertOperation.getMaterializedTable();
+        if (RefreshMode.CONTINUOUS == materializedTable.getRefreshMode()) {
+            convertTableToMaterializedTableInContinuousMode(
+                    operationExecutor, handle, convertOperation);
+        } else {
+            convertTableToMaterializedTableInFullMode(operationExecutor, handle, convertOperation);
+        }
+        // Just return ok for unify different refresh job info of continuous and full mode, user
+        // should get the refresh job info via desc table.
+        return ResultFetcher.fromTableResult(handle, TABLE_RESULT_OK, false);
+    }
+
+    private void convertTableToMaterializedTableInContinuousMode(
+            OperationExecutor operationExecutor,
+            OperationHandle handle,
+            ConvertTableToMaterializedTableOperation convertOperation) {
+        // swap the catalog entry from a regular table to a materialized table first
+        operationExecutor.callExecutableOperation(handle, convertOperation);
+
+        ObjectIdentifier materializedTableIdentifier = convertOperation.getTableIdentifier();
+        ResolvedCatalogMaterializedTable catalogMaterializedTable =
+                convertOperation.getMaterializedTable();
+
+        try {
+            executeContinuousRefreshJob(
+                    operationExecutor,
+                    handle,
+                    catalogMaterializedTable,
+                    materializedTableIdentifier,
+                    Map.of(),
+                    Optional.empty());
+        } catch (Exception e) {
+            suspendMaterializedTable(
+                    operationExecutor,
+                    handle,
+                    materializedTableIdentifier,
+                    catalogMaterializedTable);
+            throw new SqlExecutionException(
+                    String.format(
+                            "Failed to start the continuous refresh job when converting table %s to a materialized table. "
+                                    + "The table was converted and left in SUSPENDED status; resume it once the issue is resolved.",
+                            materializedTableIdentifier),
+                    e);
+        }
+    }
+
+    private void convertTableToMaterializedTableInFullMode(
+            OperationExecutor operationExecutor,
+            OperationHandle handle,
+            ConvertTableToMaterializedTableOperation convertOperation) {
+        if (workflowScheduler == null) {
+            throw new SqlExecutionException(
+                    "The workflow scheduler must be configured when converting a table to a materialized table in full refresh mode.");
+        }
+        // swap the catalog entry from a regular table to a materialized table first
+        operationExecutor.callExecutableOperation(handle, convertOperation);
+
+        ObjectIdentifier materializedTableIdentifier = convertOperation.getTableIdentifier();
+        ResolvedCatalogMaterializedTable catalogMaterializedTable =
+                convertOperation.getMaterializedTable();
+
+        try {
+            createPeriodicRefreshWorkflow(
+                    operationExecutor,
+                    handle,
+                    materializedTableIdentifier,
+                    catalogMaterializedTable);
+        } catch (Exception e) {
+            suspendMaterializedTable(
+                    operationExecutor,
+                    handle,
+                    materializedTableIdentifier,
+                    catalogMaterializedTable);
+            throw new SqlExecutionException(
+                    String.format(
+                            "Failed to create the refresh workflow when converting table %s to a materialized table. "
+                                    + "The table was converted and left in SUSPENDED status; resume it once the issue is resolved.",
+                            materializedTableIdentifier),
+                    e);
+        }
+    }
+
+    /**
+     * Creates the periodic refresh workflow for a full-mode materialized table and records the
+     * resulting handler with {@code ACTIVATED} status.
+     */
+    private void createPeriodicRefreshWorkflow(
+            OperationExecutor operationExecutor,
+            OperationHandle handle,
+            ObjectIdentifier materializedTableIdentifier,
+            ResolvedCatalogMaterializedTable catalogMaterializedTable)
+            throws Exception {
+        final IntervalFreshness freshness = catalogMaterializedTable.getDefinitionFreshness();
+        final String cronExpression = convertFreshnessToCron(freshness);
+        final CreateRefreshWorkflow createRefreshWorkflow =
+                new CreatePeriodicRefreshWorkflow(
+                        materializedTableIdentifier,
+                        catalogMaterializedTable.getExpandedQuery(),
+                        cronExpression,
+                        getSessionInitializationConf(operationExecutor),
+                        Map.of(),
+                        restEndpointUrl);
+
+        final RefreshHandler refreshHandler =
+                workflowScheduler.createRefreshWorkflow(createRefreshWorkflow);
+        final RefreshHandlerSerializer refreshHandlerSerializer =
+                workflowScheduler.getRefreshHandlerSerializer();
+        final byte[] serializedRefreshHandler = refreshHandlerSerializer.serialize(refreshHandler);
+
+        updateRefreshHandler(
+                operationExecutor,
+                handle,
+                materializedTableIdentifier,
+                catalogMaterializedTable,
+                RefreshStatus.ACTIVATED,
+                refreshHandler.asSummaryString(),
+                serializedRefreshHandler);
+    }
+
+    /** Sets a materialized table refresh status to {@code SUSPENDED}. */
+    private void suspendMaterializedTable(
+            OperationExecutor operationExecutor,
+            OperationHandle handle,
+            ObjectIdentifier materializedTableIdentifier,
+            ResolvedCatalogMaterializedTable catalogMaterializedTable) {
+        AlterMaterializedTableChangeOperation alterOperation =
+                new AlterMaterializedTableChangeOperation(
+                        materializedTableIdentifier,
+                        oldTable ->
+                                List.of(TableChange.modifyRefreshStatus(RefreshStatus.SUSPENDED)),
+                        catalogMaterializedTable);
+        operationExecutor.callExecutableOperation(handle, alterOperation);
     }
 
     private ResultFetcher callAlterMaterializedTableSuspend(
@@ -325,11 +448,11 @@ public class MaterializedTableManager {
         return ResultFetcher.fromTableResult(handle, TABLE_RESULT_OK, false);
     }
 
-    private CatalogMaterializedTable suspendContinuousRefreshJob(
+    private ResolvedCatalogMaterializedTable suspendContinuousRefreshJob(
             OperationExecutor operationExecutor,
             OperationHandle handle,
             ObjectIdentifier tableIdentifier,
-            CatalogMaterializedTable materializedTable) {
+            ResolvedCatalogMaterializedTable materializedTable) {
         try {
             ContinuousRefreshHandler refreshHandler =
                     deserializeContinuousHandler(materializedTable.getSerializedRefreshHandler());
@@ -371,7 +494,7 @@ public class MaterializedTableManager {
             OperationExecutor operationExecutor,
             OperationHandle handle,
             ObjectIdentifier tableIdentifier,
-            CatalogMaterializedTable materializedTable) {
+            ResolvedCatalogMaterializedTable materializedTable) {
         if (RefreshStatus.SUSPENDED == materializedTable.getRefreshStatus()) {
             throw new SqlExecutionException(
                     String.format(
@@ -489,7 +612,7 @@ public class MaterializedTableManager {
             OperationExecutor operationExecutor,
             OperationHandle handle,
             ObjectIdentifier tableIdentifier,
-            CatalogMaterializedTable catalogMaterializedTable,
+            ResolvedCatalogMaterializedTable catalogMaterializedTable,
             Map<String, String> dynamicOptions) {
         // Repeated resume refresh workflow is not supported
         if (RefreshStatus.ACTIVATED == catalogMaterializedTable.getRefreshStatus()) {
@@ -577,7 +700,7 @@ public class MaterializedTableManager {
                 operationExecutor,
                 handle,
                 materializedTableIdentifier,
-                catalogMaterializedTable,
+                resolveCatalogMaterializedTable(operationExecutor, catalogMaterializedTable),
                 RefreshStatus.ACTIVATED,
                 continuousRefreshHandler.asSummaryString(),
                 serializedBytes);
@@ -598,7 +721,7 @@ public class MaterializedTableManager {
                 handle,
                 materializedTableIdentifier,
                 partitionSpec,
-                Collections.emptyMap(),
+                Map.of(),
                 false,
                 null);
     }
@@ -651,7 +774,7 @@ public class MaterializedTableManager {
 
         try {
             LOG.info(
-                    "Begin to refreshing the materialized table {}, statement: {}",
+                    "Starting refresh of the materialized table {}, statement: {}",
                     materializedTableIdentifier,
                     insertStatement);
             JobExecutionResult result =
@@ -682,7 +805,7 @@ public class MaterializedTableManager {
         } catch (Exception e) {
             throw new SqlExecutionException(
                     String.format(
-                            "Refreshing the materialized table %s occur exception.",
+                            "Failed to refresh the materialized table %s.",
                             materializedTableIdentifier),
                     e);
         }
@@ -822,7 +945,7 @@ public class MaterializedTableManager {
 
         if (RefreshStatus.ACTIVATED == oldMaterializedTable.getRefreshStatus()) {
             // 1. suspend the materialized table
-            CatalogMaterializedTable suspendMaterializedTable =
+            ResolvedCatalogMaterializedTable suspendMaterializedTable =
                     suspendContinuousRefreshJob(
                             operationExecutor, handle, tableIdentifier, oldMaterializedTable);
 
@@ -830,8 +953,9 @@ public class MaterializedTableManager {
             AlterMaterializedTableChangeOperation alterMaterializedTableChangeOperation =
                     new AlterMaterializedTableChangeOperation(
                             op.getTableIdentifier(),
-                            op.getTableChanges(),
-                            suspendMaterializedTable);
+                            oldTable -> op.getTableChanges(),
+                            suspendMaterializedTable,
+                            op.getAsQueryOperation());
             operationExecutor.callExecutableOperation(
                     handle, alterMaterializedTableChangeOperation);
 
@@ -840,10 +964,9 @@ public class MaterializedTableManager {
                 executeContinuousRefreshJob(
                         operationExecutor,
                         handle,
-                        alterMaterializedTableChangeOperation
-                                .getMaterializedTableWithAppliedChanges(),
+                        alterMaterializedTableChangeOperation.getNewTable(),
                         tableIdentifier,
-                        Collections.emptyMap(),
+                        Map.of(),
                         Optional.empty());
             } catch (Exception e) {
                 // Roll back the changes to the materialized table and restore the continuous
@@ -851,7 +974,7 @@ public class MaterializedTableManager {
                 LOG.warn(
                         "Failed to start the continuous refresh job for materialized table {} using new query {}, rollback to origin query {}.",
                         tableIdentifier,
-                        op.getMaterializedTableWithAppliedChanges().getExpandedQuery(),
+                        op.getNewTable().getExpandedQuery(),
                         suspendMaterializedTable.getExpandedQuery(),
                         e);
 
@@ -868,14 +991,13 @@ public class MaterializedTableManager {
                         handle,
                         suspendMaterializedTable,
                         tableIdentifier,
-                        Collections.emptyMap(),
+                        Map.of(),
                         continuousRefreshHandler.getRestorePath());
 
                 throw new SqlExecutionException(
                         String.format(
                                 "Failed to start the continuous refresh job using new query %s when altering materialized table %s select query.",
-                                op.getMaterializedTableWithAppliedChanges().getExpandedQuery(),
-                                tableIdentifier),
+                                op.getNewTable().getExpandedQuery(), tableIdentifier),
                         e);
             }
         } else if (RefreshStatus.SUSPENDED == oldMaterializedTable.getRefreshStatus()) {
@@ -889,7 +1011,10 @@ public class MaterializedTableManager {
 
             AlterMaterializedTableChangeOperation alterMaterializedTableChangeOperation =
                     new AlterMaterializedTableChangeOperation(
-                            tableIdentifier, tableChanges, oldMaterializedTable);
+                            tableIdentifier,
+                            oldTable -> tableChanges,
+                            oldMaterializedTable,
+                            op.getAsQueryOperation());
 
             operationExecutor.callExecutableOperation(
                     handle, alterMaterializedTableChangeOperation);
@@ -904,11 +1029,14 @@ public class MaterializedTableManager {
     }
 
     private AlterMaterializedTableChangeOperation generateRollbackAlterMaterializedTableOperation(
-            CatalogMaterializedTable oldMaterializedTable,
+            ResolvedCatalogMaterializedTable oldMaterializedTable,
             AlterMaterializedTableChangeOperation op) {
 
         return new AlterMaterializedTableChangeOperation(
-                op.getTableIdentifier(), List.of(), oldMaterializedTable);
+                op.getTableIdentifier(),
+                oldTable -> List.of(),
+                oldMaterializedTable,
+                op.getAsQueryOperation());
     }
 
     private TableChange.ModifyRefreshHandler generateResetSavepointTableChange(
@@ -1130,8 +1258,7 @@ public class MaterializedTableManager {
             return ContinuousRefreshHandlerSerializer.INSTANCE.deserialize(
                     serializedRefreshHandler, userCodeClassLoader);
         } catch (IOException | ClassNotFoundException e) {
-            throw new SqlExecutionException(
-                    "Deserialize ContinuousRefreshHandler occur exception.", e);
+            throw new SqlExecutionException("Failed to deserialize ContinuousRefreshHandler.", e);
         }
     }
 
@@ -1139,8 +1266,7 @@ public class MaterializedTableManager {
         try {
             return ContinuousRefreshHandlerSerializer.INSTANCE.serialize(refreshHandler);
         } catch (IOException e) {
-            throw new SqlExecutionException(
-                    "Serialize ContinuousRefreshHandler occur exception.", e);
+            throw new SqlExecutionException("Failed to serialize ContinuousRefreshHandler.", e);
         }
     }
 
@@ -1158,11 +1284,20 @@ public class MaterializedTableManager {
         return (ResolvedCatalogMaterializedTable) resolvedCatalogBaseTable;
     }
 
-    private CatalogMaterializedTable updateRefreshHandler(
+    private ResolvedCatalogMaterializedTable resolveCatalogMaterializedTable(
+            OperationExecutor operationExecutor, CatalogMaterializedTable materializedTable) {
+        return operationExecutor
+                .getSessionContext()
+                .getSessionState()
+                .catalogManager
+                .resolveCatalogMaterializedTable(materializedTable);
+    }
+
+    private ResolvedCatalogMaterializedTable updateRefreshHandler(
             OperationExecutor operationExecutor,
             OperationHandle operationHandle,
             ObjectIdentifier materializedTableIdentifier,
-            CatalogMaterializedTable catalogMaterializedTable,
+            ResolvedCatalogMaterializedTable catalogMaterializedTable,
             RefreshStatus refreshStatus,
             String refreshHandlerSummary,
             byte[] serializedRefreshHandler) {
@@ -1172,12 +1307,15 @@ public class MaterializedTableManager {
                 TableChange.modifyRefreshHandler(refreshHandlerSummary, serializedRefreshHandler));
         AlterMaterializedTableChangeOperation alterMaterializedTableChangeOperation =
                 new AlterMaterializedTableChangeOperation(
-                        materializedTableIdentifier, tableChanges, catalogMaterializedTable);
+                        materializedTableIdentifier,
+                        oldTable -> tableChanges,
+                        catalogMaterializedTable);
         // update RefreshHandler to Catalog
         operationExecutor.callExecutableOperation(
                 operationHandle, alterMaterializedTableChangeOperation);
 
-        return alterMaterializedTableChangeOperation.getMaterializedTableWithAppliedChanges();
+        return resolveCatalogMaterializedTable(
+                operationExecutor, alterMaterializedTableChangeOperation.getNewTable());
     }
 
     /** Generate insert statement for materialized table. */

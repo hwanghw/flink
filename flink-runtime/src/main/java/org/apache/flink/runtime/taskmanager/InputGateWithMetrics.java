@@ -81,6 +81,11 @@ public class InputGateWithMetrics extends IndexedInputGate {
     }
 
     @Override
+    public InputChannel getChannel(InputChannelInfo channelInfo) {
+        return inputGate.getChannel(channelInfo);
+    }
+
+    @Override
     public int getGateIndex() {
         return inputGate.getGateIndex();
     }
@@ -123,6 +128,11 @@ public class InputGateWithMetrics extends IndexedInputGate {
     @Override
     public void requestPartitions() throws IOException {
         inputGate.requestPartitions();
+    }
+
+    @Override
+    public void requestPartitions(boolean needsRecovery) throws IOException {
+        inputGate.requestPartitions(needsRecovery);
     }
 
     @Override

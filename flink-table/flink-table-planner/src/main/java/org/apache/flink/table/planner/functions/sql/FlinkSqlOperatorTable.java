@@ -19,7 +19,6 @@
 package org.apache.flink.table.planner.functions.sql;
 
 import org.apache.flink.table.api.TableException;
-import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.functions.sql.internal.SqlAuxiliaryGroupAggFunction;
 import org.apache.flink.table.planner.functions.sql.ml.SqlMLEvaluateTableFunction;
@@ -494,34 +493,6 @@ public class FlinkSqlOperatorTable extends ReflectiveSqlOperatorTable {
                                     SqlTypeFamily.INTEGER)),
                     SqlFunctionCategory.STRING);
 
-    public static final SqlFunction REGEXP_REPLACE =
-            new SqlFunction(
-                    "REGEXP_REPLACE",
-                    SqlKind.OTHER_FUNCTION,
-                    ReturnTypes.cascade(
-                            ReturnTypes.explicit(SqlTypeName.VARCHAR),
-                            SqlTypeTransforms.TO_NULLABLE),
-                    null,
-                    OperandTypes.family(
-                            SqlTypeFamily.CHARACTER,
-                            SqlTypeFamily.CHARACTER,
-                            SqlTypeFamily.CHARACTER),
-                    SqlFunctionCategory.STRING);
-
-    public static final SqlFunction REGEXP_EXTRACT =
-            new SqlFunction(
-                    "REGEXP_EXTRACT",
-                    SqlKind.OTHER_FUNCTION,
-                    VARCHAR_FORCE_NULLABLE,
-                    null,
-                    OperandTypes.or(
-                            OperandTypes.family(
-                                    SqlTypeFamily.CHARACTER,
-                                    SqlTypeFamily.CHARACTER,
-                                    SqlTypeFamily.INTEGER),
-                            OperandTypes.family(SqlTypeFamily.CHARACTER, SqlTypeFamily.CHARACTER)),
-                    SqlFunctionCategory.STRING);
-
     public static final SqlFunction HASH_CODE =
             new SqlFunction(
                     "HASH_CODE",
@@ -624,15 +595,6 @@ public class FlinkSqlOperatorTable extends ReflectiveSqlOperatorTable {
                             OperandTypes.family(SqlTypeFamily.TIMESTAMP, SqlTypeFamily.CHARACTER),
                             OperandTypes.family(SqlTypeFamily.CHARACTER, SqlTypeFamily.CHARACTER)),
                     SqlFunctionCategory.TIMEDATE);
-
-    public static final SqlFunction REGEXP =
-            new SqlFunction(
-                    "REGEXP",
-                    SqlKind.OTHER_FUNCTION,
-                    ReturnTypes.BOOLEAN_NULLABLE,
-                    null,
-                    OperandTypes.family(SqlTypeFamily.CHARACTER, SqlTypeFamily.CHARACTER),
-                    SqlFunctionCategory.STRING);
 
     public static final SqlFunction PARSE_URL =
             new SqlFunction(
@@ -1153,13 +1115,6 @@ public class FlinkSqlOperatorTable extends ReflectiveSqlOperatorTable {
     public static final SqlAggFunction VARIANCE = SqlStdOperatorTable.VARIANCE;
     public static final SqlAggFunction VAR_POP = SqlStdOperatorTable.VAR_POP;
     public static final SqlAggFunction VAR_SAMP = SqlStdOperatorTable.VAR_SAMP;
-    public static final SqlAggFunction INTERNAL_WELFORD_M2 =
-            SqlBasicAggFunction.create(
-                            BuiltInFunctionDefinitions.INTERNAL_WELFORD_M2.getName(),
-                            SqlKind.OTHER_FUNCTION,
-                            ReturnTypes.DOUBLE.andThen(SqlTypeTransforms.FORCE_NULLABLE),
-                            OperandTypes.NUMERIC)
-                    .withFunctionType(SqlFunctionCategory.SYSTEM);
     public static final SqlAggFunction SINGLE_VALUE = SqlStdOperatorTable.SINGLE_VALUE;
     public static final SqlAggFunction APPROX_COUNT_DISTINCT =
             SqlStdOperatorTable.APPROX_COUNT_DISTINCT;
@@ -1231,6 +1186,7 @@ public class FlinkSqlOperatorTable extends ReflectiveSqlOperatorTable {
     public static final SqlFunction ABS = SqlStdOperatorTable.ABS;
     public static final SqlFunction EXP = SqlStdOperatorTable.EXP;
     public static final SqlFunction NULLIF = SqlStdOperatorTable.NULLIF;
+    public static final SqlFunction COALESCE = SqlStdOperatorTable.COALESCE;
     public static final SqlFunction FLOOR = SqlStdOperatorTable.FLOOR;
     public static final SqlFunction CEIL = SqlStdOperatorTable.CEIL;
     public static final SqlFunction CAST = SqlStdOperatorTable.CAST;
@@ -1310,20 +1266,6 @@ public class FlinkSqlOperatorTable extends ReflectiveSqlOperatorTable {
             SqlStdOperatorTable.IS_NOT_JSON_ARRAY;
     public static final SqlPostfixOperator IS_NOT_JSON_SCALAR =
             SqlStdOperatorTable.IS_NOT_JSON_SCALAR;
-
-    // VARIANT FUNCTIONS
-    public static final SqlFunction TRY_PARSE_JSON =
-            new SqlFunction(
-                    "TRY_PARSE_JSON",
-                    SqlKind.OTHER_FUNCTION,
-                    ReturnTypes.cascade(
-                            ReturnTypes.explicit(SqlTypeName.VARIANT),
-                            SqlTypeTransforms.FORCE_NULLABLE),
-                    null,
-                    OperandTypes.or(
-                            OperandTypes.family(SqlTypeFamily.STRING),
-                            OperandTypes.family(SqlTypeFamily.STRING, SqlTypeFamily.BOOLEAN)),
-                    SqlFunctionCategory.SYSTEM);
 
     // WINDOW TABLE FUNCTIONS
     // use the definitions in Flink, because we have different return types

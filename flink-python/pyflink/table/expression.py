@@ -20,7 +20,12 @@ from typing import Union, TypeVar, Generic, Any
 
 from pyflink import add_version_doc
 from pyflink.java_gateway import get_gateway
-from pyflink.table.types import DataType, DataTypes, _to_java_data_type
+from pyflink.table.types import (
+    DataType,
+    DataTypes,
+    _TableDataTypeLike,
+    _to_java_data_type,
+)
 from pyflink.util.api_stability_decorators import PublicEvolving
 from pyflink.util.java_utils import to_jarray
 
@@ -90,7 +95,8 @@ _string_doc_seealso = """
              :func:`~Expression.regexp_extract`, :func:`~Expression.substring`,
              :py:attr:`~Expression.from_base64`, :py:attr:`~Expression.to_base64`,
              :func:`~Expression.ltrim`, :func:`~Expression.rtrim`, :func:`~Expression.repeat`,
-             :func:`~Expression.json_quote`, :func:`~Expression.json_unquote`
+             :func:`~Expression.json_quote`, :func:`~Expression.json_unquote`,
+             :func:`~Expression.parse_json`, :func:`~Expression.try_parse_json`
 """
 
 _temporal_doc_seealso = """
@@ -189,7 +195,8 @@ def _make_string_doc():
         Expression.lpad, Expression.rpad, Expression.overlay, Expression.regexp_replace,
         Expression.regexp_extract, Expression.from_base64, Expression.to_base64,
         Expression.ltrim, Expression.rtrim, Expression.repeat,
-        Expression.json_quote, Expression.json_unquote
+        Expression.json_quote, Expression.json_unquote,
+        Expression.parse_json, Expression.try_parse_json
     ]
 
     for func in string_funcs:
@@ -480,7 +487,7 @@ class Expression(Generic[T]):
     # logic functions
     __and__ = _binary_op("and")
     __or__ = _binary_op("or")
-    __invert__ = _unary_op('isNotTrue')
+    __invert__ = _unary_op("not")
 
     __rand__ = _binary_op("and")
     __ror__ = _binary_op("or")
@@ -760,6 +767,24 @@ class Expression(Generic[T]):
         return _unary_op("isNotFalse")(self)
 
     @property
+    def is_nan(self) -> 'Expression[bool]':
+        """
+        Returns true if the given numeric expression is NaN (Not-a-Number).
+
+        .. seealso:: :py:attr:`~Expression.is_not_nan`
+        """
+        return _unary_op("isNan")(self)
+
+    @property
+    def is_not_nan(self) -> 'Expression[bool]':
+        """
+        Returns true if the given numeric expression is not NaN (Not-a-Number).
+
+        .. seealso:: :py:attr:`~Expression.is_nan`
+        """
+        return _unary_op("isNotNan")(self)
+
+    @property
     def distinct(self) -> 'Expression':
         """
         Similar to a SQL distinct aggregation clause such as COUNT(DISTINCT a), declares that an
@@ -886,7 +911,7 @@ class Expression(Generic[T]):
         """
         return _binary_op("asArgument")(self, name)
 
-    def cast(self, data_type: DataType) -> 'Expression':
+    def cast(self, data_type: _TableDataTypeLike) -> 'Expression':
         """
         Returns a new value being cast to type type.
         A cast error throws an exception and fails the job.
@@ -900,7 +925,7 @@ class Expression(Generic[T]):
         """
         return _binary_op("cast")(self, _to_java_data_type(data_type))
 
-    def try_cast(self, data_type: DataType) -> 'Expression':
+    def try_cast(self, data_type: _TableDataTypeLike) -> 'Expression':
         """
         Like cast, but in case of error, returns NULL rather than failing the job.
 
@@ -1219,10 +1244,10 @@ class Expression(Generic[T]):
              pattern: Union[str, 'Expression[str]'] = None,
              escape=None) -> 'Expression[bool]':
         """
-        Returns true, if a string matches the specified LIKE pattern
+        Returns true, if a string matches the specified LIKE pattern.
         e.g. 'Jo_n%' matches all strings that start with 'Jo(arbitrary letter)n'.
-        An escape character consisting of a single char can be defined if necessary,
-        '\\' by default.
+        An escape character consisting of a single char can be defined if necessary.
+        There is no default escape character.
         """
         if escape is None:
             return _binary_op("like")(self, pattern)
@@ -1446,6 +1471,70 @@ class Expression(Generic[T]):
         the encoding scheme is not supported, will return null.
         """
         return _unary_op("urlEncode")(self)
+
+    def inet_aton(self) -> 'Expression':
+        """
+        Converts an IPv4 address string to its numeric representation (BIGINT).
+        This function follows MySQL INET_ATON behavior.
+
+        The conversion formula is: A * 256^3 + B * 256^2 + C * 256 + D for an IP address A.B.C.D
+
+        Supports MySQL-compatible short-form IPv4 addresses:
+          - a — the value is stored directly as an address (value must be in [0, 255])
+          - a.b — interpreted as a.0.0.b
+          - a.b.c — interpreted as a.b.0.c
+          - a.b.c.d — standard dotted-decimal format
+
+        Examples:
+          - lit('1').inet_aton() returns 1 (single number)
+          - lit('127.0.0.1').inet_aton() returns 2130706433
+          - lit('127.1').inet_aton() returns 2130706433 (short-form: 127.0.0.1)
+          - lit('0.0.0.0').inet_aton() returns 0
+
+        :return: the numeric representation of the IP address, or null if the input is
+                 null or invalid
+        """
+        return _unary_op("inetAton")(self)
+
+    def inet_ntoa(self) -> 'Expression[str]':
+        """
+        Converts a numeric IPv4 address representation back to its string format.
+
+        Accepts any integer numeric type (TINYINT, SMALLINT, INT, BIGINT). The input must be
+        in the valid IPv4 range [0, 4294967295]. Negative values return null, consistent with
+        MySQL's INET_NTOA(-1) = NULL behavior.
+
+        Examples:
+          - lit(2130706433).inet_ntoa() returns '127.0.0.1'
+          - lit(0).inet_ntoa() returns '0.0.0.0'
+          - lit(-1).inet_ntoa() returns null
+
+        :return: the IPv4 address string in dotted-decimal notation, or null if the input is
+                 null, negative, or out of valid range
+        """
+        return _unary_op("inetNtoa")(self)
+
+    @property
+    def is_valid_utf8(self) -> 'Expression[bool]':
+        """
+        Returns true if the input bytes are a well-formed UTF-8 sequence, false otherwise.
+        Returns null if the input is null.
+
+        Specifically rejects: truncated multi-byte sequences (missing continuation bytes),
+        "overlong" encodings (using more bytes than necessary for the code point), code points
+        above the Unicode maximum U+10FFFF, and UTF-16 surrogate values U+D800-U+DFFF (which
+        have no UTF-8 representation).
+        """
+        return _unary_op("isValidUtf8")(self)
+
+    @property
+    def make_valid_utf8(self) -> 'Expression[str]':
+        """
+        Decodes the input bytes as UTF-8, replacing each invalid sequence with the Unicode
+        replacement character U+FFFD. The substitution is lossy and irreversible. Returns null
+        if the input is null.
+        """
+        return _unary_op("makeValidUtf8")(self)
 
     def parse_url(self, part_to_extract: Union[str, 'Expression[str]'],
                   key: Union[str, 'Expression[str]'] = None) -> 'Expression[str]':
@@ -1897,6 +1986,42 @@ class Expression(Generic[T]):
         """
         return _unary_op("mapEntries")(self)
 
+    @property
+    def map_from_entries(self) -> 'Expression':
+        """
+        Returns a map created from the given array of entries. Each entry must be a row with
+        exactly two fields, where the first field becomes the key and the second one the value.
+
+        If there are duplicate keys, the value of the last entry with that key wins; None keys are
+        treated as equal and collapse into a single entry. If the array itself or any of its
+        entries is None, None is returned.
+
+        Examples:
+        ::
+
+            >>> array(row(1, "one"), row(2, "two")).map_from_entries # {1=one, 2=two}
+            >>> array(row(1, "one"), row(2, "two"), row(1, "uno")).map_from_entries # {1=uno, 2=two}
+        """
+        return _unary_op("mapFromEntries")(self)
+
+    def map_contains_key(self, key) -> 'Expression':
+        """
+        Returns True if the given key exists in the map, False otherwise. Returns None if the map
+        is None.
+
+        If the search key is None, the function returns True when the map contains a None key.
+        The given key is cast implicitly to the map's key type where Flink's implicit casting
+        rules allow it; otherwise the call fails validation.
+
+        Examples:
+        ::
+
+            >>> map_("a", 1, "b", 2).map_contains_key("a") # True
+            >>> map_("a", 1, "b", 2).map_contains_key("z") # False
+            >>> map_(1, "a").map_contains_key(lit(1, DataTypes.TINYINT())) # True
+        """
+        return _binary_op("mapContainsKey")(self, key)
+
     # ---------------------------- time definition functions -----------------------------
 
     @property
@@ -2193,6 +2318,134 @@ class Expression(Generic[T]):
         """
         return _unary_op("jsonUnquote")(self)
 
+    def parse_json(self, allow_duplicate_keys=None) -> 'Expression':
+        """
+        Parses a JSON string into a value of VARIANT type. If the JSON string is invalid,
+        an error is thrown. To return None instead of an error, use
+        :func:`~Expression.try_parse_json`.
+
+        If there are duplicate keys in the input, allow_duplicate_keys controls whether the
+        parser keeps the last occurrence of each duplicated key (True) or throws an error
+        (False). The default value of allow_duplicate_keys is False.
+        """
+        if allow_duplicate_keys is None:
+            return _unary_op("parseJson")(self)
+        else:
+            return _binary_op("parseJson")(self, allow_duplicate_keys)
+
+    def try_parse_json(self, allow_duplicate_keys=None) -> 'Expression':
+        """
+        Parses a JSON string into a value of VARIANT type. If the JSON string is invalid,
+        None is returned. To throw an error instead, use :func:`~Expression.parse_json`.
+
+        If there are duplicate keys in the input, allow_duplicate_keys controls whether the
+        parser keeps the last occurrence of each duplicated key (True) or returns
+        None (False). The default value of allow_duplicate_keys is False.
+        """
+        if allow_duplicate_keys is None:
+            return _unary_op("tryParseJson")(self)
+        else:
+            return _binary_op("tryParseJson")(self, allow_duplicate_keys)
+
+    def json_length(self, path=None) -> 'Expression':
+        """
+        Returns the number of elements in a JSON document, or the length of the value at the
+        specified path if one is provided.
+
+        The input can be a JSON STRING or a VARIANT. Returns None if the argument is None,
+        the json is invalid, or the path is empty, malformed or does not locate a value.
+
+        The path must be a plain path literal such as '$.a.b'. A path carrying a
+        'lax'/'strict' path mode prefix raises an error.
+
+        The length is determined as follows:
+
+        - Scalar values (number, string, boolean) have length 1.
+        - Arrays have a length equal to the number of their elements.
+        - Objects have a length equal to the number of their key-value pairs.
+
+        When provided with a path that uses a wildcard and resolves to 2 or more paths,
+        'json_length' resolves to None.
+
+        json_length also supports input of the VARIANT type; you can pass the output of
+        PARSE_JSON into json_length.
+
+        Because a None result can mean several different things (the input is not valid
+        JSON, the path does not match anything, or a wildcard path matched 2 or more
+        nodes), it is recommended to pair json_length with a helper function so invalid
+        input is handled explicitly rather than silently returning None:
+
+        - Without a path, guard the call with is_json to separate malformed input from a
+          real result.
+        - With a path, use json_exists to tell "the path is absent" apart from "the path
+          matched but was ambiguous / matched 2 or more nodes".
+
+        ::
+
+            # returns the length only for valid JSON, otherwise None means "invalid input"
+            >>> lit("[1,2]").is_json().then(lit("[1,2]").json_length(), null_of(DataTypes.INT()))
+
+            # path is present even when json_length is None due to a multi-match wildcard
+            >>> lit("{}").json_exists("$.items[*]")
+            >>> lit("{}").json_length("$.items[*]")
+
+        Examples:
+        ::
+
+            >>> lit('{"1": "hello", "2": "bye bye"}').json_length() # 2
+            >>> lit('[1,2,3,4,5]').json_length() # 5
+            >>> lit('"hello"').json_length() # 1
+
+            >>> lit('{"1": "hello", "2": "bye bye"}').json_length('$.1') # 1
+            >>> lit('{"1": [1,2,3], "2": "bye bye"}').json_length('$.1') # 3
+            >>> lit('[1,2,3,4,5]').json_length('$[3]') # 1
+
+            >>> lit('[1,2,3,4,5]').json_length('$[7]') # None
+            >>> lit('{"1": "bad", "2": "syntax here ->"').json_length('$.1') # None
+            >>> lit('[1,2,3,4,5]').json_length('$.[') # None
+        """
+        if path is None:
+            return _unary_op("jsonLength")(self)
+        else:
+            return _binary_op("jsonLength")(self, path)
+
+    def json_type(self, path=None) -> 'Expression':
+        """
+        Returns a string value indicating the type of the input.
+
+        Potential outputs are as following
+
+        * `object`
+        * `array`
+        * `string`
+        * `number`
+        * `boolean`
+        * `null`, for the JSON null literal
+
+        Every number is reported as `number`, whatever its magnitude or precision.
+
+        Returns None if the input is None or is not valid JSON.
+
+        If `path` is given, the type is read at that location instead of the root. A path that
+        does not resolve to exactly one value returns None.
+
+        Examples:
+        ::
+
+            >>> lit('{"a": true}').json_type() # 'object'
+            >>> lit('[1, 2]').json_type() # 'array'
+            >>> lit('null').json_type() # 'null'
+            >>> lit('"Hello, World!"').json_type() # 'string'
+            >>> lit('"2015-01-01"').json_type() # 'string'
+            >>> lit('66').json_type() # 'number'
+            >>> lit('11.1').json_type() # 'number'
+            >>> lit('68s').json_type() # None, not valid JSON
+            >>> lit('{"a": [1, 2]}').json_type('$.a') # 'array'
+        """
+        if path is None:
+            return _unary_op("jsonType")(self)
+        else:
+            return _binary_op("jsonType")(self, path)
     # ---------------------------- value modification functions -----------------------------
 
     def object_update(self, *kv) -> "Expression":
@@ -2232,6 +2485,203 @@ class Expression(Generic[T]):
                  field values
         """
         return _varargs_op("objectUpdate")(self, *kv)
+
+    # ---------------------------- Bitmap functions -----------------------------
+
+    def bitmap_and(self, bitmap2) -> 'Expression':
+        """
+        Computes the AND (intersection) of two bitmaps.
+
+        If any of the inputs are null, the result is null.
+
+        :param bitmap2: the bitmap to perform AND operation with
+        :return: a BITMAP expression
+        """
+        return _binary_op("bitmapAnd")(self, bitmap2)
+
+    def bitmap_andnot(self, bitmap2) -> 'Expression':
+        """
+        Computes the AND NOT (difference) of two bitmaps.
+
+        If any of the inputs are null, the result is null.
+
+        :param bitmap2: the bitmap to perform AND NOT operation with
+        :return: a BITMAP expression
+        """
+        return _binary_op("bitmapAndnot")(self, bitmap2)
+
+    def bitmap_and_agg(self):
+        """
+        Aggregates the AND (intersection) of multiple bitmaps.
+
+        NOTE: The retraction variant of this function may have significant performance overhead
+        with large bitmaps.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapAndAgg")(self)
+
+    def bitmap_and_cardinality_agg(self):
+        """
+        Aggregates the AND (intersection) of multiple bitmaps and returns its 64-bit cardinality.
+
+        NOTE: The retraction variant of this function may have significant performance overhead
+        with large bitmaps.
+
+        :return: a BIGINT expression
+        """
+        return _unary_op("bitmapAndCardinalityAgg")(self)
+
+    def bitmap_build(self) -> 'Expression':
+        """
+        Creates a bitmap from an array of 32-bit integers.
+
+        If the input is null, the result is null.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapBuild")(self)
+
+    def bitmap_build_agg(self):
+        """
+        Aggregates 32-bit integers into a bitmap.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapBuildAgg")(self)
+
+    def bitmap_build_cardinality_agg(self):
+        """
+        Aggregates 32-bit integers into a bitmap and returns its 64-bit cardinality.
+
+        :return: a BIGINT expression
+        """
+        return _unary_op("bitmapBuildCardinalityAgg")(self)
+
+    def bitmap_cardinality(self) -> 'Expression':
+        """
+        Returns the cardinality of a bitmap.
+
+        If the input is null, the result is null.
+
+        :return: a BIGINT expression
+        """
+        return _unary_op("bitmapCardinality")(self)
+
+    def bitmap_from_bytes(self) -> 'Expression':
+        """
+        Converts an array of bytes to a bitmap.
+
+        Following the format defined in `32-bit RoaringBitmap format specification \
+        <https://github.com/RoaringBitmap/RoaringFormatSpec>`_.
+
+        If the input is null, the result is null.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapFromBytes")(self)
+
+    def bitmap_or(self, bitmap2) -> 'Expression':
+        """
+        Computes the OR (union) of two bitmaps.
+
+        If any of the inputs are null, the result is null.
+
+        :param bitmap2: the bitmap to perform OR operation with
+        :return: a BITMAP expression
+        """
+        return _binary_op("bitmapOr")(self, bitmap2)
+
+    def bitmap_or_agg(self):
+        """
+        Aggregates the OR (union) of multiple bitmaps.
+
+        NOTE: The retraction variant of this function may have significant performance overhead
+        with large bitmaps.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapOrAgg")(self)
+
+    def bitmap_or_cardinality_agg(self):
+        """
+        Aggregates the OR (union) of multiple bitmaps and returns its 64-bit cardinality.
+
+        NOTE: The retraction variant of this function may have significant performance overhead
+        with large bitmaps.
+
+        :return: a BIGINT expression
+        """
+        return _unary_op("bitmapOrCardinalityAgg")(self)
+
+    def bitmap_to_array(self) -> 'Expression':
+        """
+        Converts a bitmap to an array of 32-bit integers, the values are sorted by \
+        :py:meth:`Integer.compareUnsigned`.
+
+        If the input is null, the result is null.
+
+        :return: an ARRAY<INT> expression
+        """
+        return _unary_op("bitmapToArray")(self)
+
+    def bitmap_to_bytes(self) -> 'Expression':
+        """
+        Converts a bitmap to an array of bytes.
+
+        Following the format defined in `32-bit RoaringBitmap format specification \
+        <https://github.com/RoaringBitmap/RoaringFormatSpec>`_.
+
+        If the input is null, the result is null.
+
+        :return: a VARBINARY expression
+        """
+        return _unary_op("bitmapToBytes")(self)
+
+    def bitmap_to_string(self) -> 'Expression':
+        """
+        Converts a bitmap to a string, the values are sorted by `Integer.compareUnsigned` in Java.
+        The string will be truncated and end with "..." if it is too long.
+
+        For example:
+
+        - ``"{}"``, ``"{1,2,3,4,5}"``
+        - Negative values (converted to unsigned): ``"{0,1,4294967294,4294967295}"``
+        - String too long: ``"{1,2,3,...}"``
+
+        If the input is null, the result is null.
+
+        :return: a STRING expression
+        """
+        return _unary_op("bitmapToString")(self)
+
+    def bitmap_xor(self, bitmap2) -> 'Expression':
+        """
+        Computes the XOR (symmetric difference) of two bitmaps.
+
+        If any of the inputs are null, the result is null.
+
+        :param bitmap2: the bitmap to perform XOR operation with
+        :return: a BITMAP expression
+        """
+        return _binary_op("bitmapXor")(self, bitmap2)
+
+    def bitmap_xor_agg(self):
+        """
+        Aggregates the XOR (symmetric difference) of multiple bitmaps.
+
+        :return: a BITMAP expression
+        """
+        return _unary_op("bitmapXorAgg")(self)
+
+    def bitmap_xor_cardinality_agg(self):
+        """
+        Aggregates the XOR (symmetric difference) of multiple bitmaps and returns its 64-bit
+        cardinality.
+
+        :return: a BIGINT expression
+        """
+        return _unary_op("bitmapXorCardinalityAgg")(self)
 
 
 # add the docs

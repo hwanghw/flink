@@ -27,13 +27,13 @@ under the License.
 
 # History Server
 
-Flink has a history server that can be used to query the statistics of completed jobs after the corresponding Flink cluster has been shut down.
+Flink has a history server that can be used to query the statistics of completed jobs and applications after the corresponding Flink cluster has been shut down.
 
 Furthermore, it exposes a REST API that accepts HTTP requests and responds with JSON data.
 
 ## Overview
 
-The HistoryServer allows you to query the status and statistics of completed jobs that have been archived by a JobManager.
+The HistoryServer allows you to query the status and statistics of completed jobs and applications that have been archived by a JobManager.
 
 After you have configured the HistoryServer *and* JobManager, you start and stop the HistoryServer via its corresponding startup script:
 
@@ -48,24 +48,28 @@ Currently, you can only run it as a standalone process.
 
 ## Configuration
 
-The configuration keys `jobmanager.archive.fs.dir` and `historyserver.archive.fs.refresh-interval` need to be adjusted for archiving and displaying archived jobs.
+The configuration keys `jobmanager.archive.fs.dir` and `historyserver.archive.fs.refresh-interval` need to be adjusted for archiving and displaying archived jobs and applications.
 
 **JobManager**
 
-The archiving of completed jobs happens on the JobManager, which uploads the archived job information to a file system directory. You can configure the directory to archive completed jobs in [Flink configuration file]({{< ref "docs/deployment/config#flink-configuration-file" >}}) by setting a directory via `jobmanager.archive.fs.dir`.
+The archiving of completed jobs and applications happens on the JobManager, which uploads the archived job and application information to a file system directory. You can configure the directory to archive completed jobs and applications in [Flink configuration file]({{< ref "docs/deployment/config#flink-configuration-file" >}}) by setting a directory via `jobmanager.archive.fs.dir`.
 
 ```yaml
-# Directory to upload completed job information
-jobmanager.archive.fs.dir: hdfs:///completed-jobs
+# Directory to upload completed job and application information
+jobmanager.archive.fs.dir: hdfs:///archives
 ```
+
+{{< hint info >}}
+For details on the specific directory structure, please refer to [FLIP-549: Support Application Management](https://cwiki.apache.org/confluence/display/FLINK/FLIP-549%3A+Support+Application+Management).
+{{< /hint >}}
 
 **HistoryServer**
 
 The HistoryServer can be configured to monitor a comma-separated list of directories in via `historyserver.archive.fs.dir`. The configured directories are regularly polled for new archives; the polling interval can be configured via `historyserver.archive.fs.refresh-interval`.
 
 ```yaml
-# Monitor the following directories for completed jobs
-historyserver.archive.fs.dir: hdfs:///completed-jobs
+# Monitor the following directories for completed jobs and applications
+historyserver.archive.fs.dir: hdfs:///archives
 
 # Refresh every 10 seconds
 historyserver.archive.fs.refresh-interval: 10000
@@ -74,6 +78,37 @@ historyserver.archive.fs.refresh-interval: 10000
 The contained archives are downloaded and cached in the local filesystem. The local directory for this is configured via `historyserver.web.tmpdir`.
 
 Check out the configuration page for a [complete list of configuration options]({{< ref "docs/deployment/config" >}}#history-server).
+
+**Archive Storage Backend**
+
+The HistoryServer supports pluggable local archive storage backends, selected via `historyserver.archive.storage.type`:
+
+* `FILE` (default): Each archive is unpacked into multiple JSON files under `historyserver.web.tmpdir`.
+* `ROCKSDB`: All archives are stored as key-value pairs in a single embedded RocksDB instance under `historyserver.web.tmpdir/rocksdb`. This avoids the "many small files" problem and is recommended when there is a large number of archives.
+
+Example for enabling the RocksDB backend:
+
+```yaml
+historyserver.archive.storage.type: ROCKSDB
+```
+
+**Archive Load Mode**
+
+The HistoryServer supports two modes for loading archives, selected via `historyserver.archive.load.mode`:
+
+* `EAGER` (default): Archives are automatically and synchronously downloaded to local storage via periodic background refreshes.
+* `LAZY`: Archives are displayed on the web interface immediately, while the underlying data is fetched asynchronously in the background. If a specific archive is accessed before its background download completes, the system will prioritize and fetch it on demand.
+
+Example for enabling the lazy loading:
+
+```yaml
+historyserver.archive.load.mode: LAZY
+```
+
+In `LAZY` mode, on-demand fetches use two thread pools:
+
+* `historyserver.lazy.fetch.executor.common.pool-size` — The size of the shared thread pool used for routine, background archive fetching.
+* `historyserver.lazy.fetch.executor.individual.pool-size` — The size of the high-priority thread pool dedicated to fetching individual archives on demand (e.g., when a user accesses them).
 
 ## Log Integration
 
@@ -93,9 +128,20 @@ historyserver.log.taskmanager.url-pattern: http://my.log-browsing.url/<jobid>/<t
 
 ## Available Requests
 
-Below is a list of available requests, with a sample JSON response. All requests are of the sample form `http://hostname:8082/jobs`, below we list only the *path* part of the URLs.
+Below is a list of available requests. All requests are of the sample form `http://hostname:8082/jobs`, below we list only the *path* part of the URLs.
 
 Values in angle brackets are variables, for example `http://hostname:port/jobs/<jobid>/exceptions` will have to requested for example as `http://hostname:port/jobs/7684be6004e4e955c2a558a9bc463f65/exceptions`.
+
+The response format of these REST endpoints is consistent with the descriptions in the [REST API]({{< ref "docs/ops/rest_api" >}}) documentation.
+
+**Application-related requests**
+
+  - `/applications/overview`
+  - `/applications/<applicationid>`
+  - `/applications/<applicationid>/jobmanager/config`
+  - `/applications/<applicationid>/exceptions`
+
+**Job-related requests**
 
   - `/config`
   - `/jobs/overview`

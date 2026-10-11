@@ -151,6 +151,10 @@ public final class LogicalTypeChecks {
         return getLength(logicalType) == length;
     }
 
+    public static boolean hasMaxLength(LogicalType logicalType) {
+        return getLength(logicalType) == Integer.MAX_VALUE;
+    }
+
     /** Returns the precision of all types that define a precision implicitly or explicitly. */
     public static int getPrecision(LogicalType logicalType) {
         return logicalType.accept(PRECISION_EXTRACTOR);
@@ -251,6 +255,17 @@ public final class LogicalTypeChecks {
             StructuredComparison requiredComparison) {
         return areComparableWithNormalizedNullability(
                 firstType.copy(true), secondType.copy(true), requiredComparison);
+    }
+
+    /**
+     * Checks whether a (possibly nested) logical type contains no VARIANT, which every grouping,
+     * join, partition and sort key and every operand of a comparison operator needs.
+     *
+     * <p>A VARIANT value has many valid binary encodings, so two equal values can differ in their
+     * bytes.
+     */
+    public static boolean isComparableKeyType(LogicalType logicalType) {
+        return !hasNested(logicalType, t -> t.is(LogicalTypeRoot.VARIANT));
     }
 
     private static boolean areComparableWithNormalizedNullability(

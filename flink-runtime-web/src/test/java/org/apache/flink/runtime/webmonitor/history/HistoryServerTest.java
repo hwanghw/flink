@@ -52,8 +52,6 @@ import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.jackson.JacksonMapperFactory;
 
-import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonFactory;
-import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonGenerator;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -68,7 +66,6 @@ import javax.annotation.Nullable;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -87,16 +84,14 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static org.apache.flink.runtime.webmonitor.history.HistoryServerTestUtils.createLegacyArchive;
+import static org.apache.flink.runtime.webmonitor.history.HistoryServerTestUtils.createLegacyArchiveWithModifiedDate;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for the HistoryServer. */
 class HistoryServerTest {
 
-    private static final JsonFactory JACKSON_FACTORY =
-            new JsonFactory()
-                    .enable(JsonGenerator.Feature.AUTO_CLOSE_TARGET)
-                    .disable(JsonGenerator.Feature.AUTO_CLOSE_JSON_CONTENT);
     private static final ObjectMapper OBJECT_MAPPER =
             JacksonMapperFactory.createObjectMapper()
                     .enable(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES);
@@ -137,7 +132,9 @@ class HistoryServerTest {
         final int numJobs = 2;
         final int numLegacyJobs = 1;
 
-        CountDownLatch numExpectedArchivedJobs = new CountDownLatch(numJobs + numLegacyJobs);
+        CountDownLatch numExpectedLegacyArchives = new CountDownLatch(numLegacyJobs);
+        // one for application itself, one for the job
+        CountDownLatch numExpectedArchives = new CountDownLatch(numJobs * 2);
 
         Configuration historyServerConfig = createTestConfiguration(false);
 
@@ -147,11 +144,14 @@ class HistoryServerTest {
                         (event) -> {
                             if (event.getType()
                                     == HistoryServerArchiveFetcher.ArchiveEventType.CREATED) {
-                                numExpectedArchivedJobs.countDown();
+                                numExpectedLegacyArchives.countDown();
                             }
                         },
                         (event) -> {
-                            throw new RuntimeException("Should not call");
+                            if (event.getType()
+                                    == HistoryServerArchiveFetcher.ArchiveEventType.CREATED) {
+                                numExpectedArchives.countDown();
+                            }
                         });
 
         try {
@@ -161,13 +161,16 @@ class HistoryServerTest {
             assertThat(getJobsOverview(baseUrl).getJobs()).isEmpty();
 
             for (int x = 0; x < numJobs; x++) {
+                // the job submitted in MiniCluster will be wrapped into an application
                 runJob();
             }
             createLegacyArchive(jmDirectory.toPath(), versionLessThan14);
-            waitForArchivesCreation(numJobs + numLegacyJobs);
+            waitForArchivesCreation(numJobs);
 
-            assertThat(numExpectedArchivedJobs.await(10L, TimeUnit.SECONDS)).isTrue();
+            assertThat(numExpectedLegacyArchives.await(10L, TimeUnit.SECONDS)).isTrue();
+            assertThat(numExpectedArchives.await(10L, TimeUnit.SECONDS)).isTrue();
             assertThat(getJobsOverview(baseUrl).getJobs()).hasSize(numJobs + numLegacyJobs);
+            assertThat(getApplicationsOverview(baseUrl).getApplications()).hasSize(numJobs);
 
             // checks whether the dashboard configuration contains all expected fields
             getDashboardConfiguration(baseUrl);
@@ -190,7 +193,7 @@ class HistoryServerTest {
 
         for (int j = 0; j < numArchivesBeforeHsStarted; j++) {
             JobID jobId =
-                    createLegacyArchive(
+                    createLegacyArchiveWithModifiedDate(
                             jmDirectory.toPath(), j * oneMinuteSinceEpoch, versionLessThan14);
             if (j >= numArchivesToRemoveUponHsStart) {
                 expectedJobIdsToKeep.add(jobId);
@@ -245,7 +248,7 @@ class HistoryServerTest {
                     j++) {
                 expectedJobIdsToKeep.remove(0);
                 expectedJobIdsToKeep.add(
-                        createLegacyArchive(
+                        createLegacyArchiveWithModifiedDate(
                                 jmDirectory.toPath(), j * oneMinuteSinceEpoch, versionLessThan14));
             }
             assertThat(numArchivesCreatedTotal.await(10L, TimeUnit.SECONDS)).isTrue();
@@ -338,9 +341,8 @@ class HistoryServerTest {
         int numExpiredJobs = cleanupExpiredJobs ? 1 : 0;
         int numJobs = 3;
         for (int x = 0; x < numJobs; x++) {
-            runJob();
+            mockJobArchive(createExecutionGraphInfo(), null);
         }
-        waitForArchivesCreation(numJobs);
 
         CountDownLatch numExpectedArchivedJobs = new CountDownLatch(numJobs);
         CountDownLatch firstArchiveExpiredLatch = new CountDownLatch(numExpiredJobs);
@@ -447,13 +449,35 @@ class HistoryServerTest {
         }
     }
 
-    private void waitForArchivesCreation(int numJobs) throws InterruptedException {
-        // the job is archived asynchronously after env.execute() returns
-        File[] archives = jmDirectory.listFiles();
-        while (archives == null || archives.length != numJobs) {
+    private void waitForArchivesCreation(int numApplications) throws InterruptedException {
+        // the job is archived asynchronously after env.execute() returns and the application is
+        // archived after its job completes, so we wait for the application to be archived here
+        int count = 0;
+        while (count < numApplications) {
             Thread.sleep(50);
-            archives = jmDirectory.listFiles();
+            count = getApplicationArchiveCount();
         }
+    }
+
+    private int getApplicationArchiveCount() {
+        int count = 0;
+        File[] clusterDirs = jmDirectory.listFiles();
+        if (clusterDirs == null) {
+            return 0;
+        }
+
+        for (File clusterDir : clusterDirs) {
+            if (clusterDir.isDirectory()) {
+                File applicationsDir = new File(clusterDir, ArchivePathUtils.APPLICATIONS_DIR);
+                if (applicationsDir.exists() && applicationsDir.isDirectory()) {
+                    File[] applicationDirs = applicationsDir.listFiles();
+                    if (applicationDirs != null) {
+                        count += applicationDirs.length;
+                    }
+                }
+            }
+        }
+        return count;
     }
 
     private Configuration createTestConfiguration(boolean cleanupExpiredJobs) {
@@ -503,62 +527,6 @@ class HistoryServerTest {
         env.fromData(1, 2, 3).sinkTo(new DiscardingSink<>());
 
         env.execute();
-    }
-
-    private static JobID createLegacyArchive(
-            Path directory, long fileModifiedDate, boolean versionLessThan14) throws IOException {
-        JobID jobId = createLegacyArchive(directory, versionLessThan14);
-        File jobArchive = directory.resolve(jobId.toString()).toFile();
-        jobArchive.setLastModified(fileModifiedDate);
-        return jobId;
-    }
-
-    private static JobID createLegacyArchive(Path directory, boolean versionLessThan14)
-            throws IOException {
-        JobID jobId = JobID.generate();
-
-        StringWriter sw = new StringWriter();
-        try (JsonGenerator gen = JACKSON_FACTORY.createGenerator(sw)) {
-            try (JsonObject root = new JsonObject(gen)) {
-                try (JsonArray finished = new JsonArray(gen, "finished")) {
-                    try (JsonObject job = new JsonObject(gen)) {
-                        gen.writeStringField("jid", jobId.toString());
-                        gen.writeStringField("name", "testjob");
-                        gen.writeStringField("state", JobStatus.FINISHED.name());
-
-                        gen.writeNumberField("start-time", 0L);
-                        gen.writeNumberField("end-time", 1L);
-                        gen.writeNumberField("duration", 1L);
-                        gen.writeNumberField("last-modification", 1L);
-
-                        try (JsonObject tasks = new JsonObject(gen, "tasks")) {
-                            gen.writeNumberField("total", 0);
-
-                            if (versionLessThan14) {
-                                gen.writeNumberField("pending", 0);
-                            } else {
-                                gen.writeNumberField("created", 0);
-                                gen.writeNumberField("deploying", 0);
-                                gen.writeNumberField("scheduled", 0);
-                            }
-                            gen.writeNumberField("running", 0);
-                            gen.writeNumberField("finished", 0);
-                            gen.writeNumberField("canceling", 0);
-                            gen.writeNumberField("canceled", 0);
-                            gen.writeNumberField("failed", 0);
-                        }
-                    }
-                }
-            }
-        }
-        String json = sw.toString();
-        ArchivedJson archivedJson = new ArchivedJson("/joboverview", json);
-        FsJsonArchivist.writeArchivedJsons(
-                new org.apache.flink.core.fs.Path(
-                        directory.toAbsolutePath().toString(), jobId.toString()),
-                Collections.singleton(archivedJson));
-
-        return jobId;
     }
 
     @Test
@@ -647,6 +615,9 @@ class HistoryServerTest {
                 expectedApplicationAndJobIdsToKeep.add(
                         new Tuple2<>(applicationId, new HashSet<>(jobIds)));
             }
+            // Sleep to ensure archive files have distinct timestamps. Identical timestamps can lead
+            // to non-deterministic eviction order, causing test flakiness.
+            Thread.sleep(50);
         }
 
         // one for application itself, numJobsPerApplication for jobs
@@ -716,7 +687,8 @@ class HistoryServerTest {
                                 .collect(Collectors.toList());
                 expectedApplicationAndJobIdsToKeep.add(
                         new Tuple2<>(applicationId, new HashSet<>(jobIds)));
-                // avoid executing too fast, resulting in the same creation time of archive files
+                // Sleep to ensure archive files have distinct timestamps. Identical timestamps can
+                // lead to non-deterministic eviction order, causing test flakiness.
                 Thread.sleep(50);
             }
 
@@ -922,8 +894,7 @@ class HistoryServerTest {
                         JobsOverviewHeaders.URL,
                         new MultipleJobsDetails(
                                 Collections.singleton(
-                                        JobDetails.createDetailsForJob(
-                                                executionGraphInfo.getArchivedExecutionGraph()))));
+                                        JobDetails.createDetailsForJob(executionGraphInfo))));
         FsJsonArchivist.writeArchivedJsons(
                 ArchivePathUtils.getJobArchivePath(clusterConfig, jobId, applicationId),
                 Collections.singletonList(archivedJobsOverview));
@@ -941,7 +912,8 @@ class HistoryServerTest {
                 "test-application",
                 ApplicationState.FINISHED,
                 new long[ApplicationState.values().length],
-                jobs);
+                jobs,
+                Collections.emptyList());
     }
 
     private ExecutionGraphInfo createExecutionGraphInfo() {
@@ -957,40 +929,5 @@ class HistoryServerTest {
                 ArchivePathUtils.getApplicationArchivePath(clusterConfig, applicationId)
                         .getParent();
         applicationArchiveDir.getFileSystem().delete(applicationArchiveDir, true);
-    }
-
-    private static final class JsonObject implements AutoCloseable {
-
-        private final JsonGenerator gen;
-
-        JsonObject(JsonGenerator gen) throws IOException {
-            this.gen = gen;
-            gen.writeStartObject();
-        }
-
-        private JsonObject(JsonGenerator gen, String name) throws IOException {
-            this.gen = gen;
-            gen.writeObjectFieldStart(name);
-        }
-
-        @Override
-        public void close() throws IOException {
-            gen.writeEndObject();
-        }
-    }
-
-    private static final class JsonArray implements AutoCloseable {
-
-        private final JsonGenerator gen;
-
-        JsonArray(JsonGenerator gen, String name) throws IOException {
-            this.gen = gen;
-            gen.writeArrayFieldStart(name);
-        }
-
-        @Override
-        public void close() throws IOException {
-            gen.writeEndArray();
-        }
     }
 }

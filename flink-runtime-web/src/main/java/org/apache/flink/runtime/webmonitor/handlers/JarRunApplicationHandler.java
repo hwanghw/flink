@@ -22,13 +22,19 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.client.deployment.application.PackagedProgramApplication;
 import org.apache.flink.client.deployment.application.executors.EmbeddedExecutor;
+import org.apache.flink.client.program.JarInfo;
 import org.apache.flink.client.program.PackagedProgram;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.DeploymentOptions;
+import org.apache.flink.configuration.PipelineOptionsInternal;
 import org.apache.flink.configuration.StateRecoveryOptions;
 import org.apache.flink.core.execution.RecoveryClaimMode;
+import org.apache.flink.runtime.blob.BlobClient;
+import org.apache.flink.runtime.blob.PermanentBlobKey;
+import org.apache.flink.runtime.client.ClientUtils;
 import org.apache.flink.runtime.dispatcher.DispatcherGateway;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
+import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
 import org.apache.flink.runtime.rest.handler.AbstractRestHandler;
 import org.apache.flink.runtime.rest.handler.HandlerRequest;
 import org.apache.flink.runtime.rest.handler.RestHandlerException;
@@ -40,10 +46,12 @@ import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseSt
 
 import javax.annotation.Nonnull;
 
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.Collections;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
@@ -100,18 +108,37 @@ public class JarRunApplicationHandler
         final PackagedProgram program = context.toPackagedProgram(effectiveConfiguration);
 
         ApplicationID applicationId = context.getApplicationId().orElse(ApplicationID.generate());
-        PackagedProgramApplication application =
-                new PackagedProgramApplication(
-                        applicationId,
-                        program,
-                        Collections.emptyList(),
-                        effectiveConfiguration,
-                        false,
-                        true,
-                        false,
-                        false);
 
-        return gateway.submitApplication(application, timeout)
+        final boolean isHaEnabled =
+                HighAvailabilityMode.isHighAvailabilityModeActivated(configuration);
+        final CompletableFuture<JarInfo> jarUploadFuture;
+        if (isHaEnabled) {
+            // In HA mode, a fixed job id is required to ensure consistency across failovers.
+            // The job id is derived from the application id if not configured.
+            maybeFixJobId(effectiveConfiguration, applicationId);
+
+            // upload user jar file to blob server for HA recovery
+            jarUploadFuture = uploadJarFile(gateway, context, applicationId);
+        } else {
+            jarUploadFuture = CompletableFuture.completedFuture(null);
+        }
+
+        return jarUploadFuture
+                .thenCompose(
+                        jarInfo -> {
+                            PackagedProgramApplication application =
+                                    new PackagedProgramApplication(
+                                            applicationId,
+                                            program,
+                                            effectiveConfiguration,
+                                            Integer.MAX_VALUE,
+                                            1,
+                                            false,
+                                            false,
+                                            false,
+                                            jarInfo);
+                            return gateway.submitApplication(application, timeout);
+                        })
                 .handle(
                         (acknowledge, throwable) -> {
                             if (throwable != null) {
@@ -122,6 +149,57 @@ public class JarRunApplicationHandler
                                                 throwable));
                             }
                             return new JarRunApplicationResponseBody(applicationId);
+                        });
+    }
+
+    private void maybeFixJobId(
+            final Configuration configuration, final ApplicationID applicationId) {
+        final Optional<String> configuredJobId =
+                configuration.getOptional(PipelineOptionsInternal.PIPELINE_FIXED_JOB_ID);
+        if (configuredJobId.isEmpty()) {
+            configuration.set(
+                    PipelineOptionsInternal.PIPELINE_FIXED_JOB_ID, applicationId.toHexString());
+        }
+    }
+
+    private CompletableFuture<JarInfo> uploadJarFile(
+            final DispatcherGateway gateway,
+            final JarHandlerContext context,
+            final ApplicationID applicationId) {
+        CompletableFuture<Integer> blobServerPortFuture = gateway.getBlobServerPort(timeout);
+        CompletableFuture<InetAddress> blobServerAddressFuture =
+                gateway.getBlobServerAddress(timeout);
+
+        return blobServerPortFuture
+                .thenCombine(
+                        blobServerAddressFuture,
+                        (blobServerPort, blobServerAddress) ->
+                                new InetSocketAddress(
+                                        blobServerAddress.getHostName(), blobServerPort))
+                .thenApply(
+                        blobSocketAddress -> {
+                            try {
+                                Path jarPath = context.getJarFile();
+                                PermanentBlobKey blobKey =
+                                        ClientUtils.uploadUserJarForApplication(
+                                                new org.apache.flink.core.fs.Path(
+                                                        jarPath.toString()),
+                                                applicationId,
+                                                () ->
+                                                        new BlobClient(
+                                                                blobSocketAddress, configuration));
+                                log.info(
+                                        "Uploaded user jar for application {} to blob server with blob key {}.",
+                                        applicationId,
+                                        blobKey);
+                                return new JarInfo(jarPath.getFileName().toString(), blobKey);
+                            } catch (Exception e) {
+                                throw new CompletionException(
+                                        new RestHandlerException(
+                                                "Could not upload jar file to blob server.",
+                                                HttpResponseStatus.INTERNAL_SERVER_ERROR,
+                                                e));
+                            }
                         });
     }
 

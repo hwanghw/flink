@@ -76,6 +76,24 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ATAN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.AVG;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BETWEEN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BIN;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_AND;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_ANDNOT;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_AND_AGG;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_AND_CARDINALITY_AGG;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_BUILD;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_BUILD_AGG;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_BUILD_CARDINALITY_AGG;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_CARDINALITY;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_FROM_BYTES;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_OR;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_OR_AGG;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_OR_CARDINALITY_AGG;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_TO_ARRAY;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_TO_BYTES;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_TO_STRING;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_XOR;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_XOR_AGG;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BITMAP_XOR_CARDINALITY_AGG;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.BTRIM;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.CARDINALITY;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.CAST;
@@ -109,18 +127,25 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.HEX;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IF;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IF_NULL;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IN;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.INET_ATON;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.INET_NTOA;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.INIT_CAP;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.INSTR;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_FALSE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_JSON;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_NAN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_NOT_FALSE;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_NOT_NAN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_NOT_NULL;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_NOT_TRUE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_NULL;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_TRUE;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.IS_VALID_UTF8;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.JSON_EXISTS;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.JSON_LENGTH;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.JSON_QUERY;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.JSON_QUOTE;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.JSON_TYPE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.JSON_UNQUOTE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.JSON_VALUE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LAST_VALUE;
@@ -137,7 +162,10 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LOG2;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LOWER;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LPAD;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LTRIM;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAKE_VALID_UTF8;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_CONTAINS_KEY;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_ENTRIES;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_FROM_ENTRIES;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_KEYS;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_UNION;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_VALUES;
@@ -155,6 +183,7 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ORDER_
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ORDER_DESC;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.OVER;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.OVERLAY;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.PARSE_JSON;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.PARSE_URL;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.PERCENTILE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.PLUS;
@@ -207,6 +236,7 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.TRANSL
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.TRIM;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.TRUNCATE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.TRY_CAST;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.TRY_PARSE_JSON;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.UNHEX;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.UPPER;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.URL_DECODE;
@@ -506,6 +536,16 @@ public abstract class BaseExpressions<InType, OutType> {
      */
     public OutType isNotFalse() {
         return toApiSpecificExpression(unresolvedCall(IS_NOT_FALSE, toExpr()));
+    }
+
+    /** Returns true if the given numeric expression is NaN (Not-a-Number). Null if null. */
+    public OutType isNan() {
+        return toApiSpecificExpression(unresolvedCall(IS_NAN, toExpr()));
+    }
+
+    /** Returns true if the given numeric expression is not NaN (Not-a-Number). Null if null. */
+    public OutType isNotNan() {
+        return toApiSpecificExpression(unresolvedCall(IS_NOT_NAN, toExpr()));
     }
 
     /**
@@ -1115,8 +1155,8 @@ public abstract class BaseExpressions<InType, OutType> {
     }
 
     /**
-     * Returns true, if a string matches the specified LIKE pattern with default escape character
-     * '/'.
+     * Returns true, if a string matches the specified LIKE pattern. There is no default escape
+     * character.
      *
      * <p>e.g. "Jo_n%" matches all strings that start with "Jo(arbitrary letter)n"
      */
@@ -1342,6 +1382,56 @@ public abstract class BaseExpressions<InType, OutType> {
         return toApiSpecificExpression(unresolvedCall(JSON_UNQUOTE, objectToExpression(toExpr())));
     }
 
+    /**
+     * Parses a JSON string into a value of type {@link DataTypes#VARIANT()}. If the JSON string is
+     * invalid, an error is thrown. To return {@code NULL} instead of an error, use {@link
+     * #tryParseJson()}.
+     *
+     * <p>This is a shortcut for {@code parseJson(false)}. See {@link #parseJson(boolean)}.
+     */
+    public OutType parseJson() {
+        return toApiSpecificExpression(unresolvedCall(PARSE_JSON, objectToExpression(toExpr())));
+    }
+
+    /**
+     * Parses a JSON string into a value of type {@link DataTypes#VARIANT()}. If the JSON string is
+     * invalid, an error is thrown. To return {@code NULL} instead of an error, use {@link
+     * #tryParseJson(boolean)}.
+     *
+     * <p>If there are duplicate keys in the input, {@code allowDuplicateKeys} controls whether the
+     * parser keeps the last occurrence of each duplicated key ({@code true}) or throws an error
+     * ({@code false}).
+     */
+    public OutType parseJson(boolean allowDuplicateKeys) {
+        return toApiSpecificExpression(
+                unresolvedCall(PARSE_JSON, toExpr(), valueLiteral(allowDuplicateKeys)));
+    }
+
+    /**
+     * Parses a JSON string into a value of type {@link DataTypes#VARIANT()}. If the JSON string is
+     * invalid, {@code NULL} is returned. To throw an error instead, use {@link #parseJson()}.
+     *
+     * <p>This is a shortcut for {@code tryParseJson(false)}. See {@link #tryParseJson(boolean)}.
+     */
+    public OutType tryParseJson() {
+        return toApiSpecificExpression(
+                unresolvedCall(TRY_PARSE_JSON, objectToExpression(toExpr())));
+    }
+
+    /**
+     * Parses a JSON string into a value of type {@link DataTypes#VARIANT()}. If the JSON string is
+     * invalid, {@code NULL} is returned. To throw an error instead, use {@link
+     * #parseJson(boolean)}.
+     *
+     * <p>If there are duplicate keys in the input, {@code allowDuplicateKeys} controls whether the
+     * parser keeps the last occurrence of each duplicated key ({@code true}) or returns {@code
+     * NULL} ({@code false}).
+     */
+    public OutType tryParseJson(boolean allowDuplicateKeys) {
+        return toApiSpecificExpression(
+                unresolvedCall(TRY_PARSE_JSON, toExpr(), valueLiteral(allowDuplicateKeys)));
+    }
+
     /** Returns the base string decoded with base64. */
     public OutType fromBase64() {
         return toApiSpecificExpression(unresolvedCall(FROM_BASE64, toExpr()));
@@ -1417,6 +1507,82 @@ public abstract class BaseExpressions<InType, OutType> {
      */
     public OutType urlEncode() {
         return toApiSpecificExpression(unresolvedCall(URL_ENCODE, toExpr()));
+    }
+
+    /**
+     * Converts an IPv4 address string to its numeric representation. This function follows MySQL
+     * INET_ATON behavior.
+     *
+     * <p>The conversion formula is: A * 256^3 + B * 256^2 + C * 256 + D for an IP address A.B.C.D
+     *
+     * <p>MySQL-compatible short-form IPv4 addresses are supported:
+     *
+     * <ul>
+     *   <li>a — the value is stored directly as an address (value must be in [0, 255])
+     *   <li>a.b — interpreted as a.0.0.b
+     *   <li>a.b.c — interpreted as a.b.0.c
+     *   <li>a.b.c.d — standard dotted-decimal format
+     * </ul>
+     *
+     * <p>Leading zeros in octets are parsed as decimal (not octal), consistent with MySQL.
+     *
+     * <p>Examples:
+     *
+     * <ul>
+     *   <li>INET_ATON('1') returns 1 (single number)
+     *   <li>INET_ATON('127.0.0.1') returns 2130706433
+     *   <li>INET_ATON('127.1') returns 2130706433 (short-form: 127.0.0.1)
+     *   <li>INET_ATON('0.0.0.0') returns 0
+     * </ul>
+     *
+     * @return the numeric representation of the IP address, or null if the input is null or invalid
+     */
+    public OutType inetAton() {
+        return toApiSpecificExpression(unresolvedCall(INET_ATON, toExpr()));
+    }
+
+    /**
+     * Converts a numeric IPv4 address representation back to its string format.
+     *
+     * <p>Accepts any integer numeric type (TINYINT, SMALLINT, INT, BIGINT). The input must be in
+     * the valid IPv4 range [0, 4294967295]. Negative values return null, consistent with MySQL's
+     * {@code INET_NTOA(-1) = NULL} behavior.
+     *
+     * <p>Examples:
+     *
+     * <ul>
+     *   <li>INET_NTOA(2130706433) returns '127.0.0.1'
+     *   <li>INET_NTOA(0) returns '0.0.0.0'
+     *   <li>INET_NTOA(-1) returns NULL
+     * </ul>
+     *
+     * @return the IPv4 address string in dotted-decimal notation, or null if the input is null,
+     *     negative, or out of valid range
+     */
+    public OutType inetNtoa() {
+        return toApiSpecificExpression(unresolvedCall(INET_NTOA, toExpr()));
+    }
+
+    /**
+     * Returns {@code true} if the input bytes are a well-formed UTF-8 sequence, {@code false}
+     * otherwise. Returns {@code null} if the input is {@code null}.
+     *
+     * <p>Specifically rejects: truncated multi-byte sequences (missing continuation bytes),
+     * "overlong" encodings (using more bytes than necessary for the code point), code points above
+     * the Unicode maximum U+10FFFF, and UTF-16 surrogate values U+D800-U+DFFF (which have no UTF-8
+     * representation).
+     */
+    public OutType isValidUtf8() {
+        return toApiSpecificExpression(unresolvedCall(IS_VALID_UTF8, toExpr()));
+    }
+
+    /**
+     * Decodes the input bytes as UTF-8, replacing each invalid sequence with the Unicode
+     * replacement character {@code U+FFFD}. The substitution is lossy and irreversible. Returns
+     * {@code null} if the input is {@code null}.
+     */
+    public OutType makeValidUtf8() {
+        return toApiSpecificExpression(unresolvedCall(MAKE_VALID_UTF8, toExpr()));
     }
 
     /**
@@ -1869,6 +2035,46 @@ public abstract class BaseExpressions<InType, OutType> {
     }
 
     /**
+     * Returns {@code TRUE} if the given key exists in the map, {@code FALSE} otherwise. Returns
+     * {@code NULL} if the map is {@code NULL}.
+     *
+     * <p>If the search key is {@code NULL}, the function returns {@code TRUE} when the map contains
+     * a {@code NULL} key. The given key is cast implicitly to the map's key type where Flink's
+     * implicit casting rules allow it; otherwise the call fails validation.
+     *
+     * <p>Examples:
+     *
+     * <pre>{@code
+     * map("a", 1, "b", 2).mapContainsKey("a") // TRUE
+     * map("a", 1, "b", 2).mapContainsKey("z") // FALSE
+     * map(1, "a").mapContainsKey(lit(1).cast(DataTypes.TINYINT())) // TRUE
+     * }</pre>
+     */
+    public OutType mapContainsKey(InType key) {
+        return toApiSpecificExpression(
+                unresolvedCall(MAP_CONTAINS_KEY, toExpr(), objectToExpression(key)));
+    }
+
+    /**
+     * Returns a map created from the given array of entries. Each entry must be a row with exactly
+     * two fields, where the first field becomes the key and the second one the value.
+     *
+     * <p>If there are duplicate keys, the value of the last entry with that key wins; null keys are
+     * treated as equal and collapse into a single entry. If the array itself or any of its entries
+     * is null, null is returned.
+     *
+     * <p>Examples:
+     *
+     * <pre>{@code
+     * array(row(1, "one"), row(2, "two")).mapFromEntries() // {1=one, 2=two}
+     * array(row(1, "one"), row(2, "two"), row(1, "uno")).mapFromEntries() // {1=uno, 2=two}
+     * }</pre>
+     */
+    public OutType mapFromEntries() {
+        return toApiSpecificExpression(unresolvedCall(MAP_FROM_ENTRIES, toExpr()));
+    }
+
+    /**
      * Returns a map created by merging at least one map. These maps should have a common map type.
      * If there are overlapping keys, the value from 'map2' will overwrite the value from 'map1',
      * the value from 'map3' will overwrite the value from 'map2', the value from 'mapn' will
@@ -2081,7 +2287,7 @@ public abstract class BaseExpressions<InType, OutType> {
      *
      * lit("\"abc\"").isJson() // true
      * lit("abc").isJson() // false
-     * nullOf(DataTypes.STRING()).isJson() // false
+     * nullOf(DataTypes.STRING()).isJson() // null
      *
      * lit("1").isJson(JsonType.SCALAR) // true
      * lit("1").isJson(JsonType.ARRAY) // false
@@ -2094,7 +2300,7 @@ public abstract class BaseExpressions<InType, OutType> {
      *
      * @param type The type of JSON object to validate against.
      * @return {@code true} if the string is a valid JSON of the given {@param type}, {@code false}
-     *     otherwise.
+     *     otherwise, or {@code NULL} if the input is {@code NULL}.
      */
     public OutType isJson(JsonType type) {
         return toApiSpecificExpression(unresolvedCall(IS_JSON, toExpr(), valueLiteral(type)));
@@ -2105,7 +2311,8 @@ public abstract class BaseExpressions<InType, OutType> {
      *
      * <p>This is a shortcut for {@code isJson(JsonType.VALUE)}. See {@link #isJson(JsonType)}.
      *
-     * @return {@code true} if the string is a valid JSON value, {@code false} otherwise.
+     * @return {@code true} if the string is a valid JSON value, {@code false} otherwise, or {@code
+     *     NULL} if the input is {@code NULL}.
      */
     public OutType isJson() {
         return toApiSpecificExpression(unresolvedCall(IS_JSON, toExpr()));
@@ -2408,6 +2615,53 @@ public abstract class BaseExpressions<InType, OutType> {
     }
 
     /**
+     * Returns a string value indicating the type of the input.
+     *
+     * <p>Potential outputs are as following
+     *
+     * <ul>
+     *   <li>object
+     *   <li>array
+     *   <li>string
+     *   <li>number
+     *   <li>boolean
+     *   <li>null, for the JSON null literal
+     * </ul>
+     *
+     * <p>Every number is reported as number, whatever its magnitude or precision.
+     *
+     * <p>Returns SQL NULL if the input is NULL or is not valid JSON.
+     *
+     * <p>Examples:
+     *
+     * <pre>{@code
+     * lit("{\"a\": true}").jsonType() // "object"
+     * lit("[1, 2]").jsonType() // "array"
+     * lit("null").jsonType() // "null"
+     * lit("\"Hello, World!\"").jsonType() // "string"
+     * lit("\"2015-01-01\"").jsonType() // "string"
+     * lit("66").jsonType() // "number"
+     * lit("11.1").jsonType() // "number"
+     * lit("68s").jsonType() // SQL NULL, not valid JSON
+     * }</pre>
+     */
+    public OutType jsonType() {
+        return toApiSpecificExpression(unresolvedCall(JSON_TYPE, toExpr()));
+    }
+
+    /**
+     * Like {@link #jsonType()}, but reads the type at {@code path} instead of the root. A path that
+     * does not resolve to exactly one value returns SQL NULL.
+     *
+     * <pre>{@code
+     * lit("{\"a\": [1, 2]}").jsonType("$.a") // "array"
+     * }</pre>
+     */
+    public OutType jsonType(String path) {
+        return toApiSpecificExpression(unresolvedCall(JSON_TYPE, toExpr(), valueLiteral(path)));
+    }
+
+    /**
      * Extracts JSON values from a JSON string.
      *
      * <p>The {@param wrappingBehavior} determines whether the extracted value should be wrapped
@@ -2424,6 +2678,93 @@ public abstract class BaseExpressions<InType, OutType> {
     public OutType jsonQuery(String path, JsonQueryWrapper wrappingBehavior) {
         return jsonQuery(
                 path, wrappingBehavior, JsonQueryOnEmptyOrError.NULL, JsonQueryOnEmptyOrError.NULL);
+    }
+
+    /**
+     * Returns the number of elements in a JSON document.
+     *
+     * <p>The result is returned as a {@link DataTypes#INT()}.
+     *
+     * <p>See also {@link #jsonLength(String)} for determining the length of the value at a given
+     * path.
+     *
+     * <p>Examples:
+     *
+     * <pre>{@code
+     * lit("{\"1\": \"hello\", \"2\": \"bye bye\"}").jsonLength() // 2
+     * lit("[1,2,3,4,5]").jsonLength() // 5
+     * lit("\"hello\"").jsonLength() // 1
+     * nullOf(DataTypes.STRING()).jsonLength() // NULL
+     * lit("invalid").jsonLength() // NULL
+     * }</pre>
+     *
+     * @return The number of elements in the JSON document.
+     */
+    public OutType jsonLength() {
+        return toApiSpecificExpression(unresolvedCall(JSON_LENGTH, toExpr()));
+    }
+
+    /**
+     * Returns the number of elements in a JSON document, or the length of the value at the
+     * specified path if one is provided.
+     *
+     * <p>The input can be a JSON STRING or a VARIANT. Returns {@code NULL} if the argument is
+     * {@code NULL}, the json is invalid, or the path is empty, malformed or does not locate a
+     * value.
+     *
+     * <p>The path must be a plain path literal such as {@code '$.a.b'}. A path carrying a {@code
+     * 'lax'}/{@code 'strict'} path mode prefix raises an error.
+     *
+     * <p>The length is determined as follows:
+     *
+     * <ul>
+     *   <li>Scalar values (number, string, boolean) have length 1.
+     *   <li>Arrays have a length equal to the number of their elements.
+     *   <li>Objects have a length equal to the number of their key-value pairs.
+     * </ul>
+     *
+     * <p>When provided with a path that uses a wildcard and resolves to 2 or more paths, {@code
+     * JSON_LENGTH} resolves to {@code NULL}.
+     *
+     * <p>JSON_LENGTH also supports input of the VARIANT type; you can pass the output of PARSE_JSON
+     * into JSON_LENGTH.
+     *
+     * <p>Because a {@code NULL} result can mean several different things (the input is not valid
+     * JSON, the path does not match anything, or a wildcard path matched 2 or more nodes), it is
+     * recommended to pair {@code JSON_LENGTH} with a helper function so invalid input is handled
+     * explicitly rather than silently returning {@code NULL}:
+     *
+     * <ul>
+     *   <li>Without a path, guard the call with {@code IS JSON} to separate malformed input from a
+     *       real result.
+     *   <li>With a path, use {@code JSON_EXISTS} to tell "the path is absent" apart from "the path
+     *       matched but was ambiguous / matched 2 or more nodes".
+     * </ul>
+     *
+     * <pre>{@code
+     * // returns the length only for valid JSON, otherwise NULL means "invalid input"
+     * lit("[1,2,3]").isJson().then(lit("[1,2,3]").jsonLength(), nullOf(DataTypes.INT()))
+     *
+     * // pathPresent is true even when jsonLength is NULL because of a multi-match wildcard
+     * lit("{}").jsonExists("$.items[*]")
+     * lit("{}").jsonLength("$.items[*]")
+     * }</pre>
+     *
+     * <p>Examples:
+     *
+     * <pre>{@code
+     * lit("{\"1\": \"hello\", \"2\": \"bye bye\"}").jsonLength("$.1") // 1
+     * lit("{\"1\": [1,2,3], \"2\": \"bye bye\"}").jsonLength("$.1") // 3
+     * lit("[1,2,3,4,5]").jsonLength("$[3]") // 1
+     *
+     * lit("[1,2,3,4,5]").jsonLength("$[7]") // NULL
+     * }</pre>
+     *
+     * @param path JSON path to search for.
+     * @return The number of elements in the value located at the given path.
+     */
+    public OutType jsonLength(String path) {
+        return toApiSpecificExpression(unresolvedCall(JSON_LENGTH, toExpr(), valueLiteral(path)));
     }
 
     /**
@@ -2544,5 +2885,228 @@ public abstract class BaseExpressions<InType, OutType> {
                         .toArray(Expression[]::new);
         return toApiSpecificExpression(
                 ApiExpressionUtils.unresolvedCall(OBJECT_UPDATE, expressions));
+    }
+
+    // Bitmap functions
+
+    /**
+     * Computes the AND (intersection) of two bitmaps.
+     *
+     * <p>If any of the inputs are null, the result is null.
+     *
+     * @param bitmap2 the bitmap to perform AND operation with
+     * @return a BITMAP expression
+     */
+    public OutType bitmapAnd(InType bitmap2) {
+        return toApiSpecificExpression(
+                unresolvedCall(BITMAP_AND, toExpr(), objectToExpression(bitmap2)));
+    }
+
+    /**
+     * Computes the AND NOT (difference) of two bitmaps.
+     *
+     * <p>If any of the inputs are null, the result is null.
+     *
+     * @param bitmap2 the bitmap to perform AND NOT operation with
+     * @return a BITMAP expression
+     */
+    public OutType bitmapAndnot(InType bitmap2) {
+        return toApiSpecificExpression(
+                unresolvedCall(BITMAP_ANDNOT, toExpr(), objectToExpression(bitmap2)));
+    }
+
+    /**
+     * Aggregates the AND (intersection) of multiple bitmaps.
+     *
+     * <p>NOTE: The retraction variant of this function may have significant performance overhead
+     * with large bitmaps.
+     *
+     * @return a BITMAP expression
+     */
+    public OutType bitmapAndAgg() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_AND_AGG, toExpr()));
+    }
+
+    /**
+     * Aggregates the AND (intersection) of multiple bitmaps and returns its 64-bit cardinality.
+     *
+     * <p>NOTE: The retraction variant of this function may have significant performance overhead
+     * with large bitmaps.
+     *
+     * @return a BIGINT expression
+     */
+    public OutType bitmapAndCardinalityAgg() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_AND_CARDINALITY_AGG, toExpr()));
+    }
+
+    /**
+     * Creates a bitmap from an array of 32-bit integers.
+     *
+     * <p>If the input is null, the result is null.
+     *
+     * @return a BITMAP expression
+     */
+    public OutType bitmapBuild() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_BUILD, toExpr()));
+    }
+
+    /**
+     * Aggregates 32-bit integers into a bitmap.
+     *
+     * @return a BITMAP expression
+     */
+    public OutType bitmapBuildAgg() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_BUILD_AGG, toExpr()));
+    }
+
+    /**
+     * Aggregates 32-bit integers into a bitmap and returns its 64-bit cardinality.
+     *
+     * @return a BIGINT expression
+     */
+    public OutType bitmapBuildCardinalityAgg() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_BUILD_CARDINALITY_AGG, toExpr()));
+    }
+
+    /**
+     * Returns the cardinality of a bitmap.
+     *
+     * <p>If the input is null, the result is null.
+     *
+     * @return a BIGINT expression
+     */
+    public OutType bitmapCardinality() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_CARDINALITY, toExpr()));
+    }
+
+    /**
+     * Converts an array of bytes to a bitmap.
+     *
+     * <p>Following the format defined in <a
+     * href="https://github.com/RoaringBitmap/RoaringFormatSpec">32-bit RoaringBitmap format
+     * specification</a>.
+     *
+     * <p>If the input is null, the result is null.
+     *
+     * @return a BITMAP expression
+     */
+    public OutType bitmapFromBytes() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_FROM_BYTES, toExpr()));
+    }
+
+    /**
+     * Computes the OR (union) of two bitmaps.
+     *
+     * <p>If any of the inputs are null, the result is null.
+     *
+     * @param bitmap2 the bitmap to perform OR operation with
+     * @return a BITMAP expression
+     */
+    public OutType bitmapOr(InType bitmap2) {
+        return toApiSpecificExpression(
+                unresolvedCall(BITMAP_OR, toExpr(), objectToExpression(bitmap2)));
+    }
+
+    /**
+     * Aggregates the OR (union) of multiple bitmaps.
+     *
+     * <p>NOTE: The retraction variant of this function may have significant performance overhead
+     * with large bitmaps.
+     *
+     * @return a BITMAP expression
+     */
+    public OutType bitmapOrAgg() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_OR_AGG, toExpr()));
+    }
+
+    /**
+     * Aggregates the OR (union) of multiple bitmaps and returns its 64-bit cardinality.
+     *
+     * <p>NOTE: The retraction variant of this function may have significant performance overhead
+     * with large bitmaps.
+     *
+     * @return a BIGINT expression
+     */
+    public OutType bitmapOrCardinalityAgg() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_OR_CARDINALITY_AGG, toExpr()));
+    }
+
+    /**
+     * Converts a bitmap to an array of 32-bit integers, the values are sorted by {@link
+     * Integer#compareUnsigned}.
+     *
+     * <p>If the input is null, the result is null.
+     *
+     * @return an ARRAY&lt;INT&gt; expression
+     */
+    public OutType bitmapToArray() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_TO_ARRAY, toExpr()));
+    }
+
+    /**
+     * Converts a bitmap to an array of bytes.
+     *
+     * <p>Following the format defined in <a
+     * href="https://github.com/RoaringBitmap/RoaringFormatSpec">32-bit RoaringBitmap format
+     * specification</a>.
+     *
+     * <p>If the input is null, the result is null.
+     *
+     * @return a VARBINARY expression
+     */
+    public OutType bitmapToBytes() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_TO_BYTES, toExpr()));
+    }
+
+    /**
+     * Converts a bitmap to a string, the values are sorted by {@link Integer#compareUnsigned}. The
+     * string will be truncated and end with "..." if it is too long.
+     *
+     * <p>For example:
+     *
+     * <ul>
+     *   <li>{@code "{}"}, {@code "{1,2,3,4,5}"}
+     *   <li>Negative values (converted to unsigned): {@code "{0,1,4294967294,4294967295}"}
+     *   <li>String too long: {@code "{1,2,3,...}"}
+     * </ul>
+     *
+     * <p>If the input is null, the result is null.
+     *
+     * @return a STRING expression
+     */
+    public OutType bitmapToString() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_TO_STRING, toExpr()));
+    }
+
+    /**
+     * Computes the XOR (symmetric difference) of two bitmaps.
+     *
+     * <p>If any of the inputs are null, the result is null.
+     *
+     * @param bitmap2 the bitmap to perform XOR operation with
+     * @return a BITMAP expression
+     */
+    public OutType bitmapXor(InType bitmap2) {
+        return toApiSpecificExpression(
+                unresolvedCall(BITMAP_XOR, toExpr(), objectToExpression(bitmap2)));
+    }
+
+    /**
+     * Aggregates the XOR (symmetric difference) of multiple bitmaps.
+     *
+     * @return a BITMAP expression
+     */
+    public OutType bitmapXorAgg() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_XOR_AGG, toExpr()));
+    }
+
+    /**
+     * Aggregates the XOR (symmetric difference) of multiple bitmaps and returns its 64-bit
+     * cardinality.
+     *
+     * @return a BIGINT expression
+     */
+    public OutType bitmapXorCardinalityAgg() {
+        return toApiSpecificExpression(unresolvedCall(BITMAP_XOR_CARDINALITY_AGG, toExpr()));
     }
 }

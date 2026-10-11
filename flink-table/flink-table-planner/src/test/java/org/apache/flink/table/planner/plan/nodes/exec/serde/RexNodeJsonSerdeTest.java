@@ -42,8 +42,10 @@ import org.apache.flink.table.module.Module;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.calcite.FlinkTypeSystem;
 import org.apache.flink.table.planner.calcite.RexTableArgCall;
+import org.apache.flink.table.planner.calcite.RexTableArgCall.SortOrder;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
+import org.apache.flink.table.planner.functions.sql.SqlDefaultArgOperator;
 import org.apache.flink.table.planner.functions.utils.UserDefinedFunctionUtils;
 import org.apache.flink.table.types.inference.TypeInference;
 import org.apache.flink.table.types.inference.TypeStrategies;
@@ -85,6 +87,7 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -717,9 +720,8 @@ public class RexNodeJsonSerdeTest {
                         FACTORY.createSqlType(SqlTypeName.INTEGER)),
                 rexBuilder.makeExactLiteral(
                         new BigDecimal(Long.MAX_VALUE), FACTORY.createSqlType(SqlTypeName.BIGINT)),
-                rexBuilder.makeExactLiteral(
-                        BigDecimal.valueOf(Double.MAX_VALUE),
-                        FACTORY.createSqlType(SqlTypeName.DOUBLE)),
+                rexBuilder.makeApproxLiteral(
+                        Double.MAX_VALUE, FACTORY.createSqlType(SqlTypeName.DOUBLE)),
                 rexBuilder.makeApproxLiteral(
                         BigDecimal.valueOf(Float.MAX_VALUE),
                         FACTORY.createSqlType(SqlTypeName.FLOAT)),
@@ -828,6 +830,12 @@ public class RexNodeJsonSerdeTest {
                 rexBuilder.makeCall(
                         FlinkSqlOperatorTable.HASH_CODE,
                         rexBuilder.makeInputRef(FACTORY.createSqlType(SqlTypeName.INTEGER), 1)),
+                rexBuilder.makeInputRef(FACTORY.createSqlType(SqlTypeName.VARIANT), 1),
+                // $1['f'] on a VARIANT, which also makes the call itself VARIANT-typed
+                rexBuilder.makeCall(
+                        FlinkSqlOperatorTable.ITEM,
+                        rexBuilder.makeInputRef(FACTORY.createSqlType(SqlTypeName.VARIANT), 1),
+                        rexBuilder.makeLiteral("f")),
                 rexBuilder.makePatternFieldRef(
                         "test", FACTORY.createSqlType(SqlTypeName.INTEGER), 0),
                 new RexTableArgCall(
@@ -839,7 +847,12 @@ public class RexNodeJsonSerdeTest {
                                 Arrays.asList("f1", "f2")),
                         0,
                         new int[] {1},
-                        new int[] {0}));
+                        new int[] {0},
+                        new SortOrder[] {SortOrder.ASC_NULLS_LAST}),
+                rexBuilder.makeCall(
+                        FACTORY.createSqlType(SqlTypeName.VARCHAR),
+                        new SqlDefaultArgOperator(FACTORY.createSqlType(SqlTypeName.VARCHAR)),
+                        List.of()));
     }
 
     // --------------------------------------------------------------------------------------------

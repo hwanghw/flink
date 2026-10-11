@@ -22,12 +22,13 @@ import org.apache.flink.formats.json.debezium.DebeziumJsonDeserializationSchema;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.DefaultIndex;
+import org.apache.flink.table.catalog.ImmutableColumnsConstraint;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.UniqueConstraint;
 import org.apache.flink.test.util.SQLJobSubmission;
 import org.apache.flink.tests.util.flink.ClusterController;
 
-import org.junit.Test;
+import org.junit.jupiter.api.TestTemplate;
 
 import java.net.URI;
 import java.time.Duration;
@@ -35,7 +36,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-import static org.junit.Assume.assumeTrue;
+import static org.assertj.core.api.Assumptions.assumeThat;
 
 /**
  * End-to-End tests for table planner scala-free since 1.15. Due to scala-free of table planner
@@ -43,7 +44,7 @@ import static org.junit.Assume.assumeTrue;
  * class in execution time, ClassNotFound exception will be thrown. ITCase in table planner can not
  * cover it, so we should add E2E test for these case.
  */
-public class PlannerScalaFreeITCase extends SqlITCaseBase {
+class PlannerScalaFreeITCase extends SqlITCaseBase {
 
     private static final ResolvedSchema SINK_TABLE_SCHEMA =
             new ResolvedSchema(
@@ -53,34 +54,35 @@ public class PlannerScalaFreeITCase extends SqlITCaseBase {
                     Collections.emptyList(),
                     UniqueConstraint.primaryKey("pk", Collections.singletonList("user_name")),
                     Collections.singletonList(
-                            DefaultIndex.newIndex("idx", Collections.singletonList("user_name"))));
+                            DefaultIndex.newIndex("idx", Collections.singletonList("user_name"))),
+                    ImmutableColumnsConstraint.immutableColumns(
+                            "imt", Collections.singletonList("user_name")));
 
     private static final DebeziumJsonDeserializationSchema DESERIALIZATION_SCHEMA =
             createDebeziumDeserializationSchema(SINK_TABLE_SCHEMA);
 
-    public PlannerScalaFreeITCase(String executionMode) {
-        super(executionMode);
-    }
-
-    @Test
-    public void testImperativeUdaf() throws Exception {
+    @TestTemplate
+    void testImperativeUdaf() throws Exception {
         runAndCheckSQL("scala_free_e2e.sql", Arrays.asList("+I[Bob, 2]", "+I[Alice, 1]"));
     }
 
-    /** The test data is from {@link org.apache.flink.table.toolbox.TestSourceFunction#DATA}. */
-    @Test
-    public void testWatermarkPushDown() throws Exception {
-        assumeTrue(executionMode.equalsIgnoreCase("streaming"));
+    /**
+     * The test data is from {@link
+     * org.apache.flink.table.toolbox.TestScanTableSourceWithWatermarkPushDown#DATA}.
+     */
+    @TestTemplate
+    void testWatermarkPushDown() throws Exception {
+        assumeThat(executionMode).isEqualTo("streaming");
         runAndCheckSQL("watermark_push_down_e2e.sql", Arrays.asList("+I[Bob, 1]", "+I[Alice, 2]"));
     }
 
     @Override
-    protected List<String> formatRawResult(List<String> rawResult) {
+    List<String> formatRawResult(List<String> rawResult) {
         return convertToMaterializedResult(rawResult, SINK_TABLE_SCHEMA, DESERIALIZATION_SCHEMA);
     }
 
     @Override
-    protected void executeSqlStatements(
+    void executeSqlStatements(
             ClusterController clusterController, List<String> sqlLines, List<URI> dependencies)
             throws Exception {
         clusterController.submitSQLJob(

@@ -358,6 +358,16 @@ public interface TableChange {
     }
 
     /**
+     * A table change to modify materialized table start mode.
+     *
+     * @param startMode the modified start mode.
+     * @return a TableChange represents the modification.
+     */
+    static ModifyStartMode modifyStartMode(StartMode startMode) {
+        return new ModifyStartMode(startMode);
+    }
+
+    /**
      * A table change to modify materialized table refresh status.
      *
      * @param refreshStatus the modified refresh status.
@@ -1162,7 +1172,7 @@ public interface TableChange {
      * </pre>
      */
     @PublicEvolving
-    class SetOption implements CatalogTableChange {
+    class SetOption implements CatalogTableChange, MaterializedTableChange {
 
         private final String key;
         private final String value;
@@ -1215,7 +1225,7 @@ public interface TableChange {
      * </pre>
      */
     @PublicEvolving
-    class ResetOption implements CatalogTableChange {
+    class ResetOption implements CatalogTableChange, MaterializedTableChange {
 
         private final String key;
 
@@ -1468,6 +1478,77 @@ public interface TableChange {
         @Override
         public int hashCode() {
             return Objects.hash(definitionQuery, originalQuery);
+        }
+    }
+
+    /** A table change to modify materialized table start mode. */
+    @PublicEvolving
+    class ModifyStartMode implements MaterializedTableChange {
+
+        private final StartMode startMode;
+
+        public ModifyStartMode(StartMode startMode) {
+            this.startMode = startMode;
+        }
+
+        public StartMode getStartMode() {
+            return startMode;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            ModifyStartMode that = (ModifyStartMode) o;
+            return Objects.equals(startMode, that.startMode);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(startMode);
+        }
+
+        @Override
+        public String toString() {
+            return "ModifyStartMode{" + "startMode=" + startMode + '}';
+        }
+    }
+
+    /** A table change to modify comment for table or materialized table. */
+    @PublicEvolving
+    class ModifyTableComment implements CatalogTableChange, MaterializedTableChange {
+
+        private final String comment;
+
+        public ModifyTableComment(String comment) {
+            this.comment = comment;
+        }
+
+        public String getComment() {
+            return comment;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            ModifyTableComment that = (ModifyTableComment) o;
+            return Objects.equals(comment, that.comment);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hashCode(comment);
+        }
+
+        @Override
+        public String toString() {
+            return "ModifyTableComment{" + "comment='" + comment + '\'' + '}';
         }
     }
 }

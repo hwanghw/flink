@@ -21,6 +21,8 @@ package org.apache.flink.table.types.inference;
 import org.apache.flink.annotation.PublicEvolving;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -40,6 +42,7 @@ public enum StaticArgumentTrait {
     // For TABLE
     ROW_SEMANTIC_TABLE(TABLE),
     SET_SEMANTIC_TABLE(TABLE),
+    BROADCAST_SEMANTIC_TABLE(TABLE),
     PASS_COLUMNS_THROUGH(TABLE),
     SUPPORT_UPDATES(TABLE),
     REQUIRE_ON_TIME(TABLE),
@@ -51,6 +54,8 @@ public enum StaticArgumentTrait {
     REQUIRE_UPDATE_BEFORE(SUPPORT_UPDATES),
     REQUIRE_FULL_DELETE(SUPPORT_UPDATES);
 
+    private static final Set<StaticArgumentTrait> ROOTS = EnumSet.of(SCALAR, TABLE, MODEL);
+
     private final Set<StaticArgumentTrait> requirements;
 
     StaticArgumentTrait(StaticArgumentTrait... requirements) {
@@ -59,5 +64,28 @@ public enum StaticArgumentTrait {
 
     public Set<StaticArgumentTrait> getRequirements() {
         return requirements;
+    }
+
+    /** Whether this trait is one of the top-level roots (SCALAR, TABLE, MODEL). */
+    public boolean isRoot() {
+        return ROOTS.contains(this);
+    }
+
+    /**
+     * Returns the traits that are mutually exclusive with this one. Adding this trait to a set
+     * implies removing all returned traits. A declaration must not contain this trait together with
+     * any of the returned traits. Empty by default.
+     */
+    public Set<StaticArgumentTrait> getIncompatibleWith() {
+        switch (this) {
+            case SET_SEMANTIC_TABLE:
+                return EnumSet.of(ROW_SEMANTIC_TABLE, BROADCAST_SEMANTIC_TABLE);
+            case ROW_SEMANTIC_TABLE:
+                return EnumSet.of(SET_SEMANTIC_TABLE, BROADCAST_SEMANTIC_TABLE);
+            case BROADCAST_SEMANTIC_TABLE:
+                return EnumSet.of(ROW_SEMANTIC_TABLE, SET_SEMANTIC_TABLE, PASS_COLUMNS_THROUGH);
+            default:
+                return Collections.emptySet();
+        }
     }
 }

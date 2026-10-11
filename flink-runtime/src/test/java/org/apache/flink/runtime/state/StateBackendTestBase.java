@@ -509,6 +509,50 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
     }
 
     @TestTemplate
+    void testGetKeysAndKeyGroups() throws Exception {
+        final int elementsNum = 1000;
+        final int numberOfKeyGroups = 10;
+        String fieldName = "get-keys-and-key-groups-test";
+        CheckpointableKeyedStateBackend<Integer> backend =
+                createKeyedBackend(IntSerializer.INSTANCE);
+        try {
+            final String ns = "ns1";
+            ValueState<Integer> keyedState =
+                    backend.getPartitionedState(
+                            ns,
+                            StringSerializer.INSTANCE,
+                            new ValueStateDescriptor<>(fieldName, IntSerializer.INSTANCE));
+
+            for (int key = 0; key < elementsNum; key++) {
+                backend.setCurrentKey(key);
+                keyedState.update(key * 2);
+            }
+
+            try (Stream<Tuple2<Integer, Integer>> stream =
+                    backend.getKeysAndKeyGroups(Collections.singletonList(fieldName), ns)) {
+                final Set<Integer> seenKeys = new HashSet<>();
+                stream.forEach(
+                        entry -> {
+                            assertThat(seenKeys.add(entry.f0))
+                                    .withFailMessage("Duplicate key")
+                                    .isTrue();
+                            assertThat(entry.f1)
+                                    .withFailMessage("Unexpected key-group")
+                                    .isEqualTo(
+                                            KeyGroupRangeAssignment.assignToKeyGroup(
+                                                    entry.f0, numberOfKeyGroups));
+                        });
+                assertThat(seenKeys.size())
+                        .withFailMessage("Unexpected keys count")
+                        .isEqualTo(elementsNum);
+            }
+        } finally {
+            IOUtils.closeQuietly(backend);
+            backend.dispose();
+        }
+    }
+
+    @TestTemplate
     void testGetKeysAndNamespaces() throws Exception {
         final int elementsNum = 1000;
         String fieldName = "get-keys-test";
@@ -1014,6 +1058,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
 
             // ========== restore snapshot - should use default serializer (ONLY SERIALIZATION)
@@ -1049,6 +1094,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
 
             snapshot.discardState();
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
 
             // ========= restore snapshot - should use default serializer (FAIL ON DESERIALIZATION)
@@ -1121,6 +1167,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
 
             // ========== restore snapshot - should use specific serializer (ONLY SERIALIZATION)
@@ -1154,6 +1201,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
 
             snapshot.discardState();
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
 
             // ========= restore snapshot - should use specific serializer (FAIL ON DESERIALIZATION)
@@ -1166,6 +1214,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
         } finally {
             // ensure that native resources are also released in case of exception
             if (backend != null) {
+                IOUtils.closeQuietly(backend);
                 backend.dispose();
             }
         }
@@ -1242,6 +1291,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
 
             // ========== restore snapshot, with a different registration order in the configuration
@@ -1297,6 +1347,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
 
             snapshot.discardState();
         } finally {
+            IOUtils.closeQuietly(backend);
             backend.dispose();
         }
     }
@@ -1356,6 +1407,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
 
             // ========== restore snapshot, with a different registration order in the configuration
@@ -1399,6 +1451,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
 
             snapshot.discardState();
         } finally {
+            IOUtils.closeQuietly(backend);
             backend.dispose();
         }
     }
@@ -1527,6 +1580,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     valueSerializer))
                     .isEqualTo("u3");
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot1);
 
@@ -1562,6 +1616,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     valueSerializer))
                     .isEqualTo("2");
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot2);
 
@@ -1816,6 +1871,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             backend =
                     restoreKeyedBackend(
@@ -1908,6 +1964,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot1);
 
@@ -2057,6 +2114,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                             valueSerializer)))
                     .isEqualTo("u3");
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             // restore the first snapshot and validate it
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot1);
@@ -2095,6 +2153,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                             valueSerializer)))
                     .isEqualTo("2");
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             // restore the second snapshot and validate it
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot2);
@@ -2607,6 +2666,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     valueSerializer))
                     .isEqualTo("u3");
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             // restore the first snapshot and validate it
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot1);
@@ -2642,6 +2702,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     valueSerializer))
                     .isEqualTo("2");
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             // restore the second snapshot and validate it
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot2);
@@ -3465,6 +3526,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                 assertThat(entry.getValue().endsWith(updateSuffix)).isTrue();
             }
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             // restore the first snapshot and validate it
             backend = restoreKeyedBackend(StringSerializer.INSTANCE, snapshot1);
@@ -3513,6 +3575,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                 }
                             });
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             // restore the second snapshot and validate it
             backend = restoreKeyedBackend(StringSerializer.INSTANCE, snapshot2);
@@ -3899,6 +3962,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     streamFactory,
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
+            IOUtils.closeQuietly(backend);
             backend.dispose();
 
             backend = restoreKeyedBackend(StringSerializer.INSTANCE, snapshot);
@@ -3912,6 +3976,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     streamFactory,
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
+            IOUtils.closeQuietly(backend);
             backend.dispose();
 
             // we restore again and try to access previous state
@@ -4186,6 +4251,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             // restore the first snapshot and validate it
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot1);
@@ -4244,6 +4310,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             // restore the first snapshot and validate it
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot1);
@@ -4304,6 +4371,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             // restore the first snapshot and validate it
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot1);
@@ -4366,6 +4434,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
             // restore the first snapshot and validate it
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot1);
@@ -4616,6 +4685,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
 
+            IOUtils.closeQuietly(backend);
             backend.dispose();
 
             assertThat(
@@ -4669,6 +4739,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                     CheckpointOptions.forCheckpointWithDefaultLocation()),
                             sharedStateRegistry);
             assertThat(snapshot).isNull();
+            IOUtils.closeQuietly(backend);
             backend.dispose();
 
             backend = restoreKeyedBackend(IntSerializer.INSTANCE, snapshot);
@@ -5290,7 +5361,6 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
                                 // will fail here
                                 restoreState.value();
 
-                                restoreBackend.dispose();
                             } finally {
                                 if (restoreBackend != null) {
                                     IOUtils.closeQuietly(restoreBackend);
@@ -5443,20 +5513,25 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> {
     public void testMapStateWithNullValue() throws Exception {
         CheckpointableKeyedStateBackend<String> keyedBackend =
                 createKeyedBackend(new NullUnsafeTypeSerializer());
-        MapStateDescriptor<Integer, String> kvId =
-                new MapStateDescriptor<>(
-                        "id", IntSerializer.INSTANCE, new NullUnsafeTypeSerializer());
-        MapState<Integer, String> state =
-                keyedBackend.getPartitionedState(
-                        VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, kvId);
+        try {
+            MapStateDescriptor<Integer, String> kvId =
+                    new MapStateDescriptor<>(
+                            "id", IntSerializer.INSTANCE, new NullUnsafeTypeSerializer());
+            MapState<Integer, String> state =
+                    keyedBackend.getPartitionedState(
+                            VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, kvId);
 
-        String key = "key";
-        int userKey = 1;
-        keyedBackend.setCurrentKey(key);
-        // this should not throw an exception
-        state.put(userKey, null);
-        assertThat(state.contains(userKey)).isTrue();
-        assertThat(state.get(userKey)).isNull();
+            String key = "key";
+            int userKey = 1;
+            keyedBackend.setCurrentKey(key);
+            // this should not throw an exception
+            state.put(userKey, null);
+            assertThat(state.contains(userKey)).isTrue();
+            assertThat(state.get(userKey)).isNull();
+        } finally {
+            IOUtils.closeQuietly(keyedBackend);
+            keyedBackend.dispose();
+        }
     }
 
     /**

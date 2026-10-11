@@ -28,6 +28,7 @@ import {
   JobStatus,
   TaskStatus
 } from '@flink-runtime-web/interfaces';
+import { ApplicationExceptions } from '@flink-runtime-web/interfaces/application-exception';
 
 import { ConfigService } from './config.service';
 
@@ -35,7 +36,10 @@ import { ConfigService } from './config.service';
   providedIn: 'root'
 })
 export class ApplicationService {
-  constructor(private readonly httpClient: HttpClient, private readonly configService: ConfigService) {}
+  constructor(
+    private readonly httpClient: HttpClient,
+    private readonly configService: ConfigService
+  ) {}
 
   public cancelApplication(applicationId: string): Observable<void> {
     return this.httpClient.post<void>(`${this.configService.BASE_URL}/applications/${applicationId}/cancel`, {});
@@ -90,6 +94,12 @@ export class ApplicationService {
         return data;
       }),
       catchError(() => EMPTY)
+    );
+  }
+
+  public loadExceptions(applicationId: string): Observable<ApplicationExceptions> {
+    return this.httpClient.get<ApplicationExceptions>(
+      `${this.configService.BASE_URL}/applications/${applicationId}/exceptions`
     );
   }
 }

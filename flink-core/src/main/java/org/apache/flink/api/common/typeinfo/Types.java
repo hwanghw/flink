@@ -37,6 +37,7 @@ import org.apache.flink.api.java.typeutils.ValueTypeInfo;
 import org.apache.flink.types.Either;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.Value;
+import org.apache.flink.types.bitmap.Bitmap;
 import org.apache.flink.types.variant.Variant;
 
 import java.lang.reflect.Field;
@@ -55,6 +56,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * This class gives access to the type information of the most common types for which Flink has
@@ -157,7 +159,16 @@ public class Types {
     /** Returns type information for {@link java.time.Instant}. Supports a null value. */
     public static final TypeInformation<Instant> INSTANT = BasicTypeInfo.INSTANT_TYPE_INFO;
 
+    /** Returns type information for {@link java.util.UUID}. */
+    public static final TypeInformation<UUID> UUID = BasicTypeInfo.UUID_TYPE_INFO;
+
     public static final TypeInformation<Variant> VARIANT = VariantTypeInfo.INSTANCE;
+
+    /**
+     * Returns type information for {@link org.apache.flink.types.bitmap.Bitmap}. Does not support a
+     * null value.
+     */
+    public static final TypeInformation<Bitmap> BITMAP = BitmapTypeInfo.INSTANCE;
 
     // CHECKSTYLE.OFF: MethodName
 

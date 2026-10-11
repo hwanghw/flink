@@ -34,6 +34,7 @@ import org.apache.flink.table.functions.TableAggregateFunctionDefinition;
 import org.apache.flink.table.functions.TableFunctionDefinition;
 import org.apache.flink.table.functions.UserDefinedFunction;
 import org.apache.flink.table.planner.calcite.RexTableArgCall;
+import org.apache.flink.table.planner.calcite.RexTableArgCall.SortOrder;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlAggFunction;
 import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.functions.sql.BuiltInSqlOperator;
@@ -127,6 +128,7 @@ final class RexNodeJsonSerializer extends StdSerializer<RexNode> {
     static final String KIND_TABLE_ARG_CALL = "TABLE_ARG_CALL";
     static final String FIELD_NAME_PARTITION_KEYS = "partitionKeys";
     static final String FIELD_NAME_ORDER_KEYS = "orderKeys";
+    static final String FIELD_NAME_ORDER_DIRECTIONS = "orderDirections";
 
     RexNodeJsonSerializer() {
         super(RexNode.class);
@@ -338,10 +340,23 @@ final class RexNodeJsonSerializer extends StdSerializer<RexNode> {
         gen.writeStartObject();
         gen.writeStringField(FIELD_NAME_KIND, KIND_TABLE_ARG_CALL);
         gen.writeNumberField(FIELD_NAME_INPUT_INDEX, tableArgCall.getInputIndex());
-        gen.writeFieldName(FIELD_NAME_PARTITION_KEYS);
-        gen.writeArray(tableArgCall.getPartitionKeys(), 0, tableArgCall.getPartitionKeys().length);
-        gen.writeFieldName(FIELD_NAME_ORDER_KEYS);
-        gen.writeArray(tableArgCall.getOrderKeys(), 0, tableArgCall.getOrderKeys().length);
+        if (tableArgCall.getPartitionKeys().length > 0) {
+            gen.writeFieldName(FIELD_NAME_PARTITION_KEYS);
+            gen.writeArray(
+                    tableArgCall.getPartitionKeys(), 0, tableArgCall.getPartitionKeys().length);
+        }
+        if (tableArgCall.getOrderKeys().length > 0) {
+            gen.writeFieldName(FIELD_NAME_ORDER_KEYS);
+            gen.writeArray(tableArgCall.getOrderKeys(), 0, tableArgCall.getOrderKeys().length);
+            if (tableArgCall.getSortOrder().length > 0) {
+                gen.writeFieldName(FIELD_NAME_ORDER_DIRECTIONS);
+                gen.writeStartArray();
+                for (SortOrder order : tableArgCall.getSortOrder()) {
+                    gen.writeString(order.name());
+                }
+                gen.writeEndArray();
+            }
+        }
         serializerProvider.defaultSerializeField(FIELD_NAME_TYPE, tableArgCall.getType(), gen);
         gen.writeEndObject();
     }

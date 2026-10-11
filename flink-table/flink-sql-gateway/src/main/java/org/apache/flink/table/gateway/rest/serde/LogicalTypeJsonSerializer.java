@@ -129,6 +129,8 @@ public final class LogicalTypeJsonSerializer extends StdSerializer<LogicalType> 
             case DOUBLE:
             case DATE:
             case VARIANT:
+            case BITMAP:
+            case UUID:
                 break;
             case CHAR:
                 jsonGenerator.writeNumberField(

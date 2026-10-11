@@ -92,7 +92,7 @@ public class RowDataKeySerializerSnapshot implements TypeSerializerSnapshot<RowD
     private <T> T restore(DataInputView in, ClassLoader classLoader) throws IOException {
         int len = in.readInt();
         byte[] bytes = new byte[len];
-        in.read(bytes);
+        in.readFully(bytes);
         try {
             return InstantiationUtil.deserializeObject(bytes, classLoader); // here
         } catch (ClassNotFoundException e) {
@@ -115,8 +115,10 @@ public class RowDataKeySerializerSnapshot implements TypeSerializerSnapshot<RowD
         RowDataKeySerializerSnapshot old = (RowDataKeySerializerSnapshot) oldSerializerSnapshot;
 
         TypeSerializerSchemaCompatibility<RowData> compatibility =
-                old.restoredRowDataSerializerSnapshot.resolveSchemaCompatibility(
-                        old.serializer.serializer.snapshotConfiguration());
+                serializer
+                        .serializer
+                        .snapshotConfiguration()
+                        .resolveSchemaCompatibility(old.restoredRowDataSerializerSnapshot);
 
         return mapToOuterCompatibility(
                 compatibility,

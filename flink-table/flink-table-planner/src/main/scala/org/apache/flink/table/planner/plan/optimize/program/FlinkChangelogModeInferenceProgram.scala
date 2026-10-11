@@ -18,20 +18,22 @@
 package org.apache.flink.table.planner.plan.optimize.program
 
 import org.apache.flink.legacy.table.sinks.{AppendStreamTableSink, RetractStreamTableSink, StreamTableSink, UpsertStreamTableSink}
-import org.apache.flink.table.api.{TableException, ValidationException}
-import org.apache.flink.table.api.InsertConflictStrategy
+import org.apache.flink.table.api.{TableConfig, TableException, ValidationException}
+import org.apache.flink.table.api.InsertConflictStrategy.ConflictBehavior
 import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.api.config.ExecutionConfigOptions.UpsertMaterialize
 import org.apache.flink.table.connector.ChangelogMode
-import org.apache.flink.table.functions.ChangelogFunction
+import org.apache.flink.table.functions.{BuiltInFunctionDefinition, ChangelogFunction, TableSemantics}
 import org.apache.flink.table.functions.ChangelogFunction.ChangelogContext
 import org.apache.flink.table.planner.calcite.{FlinkTypeFactory, RexTableArgCall}
+import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction
 import org.apache.flink.table.planner.plan.`trait`._
 import org.apache.flink.table.planner.plan.`trait`.DeleteKindTrait.{deleteOnKeyOrNone, fullDeleteOrNone, DELETE_BY_KEY}
 import org.apache.flink.table.planner.plan.`trait`.UpdateKindTrait.{beforeAfterOrNone, onlyAfterOrNone, BEFORE_AND_AFTER, ONLY_UPDATE_AFTER}
 import org.apache.flink.table.planner.plan.metadata.FlinkRelMetadataQuery
 import org.apache.flink.table.planner.plan.nodes.physical.stream._
 import org.apache.flink.table.planner.plan.optimize.ChangelogNormalizeRequirementResolver
+import org.apache.flink.table.planner.plan.schema.TableSourceTable
 import org.apache.flink.table.planner.plan.utils._
 import org.apache.flink.table.planner.plan.utils.RankProcessStrategy.{AppendFastStrategy, RetractStrategy, UpdateFastStrategy}
 import org.apache.flink.table.planner.sinks.DataStreamTableSink
@@ -112,11 +114,36 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
 
     // step4: sanity check and return non-empty root
     if (finalRoot.isEmpty) {
-      val plan = FlinkRelOptUtil.toString(root, withChangelogTraits = true)
-      throw new TableException(
-        "Can't generate a valid execution plan for the given query:\n" + plan)
+      // Reaching here means no node assignment satisfies the changelog requirements. When the root
+      // is a sink that cannot consume the upsert changelog produced by its input, point at the
+      // conflict directly. Any other failure falls back to the full annotated plan.
+      val errorMessage = createTargetedErrorMessage(rootWithModifyKindSet)
+      throw new TableException(errorMessage)
     } else {
       finalRoot.head
+    }
+  }
+
+  private def createTargetedErrorMessage(rootWithModifyKindSet: StreamPhysicalRel) = {
+    if (
+      rootWithModifyKindSet.isInstanceOf[StreamPhysicalSink]
+      && containsUpdates(rootWithModifyKindSet)
+    ) {
+      val conflict = new StringBuilder(describeChangelog(rootWithModifyKindSet))
+      rootWithModifyKindSet.getInputs.foreach(
+        input => conflict.append("\n  +- ").append(describeChangelog(input)))
+      "Can't generate a valid execution plan for the given query.\n\n" +
+        "There is a changelog mismatch between two operators. One produces an upsert " +
+        "changelog (UPDATE_AFTER without UPDATE_BEFORE). The other requires a retract " +
+        "changelog (UPDATE_BEFORE and UPDATE_AFTER), for example a sink without a primary " +
+        "key. In such cases, ensure that the sink is able to digest upserts where the " +
+        "PRIMARY KEY serves as the upsert key, or make the input produce UPDATE_BEFORE.\n\n" +
+        "The conflict is at:\n" + conflict
+    } else {
+      val plan = FlinkRelOptUtil.toString(rootWithModifyKindSet, withChangelogTraits = true)
+      "Can't generate a valid execution plan for the given query because of a changelog mismatch: " +
+        "an operator cannot produce the changelog its consumer requires. Review the changelog " +
+        "modes of the operators in the plan below:\n" + plan
     }
   }
 
@@ -255,7 +282,7 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
         val providedTrait = ModifyKindSetTrait.INSERT_ONLY
         createNewNode(rel, children, providedTrait, requiredTrait, requester)
 
-      case rank: StreamPhysicalRank if RankUtil.isDeduplication(rank) =>
+      case rank: StreamPhysicalRank if RankUtil.isDeduplicationOnTimeAttribute(rank) =>
         val children = visitChildren(rel, ModifyKindSetTrait.ALL_CHANGES)
         val tableConfig = unwrapTableConfig(rank)
 
@@ -277,7 +304,7 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
 
         createNewNode(rel, children, providedTrait, requiredTrait, requester)
 
-      case rank: StreamPhysicalRank if !RankUtil.isDeduplication(rank) =>
+      case rank: StreamPhysicalRank =>
         // Rank supports consuming all changes
         val children = visitChildren(rel, ModifyKindSetTrait.ALL_CHANGES)
         createNewNode(rel, children, ModifyKindSetTrait.ALL_CHANGES, requiredTrait, requester)
@@ -335,9 +362,27 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
         val providedTrait = new ModifyKindSetTrait(builder.build())
         createNewNode(over, children, providedTrait, requiredTrait, requester)
 
-      case _: StreamPhysicalTemporalSort | _: StreamPhysicalIntervalJoin |
-          _: StreamPhysicalPythonOverAggregate =>
-        // TemporalSort, IntervalJoin only support consuming insert-only
+      case intervalJoin: StreamPhysicalIntervalJoin =>
+        // The interval join consumes insert-only input. Without the EARLY_FIRE hint it also only
+        // produces insert-only changes; an early-firing outer join additionally produces update
+        // changes, because it speculatively emits a padded row and later corrects it on a match.
+        val children = visitChildren(intervalJoin, ModifyKindSetTrait.INSERT_ONLY)
+        val builder = ModifyKindSet.newBuilder().addContainedKind(ModifyKind.INSERT)
+        if (intervalJoin.produceEarlyFireUpdates) {
+          builder.addContainedKind(ModifyKind.UPDATE)
+        }
+        val providedTrait = new ModifyKindSetTrait(builder.build())
+        if (intervalJoin.produceEarlyFireUpdates && !providedTrait.satisfies(requiredTrait)) {
+          throw new TableException(
+            s"$requester doesn't support consuming update changes, but the EARLY_FIRE hint " +
+              "makes this outer interval join produce update changes (a padded row is emitted " +
+              "speculatively and later corrected on a match). Remove the EARLY_FIRE hint, or " +
+              "write into a downstream/sink that accepts update changes.")
+        }
+        createNewNode(intervalJoin, children, providedTrait, requiredTrait, requester)
+
+      case _: StreamPhysicalTemporalSort | _: StreamPhysicalPythonOverAggregate =>
+        // TemporalSort and PythonOverAggregate only support consuming insert-only
         // and producing insert-only changes
         val children = visitChildren(rel, ModifyKindSetTrait.INSERT_ONLY)
         createNewNode(rel, children, ModifyKindSetTrait.INSERT_ONLY, requiredTrait, requester)
@@ -379,6 +424,27 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
         // forward left input changes
         val leftTrait = children.head.getTraitSet.getTrait(ModifyKindSetTraitDef.INSTANCE)
         createNewNode(temporalJoin, children, leftTrait, requiredTrait, requester)
+
+      case lateralSnapshotJoin: StreamPhysicalLateralSnapshotJoin =>
+        // LATERAL SNAPSHOT requires append-only on the probe (left) side and supports all
+        // changelog modes on the build (right) side. Output is append-only. Visit the children
+        // individually so a rejected probe input names the probe side, not the whole operator.
+        val leftChild = visitChild(
+          lateralSnapshotJoin,
+          0,
+          ModifyKindSetTrait.INSERT_ONLY,
+          "The probe (left) input of LATERAL SNAPSHOT join")
+        val rightChild = visitChild(
+          lateralSnapshotJoin,
+          1,
+          ModifyKindSetTrait.ALL_CHANGES,
+          getNodeName(lateralSnapshotJoin))
+        createNewNode(
+          lateralSnapshotJoin,
+          List(leftChild, rightChild),
+          ModifyKindSetTrait.INSERT_ONLY,
+          requiredTrait,
+          requester)
 
       case multiJoin: StreamPhysicalMultiJoin =>
         // multi-join supports all changes in input
@@ -713,6 +779,23 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
               None
           }
 
+        case lateralSnapshotJoin: StreamPhysicalLateralSnapshotJoin =>
+          // Probe (left) is required to be append-only.
+          // Build (right) side requires BEFORE_AND_AFTER for updates.
+          val left = lateralSnapshotJoin.getLeft.asInstanceOf[StreamPhysicalRel]
+          val right = lateralSnapshotJoin.getRight.asInstanceOf[StreamPhysicalRel]
+          val newLeftOption = this.visit(left, UpdateKindTrait.NONE)
+          val rightInputModifyKindSet = getModifyKindSet(right)
+          val newRightOption = this.visit(right, beforeAfterOrNone(rightInputModifyKindSet))
+          (newLeftOption, newRightOption) match {
+            case (Some(newLeft), Some(newRight)) =>
+              createNewNode(
+                lateralSnapshotJoin,
+                Some(List(newLeft, newRight)),
+                UpdateKindTrait.NONE)
+            case _ => None
+          }
+
         // if the condition is applied on the upsert key, we can emit whatever the requiredTrait
         // is, because we will filter all records based on the condition that applies to that key
         case calc: StreamPhysicalCalcBase =>
@@ -832,7 +915,7 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
           // input traits, partition keys, and upsert keys
           val inputArgs = StreamPhysicalProcessTableFunction
             .getProvidedInputArgs(process.getCall)
-          val children = process.getInputs
+          val childOpts = process.getInputs
             .map(_.asInstanceOf[StreamPhysicalRel])
             .zipWithIndex
             .map {
@@ -851,10 +934,10 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
                       !modifyKindSet.isInsertOnly && tableArg.is(
                         StaticArgumentTrait.SUPPORT_UPDATES)
                     ) {
-                      if (isPtfUpsert(tableArg, tableArgCall, child)) {
-                        UpdateKindTrait.ONLY_UPDATE_AFTER
-                      } else {
+                      if (ptfRequiresUpdateBefore(tableArg, tableArgCall, child)) {
                         UpdateKindTrait.BEFORE_AND_AFTER
+                      } else {
+                        UpdateKindTrait.ONLY_UPDATE_AFTER
                       }
                     } else {
                       UpdateKindTrait.NONE
@@ -863,15 +946,20 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
                 }
             }
             .toList
-            .flatten
-          // Query PTF for upsert vs. retract
-          val providedUpdateTrait = queryPtfChangelogMode(
-            process,
-            children,
-            toChangelogMode(process, Some(requiredUpdateTrait), None),
-            UpdateKindTrait.fromChangelogMode,
-            UpdateKindTrait.NONE)
-          createNewNode(rel, Some(children), providedUpdateTrait)
+
+          if (childOpts.exists(_.isEmpty)) {
+            None
+          } else {
+            val children = childOpts.flatten
+            // Query PTF for upsert vs. retract
+            val providedUpdateTrait = queryPtfChangelogMode(
+              process,
+              children,
+              toChangelogMode(process, Some(requiredUpdateTrait), None),
+              UpdateKindTrait.fromChangelogMode,
+              UpdateKindTrait.NONE)
+            createNewNode(rel, Some(children), providedUpdateTrait)
+          }
 
         case multiJoin: StreamPhysicalMultiJoin =>
           val onlyAfterByParent = requiredUpdateTrait.updateKind == UpdateKind.ONLY_UPDATE_AFTER
@@ -997,8 +1085,9 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
 
     /**
      * Infer sink required traits by the sink node and its input. Sink required traits is based on
-     * the sink node's changelog mode, the only exception is when sink's pk(s) not exactly the same
-     * as the changeLogUpsertKeys and sink' changelog mode is ONLY_UPDATE_AFTER.
+     * the sink node's changelog mode, the only exception is when sink's pk(s) are not satisfied by
+     * the input's upsert keys (considering immutable columns) and sink's changelog mode is
+     * ONLY_UPDATE_AFTER.
      */
     private def inferSinkRequiredTraits(sink: StreamPhysicalSink): Seq[UpdateKindTrait] = {
       val childModifyKindSet = getModifyKindSet(sink.getInput)
@@ -1008,23 +1097,9 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
         sink.tableSink.getChangelogMode(childModifyKindSet.toDefaultChangelogMode))
 
       val sinkRequiredTraits = if (sinkTrait.equals(ONLY_UPDATE_AFTER)) {
-        // if sink's pk(s) are not exactly match input changeLogUpsertKeys then it will fallback
-        // to beforeAndAfter mode for the correctness
-        var requireBeforeAndAfter: Boolean = false
-        val sinkDefinedPks = sink.contextResolvedTable.getResolvedSchema.getPrimaryKeyIndexes
-
-        if (sinkDefinedPks.nonEmpty) {
-          val sinkPks = ImmutableBitSet.of(sinkDefinedPks: _*)
-          val fmq = FlinkRelMetadataQuery.reuseOrCreate(sink.getCluster.getMetadataQuery)
-          val changeLogUpsertKeys = fmq.getUpsertKeys(sink.getInput)
-          // if input is UA only, primary key != upsert key (upsert key can be null) we should
-          // fallback to beforeAndAfter.
-          // Notice: even sink pk(s) contains input upsert key we cannot optimize to UA only,
-          // this differs from batch job's unique key inference
-          if (changeLogUpsertKeys == null || !changeLogUpsertKeys.exists(_.equals(sinkPks))) {
-            requireBeforeAndAfter = true
-          }
-        }
+        // if sink's pk(s) are not satisfied by input upsert keys (considering immutable columns),
+        // fallback to beforeAndAfter mode for correctness
+        val requireBeforeAndAfter = !canUpsertKeysWithImmutableColsSatisfyPk(sink)
         if (requireBeforeAndAfter) {
           Seq(beforeAndAfter)
         } else {
@@ -1039,10 +1114,63 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
     }
 
     /**
+     * Check whether input's upsert keys (together with immutable columns) can satisfy sink's
+     * primary keys.
+     *
+     * <p>A sink pk is considered "satisfied" when there exists an upsert key `uk` such that:
+     *   - `uk` is a subset of sink pk (no extra columns that could cause key collision)
+     *   - the remaining sink pk columns not in `uk` are all immutable (immutable columns never
+     *     change, so they effectively act as part of the key for upsert semantics)
+     *
+     * <p>Example: sink pk = {a, b, c}, uk = {a, b}, immutable columns = {a, b, c, d}.
+     *   - Step 1: uk {a, b} ⊆ sink pk {a, b, c} → true
+     *   - Step 2: sink pk \ uk = {c}, immutable columns contain {c} → true
+     *   - Result: satisfied
+     *
+     * <p>Notice: even if sink pk is a subset of the upsert key, the pk is NOT considered satisfied
+     * when the upsert key has columns outside sink pk. This differs from batch job's unique key
+     * inference.
+     *
+     * <p>A sink without a primary key is satisfied whenever the input carries a real (non-empty)
+     * upsert key; an empty candidate ("at most one row") never counts, even alongside a real one.
+     */
+    private def canUpsertKeysWithImmutableColsSatisfyPk(sink: StreamPhysicalSink): Boolean = {
+      val sinkDefinedPks = sink.contextResolvedTable.getResolvedSchema.getPrimaryKeyIndexes
+      val fmq = FlinkRelMetadataQuery.reuseOrCreate(sink.getCluster.getMetadataQuery)
+      val changeLogUpsertKeys = fmq.getUpsertKeys(sink.getInput)
+      if (sinkDefinedPks.isEmpty) {
+        // A keyless sink can only stay upsert when the input has a real, column-based upsert
+        // key. An empty candidate means "at most one row" (e.g. a global aggregate), not columns
+        // to match on - UpsertKeyUtil.getSmallestKey would otherwise prefer it over a real one.
+        return changeLogUpsertKeys != null && changeLogUpsertKeys.nonEmpty &&
+          !changeLogUpsertKeys.exists(_.isEmpty)
+      }
+      val sinkPks = ImmutableBitSet.of(sinkDefinedPks: _*)
+      // if upsert key is null, pk cannot be satisfied, should fall back to beforeAndAfter
+      if (changeLogUpsertKeys == null) {
+        return false
+      }
+      val immutableCols =
+        Option.apply(fmq.getImmutableColumns(sink.getInput)).getOrElse(ImmutableBitSet.of())
+
+      // when input immutableCols is empty, this degrades to uk.equals(sinkPks)
+      changeLogUpsertKeys.exists(
+        uk => {
+          // 1. uk ⊆ sinkPks
+          val isSinkPkContainsUk = sinkPks.contains(uk)
+          // 2. (sinkPks \ uk) ⊆ immutableCols
+          val extraSinkPkCols = sinkPks.except(uk)
+          val areExtraSinkPkColsImmutable = immutableCols.contains(extraSinkPkCols)
+          isSinkPkContainsUk && areExtraSinkPkColsImmutable
+        })
+    }
+
+    /**
      * Analyze whether to enable upsertMaterialize or not. In these case will return true:
      *   1. when `TABLE_EXEC_SINK_UPSERT_MATERIALIZE` set to FORCE and sink's primary key nonempty.
      *      2. when `TABLE_EXEC_SINK_UPSERT_MATERIALIZE` set to AUTO and sink's primary key doesn't
-     *      contain upsertKeys of the input update stream.
+     *      contain upsertKeys of the input update stream, unless the input is insert only and the
+     *      effective conflict strategy is DEDUPLICATE.
      *
      * Also validates that ON CONFLICT clause is specified when upsert key differs from primary key.
      */
@@ -1072,56 +1200,95 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
         }
       }
 
+      // Validate that sources have watermarks when using ERROR or NOTHING strategy
+      if (
+        sink.conflictStrategy != null &&
+        (sink.conflictStrategy.getBehavior == ConflictBehavior.ERROR ||
+          sink.conflictStrategy.getBehavior == ConflictBehavior.NOTHING)
+      ) {
+        validateSourcesHaveWatermarks(sink)
+      }
+
       tableConfig.get(ExecutionConfigOptions.TABLE_EXEC_SINK_UPSERT_MATERIALIZE) match {
         case UpsertMaterialize.FORCE => primaryKeys.nonEmpty && !sinkIsRetract
         case UpsertMaterialize.NONE => false
         case UpsertMaterialize.AUTO =>
-          if (
-            (inputIsAppend && InsertConflictStrategy
-              .deduplicate()
-              .equals(sink.conflictStrategy)) || sinkIsAppend || sinkIsRetract
-          ) {
+          // if the sink is not an UPSERT sink (has no PK, or is an APPEND or RETRACT sink)
+          // we don't need to materialize results
+          if (primaryKeys.isEmpty || sinkIsAppend || sinkIsRetract) {
             return false
           }
-          if (primaryKeys.isEmpty) {
-            return false
-          }
-          val pks = ImmutableBitSet.of(primaryKeys: _*)
-          val fmq = FlinkRelMetadataQuery.reuseOrCreate(sink.getCluster.getMetadataQuery)
-          val changeLogUpsertKeys = fmq.getUpsertKeys(sink.getInput)
-          // if input has updates and primary key != upsert key (upsert key can be null) we should
-          // enable upsertMaterialize. An optimize is: do not enable upsertMaterialize when sink
-          // pk(s) contains input changeLogUpsertKeys
-          val upsertKeyDiffersFromPk =
-            changeLogUpsertKeys == null || !changeLogUpsertKeys.exists(pks.contains)
 
-          // Validate that ON CONFLICT is specified when upsert key differs from primary key
-          val requireOnConflict =
-            tableConfig.get(ExecutionConfigOptions.TABLE_EXEC_SINK_REQUIRE_ON_CONFLICT)
-          if (requireOnConflict && upsertKeyDiffersFromPk && sink.conflictStrategy == null) {
-            val fieldNames = sink.contextResolvedTable.getResolvedSchema.getColumnNames
-            val pkNames = primaryKeys.map(fieldNames.get(_)).mkString("[", ", ", "]")
-            val upsertKeyNames = if (changeLogUpsertKeys == null) {
-              "none"
-            } else {
-              changeLogUpsertKeys
-                .map(uk => uk.toArray.map(fieldNames.get(_)).mkString("[", ", ", "]"))
-                .mkString(", ")
-            }
-            throw new ValidationException(
-              "The query has an upsert key that differs from the primary key of the sink table " +
-                s"'${sink.contextResolvedTable.getIdentifier.asSummaryString}'. " +
-                s"Primary key: $pkNames, upsert key: $upsertKeyNames. " +
-                "This can lead to non-deterministic results when multiple records with different " +
-                "upsert keys map to the same primary key. " +
-                "Please specify an ON CONFLICT clause to define how conflicts should be handled: " +
-                "ON CONFLICT DO DEDUPLICATE (update to the latest record, state intensive, since we" +
-                " need to keep the entire history), or " +
-                "ON CONFLICT DO ERROR (fail on conflict), or " +
-                "ON CONFLICT DO NOTHING (keep first record).")
+          // if input has updates and primary key != upsert key  we should enable upsertMaterialize.
+          //
+          // An optimize is: do not enable upsertMaterialize when sink pk(s) contains input
+          // changeLogUpsertKeys
+          val upsertKeyDiffersFromPk = !sink.primaryKeysContainsUpsertKey
+          validateOnConflictSpecifiedIfRequired(sink, tableConfig, upsertKeyDiffersFromPk)
+
+          // Once enforcement above has passed, an absent clause leaves DEDUPLICATE as the strategy.
+          val deduplicatesOnConflict =
+            sink.conflictStrategy == null || sink.isDeduplicateConflictStrategy
+
+          // For a DEDUPLICATE strategy and INSERT only input, we simply let the inserts be handled
+          // as UPDATE_AFTER and overwrite previous value
+          if (deduplicatesOnConflict && inputIsAppend) {
+            return false
           }
 
           upsertKeyDiffersFromPk
+      }
+    }
+
+    private def validateOnConflictSpecifiedIfRequired(
+        sink: StreamPhysicalSink,
+        tableConfig: TableConfig,
+        upsertKeyDiffersFromPk: Boolean): Unit = {
+      val requireOnConflict =
+        tableConfig.get(ExecutionConfigOptions.TABLE_EXEC_SINK_REQUIRE_ON_CONFLICT)
+      if (requireOnConflict && upsertKeyDiffersFromPk && sink.conflictStrategy == null) {
+        val pkNames = sink.getPrimaryKeyNames
+        val upsertKeyNames = sink.getUpsertKeyNames
+        throw new ValidationException(
+          "The query has an upsert key that differs from the primary key of the sink table " +
+            s"'${sink.contextResolvedTable.getIdentifier.asSummaryString}'. " +
+            s"Primary key: $pkNames, upsert key: $upsertKeyNames. " +
+            "This can lead to non-deterministic results when multiple records with different " +
+            "upsert keys map to the same primary key. " +
+            "Please specify an ON CONFLICT clause to define how conflicts should be handled: " +
+            "ON CONFLICT DO DEDUPLICATE (update to the latest record, state intensive, since we" +
+            " need to keep the entire history), or " +
+            "ON CONFLICT DO ERROR (fail on conflict), or " +
+            "ON CONFLICT DO NOTHING (keep first record).")
+      }
+    }
+
+    private def validateSourcesHaveWatermarks(sink: StreamPhysicalSink): Unit = {
+      val sourcesWithoutWatermarks = new java.util.ArrayList[String]()
+      collectSourcesWithoutWatermarks(sink.getInput, sourcesWithoutWatermarks)
+      if (!sourcesWithoutWatermarks.isEmpty) {
+        throw new ValidationException(
+          s"ON CONFLICT DO ${sink.conflictStrategy.getBehavior} requires all source " +
+            s"tables to define watermarks, but the following source(s) do not: " +
+            s"${sourcesWithoutWatermarks.mkString(", ")}. " +
+            s"Please add a WATERMARK declaration to these tables.")
+      }
+    }
+
+    private def collectSourcesWithoutWatermarks(
+        rel: RelNode,
+        result: java.util.List[String]): Unit = {
+      rel match {
+        case ts: StreamPhysicalTableSourceScan =>
+          val table = ts.getTable.unwrap(classOf[TableSourceTable])
+          if (
+            table != null &&
+            table.contextResolvedTable.getResolvedSchema.getWatermarkSpecs.isEmpty
+          ) {
+            result.add(table.contextResolvedTable.getIdentifier.asSummaryString())
+          }
+        case _ =>
+          rel.getInputs.forEach(input => collectSourcesWithoutWatermarks(input, result))
       }
     }
   }
@@ -1172,13 +1339,14 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
             _: StreamPhysicalPythonGroupTableAggregate | _: StreamPhysicalGroupWindowAggregateBase |
             _: StreamPhysicalWindowAggregate | _: StreamPhysicalSort | _: StreamPhysicalRank |
             _: StreamPhysicalSortLimit | _: StreamPhysicalTemporalJoin |
-            _: StreamPhysicalCorrelateBase | _: StreamPhysicalLookupJoin |
-            _: StreamPhysicalWatermarkAssigner | _: StreamPhysicalWindowTableFunction |
-            _: StreamPhysicalWindowRank | _: StreamPhysicalWindowDeduplicate |
-            _: StreamPhysicalTemporalSort | _: StreamPhysicalMatch |
-            _: StreamPhysicalOverAggregate | _: StreamPhysicalIntervalJoin |
-            _: StreamPhysicalPythonOverAggregate | _: StreamPhysicalWindowJoin |
-            _: StreamPhysicalMLPredictTableFunction | _: StreamPhysicalVectorSearchTableFunction =>
+            _: StreamPhysicalLateralSnapshotJoin | _: StreamPhysicalCorrelateBase |
+            _: StreamPhysicalLookupJoin | _: StreamPhysicalWatermarkAssigner |
+            _: StreamPhysicalWindowTableFunction | _: StreamPhysicalWindowRank |
+            _: StreamPhysicalWindowDeduplicate | _: StreamPhysicalTemporalSort |
+            _: StreamPhysicalMatch | _: StreamPhysicalOverAggregate |
+            _: StreamPhysicalIntervalJoin | _: StreamPhysicalPythonOverAggregate |
+            _: StreamPhysicalWindowJoin | _: StreamPhysicalMLPredictTableFunction |
+            _: StreamPhysicalVectorSearchTableFunction =>
           // if not explicitly supported, all operators require full deletes if there are updates
           val children = rel.getInputs.map {
             case child: StreamPhysicalRel =>
@@ -1209,7 +1377,7 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
                     extractPtfTableArgComponents(process, child, inputArg)
                   if (
                     tableArg.is(StaticArgumentTrait.SUPPORT_UPDATES)
-                    && isPtfUpsert(tableArg, tableArgCall, child)
+                    && !ptfRequiresUpdateBefore(tableArg, tableArgCall, child)
                     && !tableArg.is(StaticArgumentTrait.REQUIRE_FULL_DELETE)
                   ) {
                     this
@@ -1265,14 +1433,29 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
 
         // if the condition is applied on the upsert key, we can emit whatever the requiredTrait
         // is, because we will filter all records based on the condition that applies to that key
-        case calc: StreamPhysicalCalcBase =>
+        case calc: StreamPhysicalCalc =>
           if (
             requiredTrait == DeleteKindTrait.DELETE_BY_KEY &&
-            isNonUpsertKeyCondition(calc)
+            (isNonUpsertKeyCondition(calc) || !hasOutputUpsertKey(calc))
           ) {
             None
           } else {
             // otherwise, forward DeleteKind requirement
+            visitChildren(rel, requiredTrait) match {
+              case None => None
+              case Some(children) =>
+                val childTrait = children.head.getTraitSet.getTrait(DeleteKindTraitDef.INSTANCE)
+                createNewNode(rel, Some(children), childTrait)
+            }
+          }
+
+        // Unlike StreamPhysicalCalc, other Calc nodes do not skip evaluating non-key expressions
+        // for a delete-by-key tombstone. We are conservative by default and never forward
+        // DELETE_BY_KEY.
+        case _: StreamPhysicalCalcBase =>
+          if (requiredTrait == DeleteKindTrait.DELETE_BY_KEY) {
+            None
+          } else {
             visitChildren(rel, requiredTrait) match {
               case None => None
               case Some(children) =>
@@ -1514,6 +1697,19 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
     }
   }
 
+  /**
+   * Whether this calc's own output still has an upsert key after its projection. A DELETE_BY_KEY
+   * tombstone passed through this calc must still carry a key in its output, otherwise nothing
+   * downstream would know what to delete.
+   *
+   * This method is an extra safety net, in case downstream consumers don't require an upsert key.
+   */
+  private def hasOutputUpsertKey(calc: StreamPhysicalCalcBase): Boolean = {
+    val fmq = FlinkRelMetadataQuery.reuseOrCreate(calc.getCluster.getMetadataQuery)
+    val upsertKeys = fmq.getUpsertKeys(calc)
+    upsertKeys != null && upsertKeys.exists(!_.isEmpty)
+  }
+
   private def isNonUpsertKeyCondition(calc: StreamPhysicalCalcBase): Boolean = {
     val program = calc.getProgram
     if (program.getCondition == null) {
@@ -1527,16 +1723,40 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
       // there are no upsert keys, so all columns are non-primary key columns
       true
     } else {
-      val upsertKey = upsertKeys.head
-      RexNodeExtractor
-        .extractRefInputFields(JavaScalaConversionUtil.toJava(Seq(condition)))
-        .exists(i => !upsertKey.get(i))
+      val inputRefIndices =
+        RexNodeExtractor
+          .extractRefInputFields(JavaScalaConversionUtil.toJava(Seq(condition)))
+      val inputRefSet = ImmutableBitSet.of(inputRefIndices: _*)
+      !upsertKeys.stream().anyMatch(uk => uk.contains(inputRefSet))
     }
   }
 
   private def getModifyKindSet(node: RelNode): ModifyKindSet = {
     val modifyKindSetTrait = node.getTraitSet.getTrait(ModifyKindSetTraitDef.INSTANCE)
     modifyKindSetTrait.modifyKindSet
+  }
+
+  /** Whether the node or any node in its input subtree produces UPDATE changes. */
+  private def containsUpdates(rel: RelNode): Boolean =
+    getModifyKindSet(rel).contains(ModifyKind.UPDATE) ||
+      rel.getInputs.exists(input => containsUpdates(input))
+
+  /**
+   * Renders a node's type and changelog mode, for example
+   * "Sink(expectedChangelogMode=[I,UB,UA,D])".
+   */
+  private def describeChangelog(rel: RelNode): String = rel match {
+    case sink: StreamPhysicalSink =>
+      // A sink's own changelog mode is empty; show the mode it expects from its input instead.
+      val expected =
+        sink.tableSink.getChangelogMode(getModifyKindSet(sink.getInput).toDefaultChangelogMode)
+      s"Sink(expectedChangelogMode=[${ChangelogPlanUtils.stringifyChangelogMode(Some(expected))}])"
+    case streamRel: StreamPhysicalRel =>
+      val typeName = rel.getRelTypeName.stripPrefix("StreamPhysical")
+      val mode =
+        ChangelogPlanUtils.stringifyChangelogMode(ChangelogPlanUtils.getChangelogMode(streamRel))
+      s"$typeName(changelogMode=[$mode])"
+    case _ => rel.getRelTypeName
   }
 
   private def getDeleteKind(node: RelNode): DeleteKind = {
@@ -1576,21 +1796,20 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
     modeBuilder.build()
   }
 
-  private def isPtfUpsert(
+  /**
+   * Whether the PTF requires UPDATE_BEFORE from its input. Returns true unless partition keys cover
+   * the upsert keys (co-located) and the argument doesn't explicitly require UPDATE_BEFORE.
+   */
+  private def ptfRequiresUpdateBefore(
       tableArg: StaticArgument,
       tableArgCall: RexTableArgCall,
       input: StreamPhysicalRel): Boolean = {
     val partitionKeys = ImmutableBitSet.of(tableArgCall.getPartitionKeys: _*)
     val fmq = FlinkRelMetadataQuery.reuseOrCreate(input.getCluster.getMetadataQuery)
     val upsertKeys = fmq.getUpsertKeys(input)
-    if (
-      upsertKeys == null || partitionKeys.isEmpty || !upsertKeys.contains(partitionKeys)
-      || tableArg.is(StaticArgumentTrait.REQUIRE_UPDATE_BEFORE)
-    ) {
-      false
-    } else {
-      true
-    }
+    upsertKeys == null || partitionKeys.isEmpty ||
+    !upsertKeys.contains(partitionKeys) ||
+    tableArg.is(StaticArgumentTrait.REQUIRE_UPDATE_BEFORE)
   }
 
   private def extractPtfTableArgComponents(
@@ -1610,14 +1829,12 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
       outputChangelogMode: ChangelogMode): ChangelogContext = {
     val udfCall = StreamPhysicalProcessTableFunction.toUdfCall(process.getCall)
     val inputTimeColumns = StreamPhysicalProcessTableFunction.toInputTimeColumns(process.getCall)
-    val callContext = StreamPhysicalProcessTableFunction.toCallContext(
-      udfCall,
-      inputTimeColumns,
-      inputChangelogModes,
-      outputChangelogMode)
+    val function = udfCall.getOperator.asInstanceOf[BridgingSqlFunction]
+    val callContext =
+      function.toCallContext(udfCall, inputTimeColumns, inputChangelogModes, outputChangelogMode)
 
-    // Expose a simplified context to let users focus on important characteristics.
-    // If necessary, we can expose the full CallContext in the future.
+    // Expose a simplified context focused on changelog-relevant inputs: changelog modes,
+    // resolved literal arguments, and table semantics (e.g., partition-by columns).
     new ChangelogContext {
       override def getTableChangelogMode(pos: Int): ChangelogMode = {
         val tableSemantics = callContext.getTableSemantics(pos).orElse(null)
@@ -1629,6 +1846,14 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
 
       override def getRequiredChangelogMode: ChangelogMode = {
         callContext.getOutputChangelogMode.orElse(null)
+      }
+
+      override def getArgumentValue[T](pos: Int, clazz: Class[T]): java.util.Optional[T] = {
+        callContext.getArgumentValue(pos, clazz)
+      }
+
+      override def getTableSemantics(pos: Int): java.util.Optional[TableSemantics] = {
+        callContext.getTableSemantics(pos)
       }
     }
   }
@@ -1647,16 +1872,36 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
         val changelogContext =
           toPtfChangelogContext(process, inputChangelogModes, requiredChangelogMode)
         val changelogMode = changelogFunction.getChangelogMode(changelogContext)
-        if (!changelogMode.containsOnly(RowKind.INSERT)) {
-          verifyPtfTableArgsForUpdates(call)
-        }
+        verifyPtfTableArgsForUpdates(call, changelogMode)
+        toTraitSet(changelogMode)
+      case builtIn: BuiltInFunctionDefinition if builtIn.getChangelogModeStrategy.isPresent =>
+        val inputChangelogModes = children.map(toChangelogMode(_, None, None))
+        val changelogContext =
+          toPtfChangelogContext(process, inputChangelogModes, requiredChangelogMode)
+        val changelogMode =
+          builtIn.getChangelogModeStrategy.get().inferChangelogMode(changelogContext)
+        verifyPtfTableArgsForUpdates(call, changelogMode)
         toTraitSet(changelogMode)
       case _ =>
         defaultTraitSet
     }
   }
 
-  private def verifyPtfTableArgsForUpdates(call: RexCall): Unit = {
+  /**
+   * Verifies that PTFs with upsert output (without UPDATE_BEFORE) use set semantics.
+   *
+   * Retract mode (with UPDATE_BEFORE) is self-describing — each update carries either the old and
+   * new value, so downstream can process it without a key. Row semantics is safe.
+   *
+   * Upsert mode (without UPDATE_BEFORE) requires a key to look up previous values, so set semantics
+   * with PARTITION BY is required.
+   */
+  private def verifyPtfTableArgsForUpdates(call: RexCall, changelogMode: ChangelogMode): Unit = {
+    if (
+      changelogMode.containsOnly(RowKind.INSERT) || changelogMode.contains(RowKind.UPDATE_BEFORE)
+    ) {
+      return
+    }
     StreamPhysicalProcessTableFunction
       .getProvidedInputArgs(call)
       .map(_.e)
@@ -1664,7 +1909,7 @@ class FlinkChangelogModeInferenceProgram extends FlinkOptimizeProgram[StreamOpti
         tableArg =>
           if (tableArg.is(StaticArgumentTrait.ROW_SEMANTIC_TABLE)) {
             throw new ValidationException(
-              s"PTFs that take table arguments with row semantics don't support updating output. " +
+              s"PTFs that take table arguments with row semantics don't support upsert output. " +
                 s"Table argument '${tableArg.getName}' of function '${call.getOperator.toString}' " +
                 s"must use set semantics.")
           }

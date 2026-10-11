@@ -60,6 +60,11 @@ class AsyncScalarFunctionOperation(Operation, AsyncOperationMixin):
             operation_utils.extract_user_defined_function(
                 serialized_fn.udfs[0], one_arg_optimization=False)
 
+        # Mirror PythonScalarFunctionOperator.createInputCoderInfoDescriptor:
+        # Java picks FlattenRowCoder unless some UDF takes a row as input.
+        self._input_is_flatten_row = not any(
+            udf.takes_row_as_input for udf in serialized_fn.udfs)
+
         # Create the eval function
         self._eval_func = eval('lambda value: %s' % scalar_function, variable_dict)
 
@@ -74,6 +79,18 @@ class AsyncScalarFunctionOperation(Operation, AsyncOperationMixin):
 
         # Job parameters
         self._job_parameters = {p.key: p.value for p in serialized_fn.job_parameters}
+        if serialized_fn.HasField('runtime_context'):
+            rc = serialized_fn.runtime_context
+            self._runtime_context = {
+                'task_name': rc.task_name,
+                'task_name_with_subtasks': rc.task_name_with_subtasks,
+                'number_of_parallel_subtasks': rc.number_of_parallel_subtasks,
+                'max_number_of_parallel_subtasks': rc.max_number_of_parallel_subtasks,
+                'index_of_this_subtask': rc.index_of_this_subtask,
+                'attempt_number': rc.attempt_number,
+            }
+        else:
+            self._runtime_context = {}
 
     def set_output_processor(self, output_processor):
         """Set the output processor for emitting results.
@@ -86,8 +103,9 @@ class AsyncScalarFunctionOperation(Operation, AsyncOperationMixin):
         # Open user defined functions
         for user_defined_func in self.user_defined_funcs:
             if hasattr(user_defined_func, 'open'):
-                user_defined_func.open(
-                    FunctionContext(self.base_metric_group, self._job_parameters))
+                user_defined_func.open(FunctionContext(
+                    self.base_metric_group, self._job_parameters,
+                    **self._runtime_context))
 
         # Start emitter thread to collect async results
         self._emitter = Emitter(self._mark_exception, self._output_processor, self._queue)
@@ -126,6 +144,12 @@ class AsyncScalarFunctionOperation(Operation, AsyncOperationMixin):
         allowing multiple operations to be in-flight simultaneously.
         """
         self._raise_exception_if_exists()
+
+        # The Cython FlattenRowCoderImpl returns a reused list whose slots are
+        # overwritten by the next decode, so we must snapshot the row before
+        # the async closure can capture it.
+        if self._input_is_flatten_row:
+            value = list(value)
 
         entry = self._queue.put(None, 0, 0, value)
 

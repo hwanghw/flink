@@ -87,7 +87,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testEmptyInputAggregation(): Unit = {
-    val data = new mutable.MutableList[(Int, Int)]
+    val data = new mutable.ListBuffer[(Int, Int)]
     data.+=((1, 1))
     data.+=((2, 2))
     data.+=((3, 3))
@@ -106,7 +106,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testMaxAggRetractWithCondition(): Unit = {
-    val data = new mutable.MutableList[(Int, Int)]
+    val data = new mutable.ListBuffer[(Int, Int)]
     data.+=((1, 10))
     data.+=((1, 10))
     data.+=((2, 5))
@@ -131,7 +131,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testMinAggRetractWithCondition(): Unit = {
-    val data = new mutable.MutableList[(Int, Int)]
+    val data = new mutable.ListBuffer[(Int, Int)]
     data.+=((1, 5))
     data.+=((2, 6))
     data.+=((1, 5))
@@ -155,7 +155,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testShufflePojo(): Unit = {
-    val data = new mutable.MutableList[(Int, Int)]
+    val data = new mutable.ListBuffer[(Int, Int)]
     data.+=((1, 1))
     data.+=((2, 2))
     data.+=((3, 3))
@@ -176,7 +176,7 @@ class AggregateITCase(
   @Disabled("[FLINK-12215] Fix this when introduce SqlProcessFunction.")
   @TestTemplate
   def testEmptyInputAggregationWithoutGroupBy(): Unit = {
-    val data = new mutable.MutableList[(Int, Int)]
+    val data = new mutable.ListBuffer[(Int, Int)]
     data.+=((1, 1))
     data.+=((2, 2))
     data.+=((3, 3))
@@ -195,7 +195,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testAggregationWithoutWatermark(): Unit = {
-    val data = new mutable.MutableList[(Int, Int)]
+    val data = new mutable.ListBuffer[(Int, Int)]
     data.+=((1, 1))
     data.+=((2, 2))
     data.+=((3, 3))
@@ -297,7 +297,7 @@ class AggregateITCase(
 
     val chars = List("A", "B", null, "D", "E", "F", "H", null, null, "K", "L", "L", "N", "O", "P")
 
-    val data = new mutable.MutableList[Row]
+    val data = new mutable.ListBuffer[Row]
 
     for (i <- ids.indices) {
       val v = integers(i)
@@ -359,7 +359,7 @@ class AggregateITCase(
   @TestTemplate
   def testDistinctWithRetract(): Unit = {
     // this case covers LongArrayValueWithRetractionGenerator and LongValueWithRetractionGenerator
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((1, 1L, "A"))
     data.+=((1, 1L, "A"))
@@ -411,7 +411,7 @@ class AggregateITCase(
   @TestTemplate
   def testDistinctAggregateMoreThan64(): Unit = {
     // this case is used to cover DistinctAggCodeGen#LongArrayValueWithoutRetractionGenerator
-    val data = new mutable.MutableList[(Int, Int)]
+    val data = new mutable.ListBuffer[(Int, Int)]
     for (i <- 0 until 100) {
       for (j <- 0 until 100 - i) {
         data.+=((j, i))
@@ -442,7 +442,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testDistinctAggWithNullValues(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((2, 2L, "B"))
     data.+=((3, 2L, "B"))
@@ -489,7 +489,7 @@ class AggregateITCase(
     var expected = List("1.03520274,12345.03520274865400000000,12.3456789012345670000000")
     assertThat(sink.getRetractResults).isEqualTo(expected)
 
-    val data = new mutable.MutableList[Double]
+    val data = new mutable.ListBuffer[Double]
     data.+=(1.11111111)
     data.+=(1.11111111)
     env.setParallelism(1)
@@ -603,7 +603,7 @@ class AggregateITCase(
     var expected = List("1.03520274,12345.03520274865400000000,12.3456789012345670000000")
     assertThat(sink.getRetractResults).isEqualTo(expected)
 
-    val data = new mutable.MutableList[Double]
+    val data = new mutable.ListBuffer[Double]
     data.+=(2.22222222)
     data.+=(3.33333333)
     env.setParallelism(1)
@@ -624,7 +624,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testGroupByAgg(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((2, 2L, "B"))
     data.+=((3, 2L, "B"))
@@ -651,7 +651,7 @@ class AggregateITCase(
   }
 
   def testCountWithNullableIfCall(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((2, 2L, "B"))
     data.+=((3, 2L, "B"))
@@ -689,7 +689,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testNestedGroupByAgg(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((2, 2L, "B"))
     data.+=((3, 2L, "B"))
@@ -857,7 +857,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testListAggWithDistinct(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((2, 2L, "B"))
     data.+=((3, 2L, "B"))
@@ -927,7 +927,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testGroupBySingleValue(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((2, 2L, "B"))
     data.+=((3, 2L, "B"))
@@ -991,7 +991,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testDecimalSum(): Unit = {
-    val data = new mutable.MutableList[Row]
+    val data = new mutable.ListBuffer[Row]
     data.+=(Row.of(BigDecimal(1).bigDecimal))
     data.+=(Row.of(BigDecimal(2).bigDecimal))
     data.+=(Row.of(BigDecimal(2).bigDecimal))
@@ -1204,7 +1204,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testMinMaxWithBinaryString(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((2, 2L, "B"))
     data.+=((3, 2L, "BC"))
@@ -1239,7 +1239,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testBigDataOfMinMaxWithBinaryString(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     for (i <- 0 until 100) {
       data.+=((i % 10, i, i.toString))
     }
@@ -1272,7 +1272,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testAggWithFilterClause(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String, Boolean)]
+    val data = new mutable.ListBuffer[(Int, Long, String, Boolean)]
     data.+=((1, 5L, "B", true))
     data.+=((1, 4L, "C", false))
     data.+=((1, 2L, "A", true))
@@ -1307,7 +1307,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testMinMaxWithDecimal(): Unit = {
-    val data = new mutable.MutableList[Row]
+    val data = new mutable.ListBuffer[Row]
     data.+=(Row.of(BigDecimal(1).bigDecimal))
     data.+=(Row.of(BigDecimal(2).bigDecimal))
     data.+=(Row.of(BigDecimal(2).bigDecimal))
@@ -1483,7 +1483,7 @@ class AggregateITCase(
          |GROUP BY c
          |""".stripMargin
 
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     for (i <- 0 until 10) {
       data.+=((i, 1L, "Hi"))
     }
@@ -1511,7 +1511,7 @@ class AggregateITCase(
          |FROM MyTable GROUP BY a) t1
          |group by t1.a
          |""".stripMargin
-    val data = new mutable.MutableList[(Int, String)]
+    val data = new mutable.ListBuffer[(Int, String)]
     data.+=((1, "Sam"))
     data.+=((1, "Jerry"))
     data.+=((2, "Ali"))
@@ -1532,7 +1532,7 @@ class AggregateITCase(
   def testSTDDEV(): Unit = {
     val sqlQuery = "SELECT STDDEV_SAMP(a), STDDEV_POP(a) FROM MyTable GROUP BY c"
 
-    val data = new mutable.MutableList[(Double, Long, String)]
+    val data = new mutable.ListBuffer[(Double, Long, String)]
     for (i <- 0 until 10) {
       data.+=((i, 1L, "Hi"))
     }
@@ -1552,7 +1552,7 @@ class AggregateITCase(
   def testVAR_POP(): Unit = {
     val sqlQuery = "SELECT VAR_POP(a) FROM MyTable GROUP BY c"
 
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((2900, 1L, "Hi"))
     data.+=((2500, 1L, "Hi"))
     data.+=((2600, 1L, "Hi"))
@@ -1680,7 +1680,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testPruneUselessAggCall(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "Hi"))
     data.+=((2, 2L, "Hello"))
     data.+=((3, 2L, "Hello world"))
@@ -1714,7 +1714,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testConstantGroupKeyWithUpsertSink(): Unit = {
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     data.+=((1, 1L, "A"))
     data.+=((2, 2L, "B"))
     data.+=((3, 2L, "B"))
@@ -1780,7 +1780,7 @@ class AggregateITCase(
 
   @TestTemplate
   def testOverloadedAccumulator(): Unit = {
-    val data = new mutable.MutableList[(String, Long)]
+    val data = new mutable.ListBuffer[(String, Long)]
     data.+=(("x", 1L))
     data.+=(("x", 2L))
     data.+=(("x", 3L))
@@ -2062,7 +2062,7 @@ class AggregateITCase(
          |FROM ($sql)
     """.stripMargin
 
-    val data = new mutable.MutableList[(Int, Int, Int)]
+    val data = new mutable.ListBuffer[(Int, Int, Int)]
     for (i <- 0 until 10) {
       data.+=((i * 2, i + 1, 0))
       data.+=((i * 2, i + 1, 1))
@@ -2118,6 +2118,159 @@ class AggregateITCase(
     assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
 
     tEnv.dropTemporarySystemFunction("PERCENTILE")
+  }
+
+  @TestTemplate
+  def testBitmapBuildAgg(): Unit = {
+    val data = new mutable.ListBuffer[(Int, Int, String)]
+    for (i <- 0 until 5) {
+      data.+=((i, -i, "a"))
+      data.+=((i * 2, -i * 2, "b"))
+    }
+
+    val sql =
+      """
+        |SELECT
+        |  c,
+        |  CAST(BITMAP_BUILD_AGG(a) AS STRING),
+        |  CAST(BITMAP_BUILD_AGG(b) AS STRING)
+        |FROM MyTable
+        |GROUP BY c
+      """.stripMargin
+
+    val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
+    tEnv.createTemporaryView("MyTable", t)
+
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expected = List(
+      s"a,{0,1,2,3,4},{0,${Integer.toUnsignedLong(-4)},${Integer.toUnsignedLong(-3)},${Integer
+          .toUnsignedLong(-2)},${Integer.toUnsignedLong(-1)}}",
+      s"b,{0,2,4,6,8},{0,${Integer.toUnsignedLong(-8)},${Integer.toUnsignedLong(-6)},${Integer
+          .toUnsignedLong(-4)},${Integer.toUnsignedLong(-2)}}"
+    )
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
+  def testBitmapBuildAggWithRetract(): Unit = {
+    val data = new mutable.ListBuffer[(Int, Int, String)]
+    for (i <- 0 until 5) {
+      data.+=((i, i, "a"))
+      data.+=((i + 1, i * 2, "b"))
+      data.+=((i + 2, i * 3, "c"))
+    }
+
+    val inner =
+      """
+        |SELECT
+        |  MAX(a) AS ma,
+        |  LAST_VALUE(b) AS la,
+        |  c
+        |FROM MyTable
+        |GROUP BY c
+      """.stripMargin
+    val sql =
+      s"""
+         |SELECT
+         |  CAST(BITMAP_BUILD_AGG(ma) AS STRING),
+         |  CAST(BITMAP_BUILD_AGG(la) AS STRING)
+         |FROM ($inner)
+      """.stripMargin
+
+    val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c)
+    tEnv.createTemporaryView("MyTable", t)
+
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expected = List(s"{4,5,6},{4,8,12}")
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
+  def testBitmapLogicalOpsAgg(): Unit = {
+    val data = new mutable.ListBuffer[(Int, Int, Int, String)]
+    data.+=((-3, 5, 0, "a"))
+    data.+=((7, 2, 5, "b"))
+    data.+=((-3, 8, -8, "c"))
+    data.+=((2, 1, 7, "b"))
+    data.+=((2, 9, 0, "a"))
+    data.+=((8, 3, -3, "c"))
+    data.+=((7, 6, 2, "b"))
+    data.+=((0, 4, 5, "a"))
+    data.+=((-3, 7, 8, "c"))
+    data.+=((5, 0, 2, "b"))
+    data.+=((0, 10, 5, "a"))
+    data.+=((2, 5, 0, "a"))
+
+    val sql =
+      """
+        |SELECT
+        |  d,
+        |  CAST(BITMAP_AND_AGG(BITMAP_BUILD(ARRAY[a, b, c])) AS STRING),
+        |  CAST(BITMAP_OR_AGG(BITMAP_BUILD(ARRAY[a, b, c])) AS STRING),
+        |  CAST(BITMAP_XOR_AGG(BITMAP_BUILD(ARRAY[a, b, c])) AS STRING)
+        |FROM MyTable
+        |GROUP BY d
+      """.stripMargin
+
+    val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c, 'd)
+    tEnv.createTemporaryView("MyTable", t)
+
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expected =
+      List(
+        s"a,{0},{0,2,4,5,9,10,${Integer.toUnsignedLong(-3)}},{0,4,9,10,${Integer.toUnsignedLong(-3)}}",
+        "b,{2},{0,1,2,5,6,7},{0,1,6,7}",
+        s"c,{8,${Integer.toUnsignedLong(-3)}},{3,7,8,${Integer.toUnsignedLong(-8)},${Integer
+            .toUnsignedLong(-3)}},{3,7,8,${Integer.toUnsignedLong(-8)},${Integer
+            .toUnsignedLong(-3)}}"
+      )
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
+  def testBitmapLogicalOpsAggWithRetract(): Unit = {
+    val data = new mutable.ListBuffer[(Int, Int, Int, String)]
+    for (i <- 3 until 0 by -1) {
+      data.+=((i, i + 1, i + 2, "a"))
+      data.+=((i * 2, i * 2 + 1, i * 2 + 2, "b"))
+      data.+=((i * 3, i * 3 + 1, i * 3 + 2, "c"))
+    }
+
+    val inner =
+      """
+        |SELECT
+        |  LAST_VALUE(BITMAP_BUILD(ARRAY[a, b, c])) AS last,
+        |  d
+        |FROM MyTable
+        |GROUP BY d
+      """.stripMargin
+    val sql =
+      s"""
+         |SELECT
+         |  CAST(BITMAP_AND_AGG(last) AS STRING),
+         |  CAST(BITMAP_OR_AGG(last) AS STRING),
+         |  CAST(BITMAP_XOR_AGG(last) AS STRING)
+         |FROM ($inner)
+      """.stripMargin
+
+    val t = failingDataSource(data).toTable(tEnv, 'a, 'b, 'c, 'd)
+    tEnv.createTemporaryView("MyTable", t)
+
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery(sql).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expected = List(s"{3},{1,2,3,4,5},{1,3,5}")
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
 }
 

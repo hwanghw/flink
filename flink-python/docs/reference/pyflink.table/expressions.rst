@@ -35,6 +35,8 @@ Expressions
     and_
     or_
     not_
+    is_nan
+    is_not_nan
     current_database
     current_date
     current_time
@@ -120,6 +122,8 @@ arithmetic functions
     Expression.if_null
     Expression.is_null
     Expression.is_not_null
+    Expression.is_nan
+    Expression.is_not_nan
     Expression.is_true
     Expression.is_false
     Expression.is_not_true
@@ -201,6 +205,8 @@ string functions
     Expression.locate
     Expression.url_decode
     Expression.url_encode
+    Expression.inet_aton
+    Expression.inet_ntoa
     Expression.parse_url
     Expression.printf
     Expression.ltrim
@@ -254,7 +260,9 @@ advanced type helper functions
     Expression.array_min
     Expression.array_sort
     Expression.array_union
+    Expression.map_contains_key
     Expression.map_entries
+    Expression.map_from_entries
     Expression.map_keys
     Expression.map_union
     Expression.map_values
@@ -324,6 +332,8 @@ JSON functions
     Expression.json_query
     Expression.json_quote
     Expression.json_unquote
+    Expression.json_length
+    Expression.json_type
 
 value modification functions
 ----------------------------
@@ -334,3 +344,30 @@ value modification functions
     :toctree: api/
 
     Expression.object_update
+
+Bitmap functions
+----------------
+
+.. currentmodule:: pyflink.table.expression
+
+.. autosummary::
+    :toctree: api/
+
+    Expression.bitmap_and
+    Expression.bitmap_andnot
+    Expression.bitmap_and_agg
+    Expression.bitmap_and_cardinality_agg
+    Expression.bitmap_build
+    Expression.bitmap_build_agg
+    Expression.bitmap_build_cardinality_agg
+    Expression.bitmap_cardinality
+    Expression.bitmap_from_bytes
+    Expression.bitmap_or
+    Expression.bitmap_or_agg
+    Expression.bitmap_or_cardinality_agg
+    Expression.bitmap_to_array
+    Expression.bitmap_to_bytes
+    Expression.bitmap_to_string
+    Expression.bitmap_xor
+    Expression.bitmap_xor_agg
+    Expression.bitmap_xor_cardinality_agg

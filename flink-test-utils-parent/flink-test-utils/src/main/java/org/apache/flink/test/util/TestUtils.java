@@ -20,7 +20,6 @@ package org.apache.flink.test.util;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
-import org.apache.flink.api.common.time.Deadline;
 import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.core.execution.JobClient;
@@ -57,7 +56,7 @@ import java.util.function.Supplier;
 
 import static org.apache.flink.runtime.state.filesystem.AbstractFsCheckpointStorageAccess.CHECKPOINT_DIR_PREFIX;
 import static org.apache.flink.runtime.state.filesystem.AbstractFsCheckpointStorageAccess.METADATA_FILE_NAME;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /** Test utilities. */
 public class TestUtils {
@@ -167,24 +166,6 @@ public class TestUtils {
         }
     }
 
-    /**
-     * @deprecated please use {@link
-     *     org.apache.flink.runtime.testutils.CommonTestUtils#waitForCheckpoint(JobID, MiniCluster,
-     *     Deadline)} which is less prone to {@link NoSuchFileException} and IO-intensive.
-     */
-    @Deprecated
-    public static void waitUntilExternalizedCheckpointCreated(File checkpointDir)
-            throws InterruptedException, IOException {
-        while (true) {
-            Thread.sleep(50);
-            Optional<File> externalizedCheckpoint =
-                    getMostRecentCompletedCheckpointMaybe(checkpointDir);
-            if (externalizedCheckpoint.isPresent()) {
-                break;
-            }
-        }
-    }
-
     public static void waitUntilJobCanceled(JobID jobId, ClusterClient<?> client)
             throws ExecutionException, InterruptedException {
         while (client.getJobStatus(jobId).get() != JobStatus.CANCELED) {
@@ -242,12 +223,17 @@ public class TestUtils {
      */
     public static void waitUntil(Supplier<Boolean> condition, Duration timeout, String message)
             throws InterruptedException, TimeoutException {
-        long startTime = System.currentTimeMillis();
-        while (!condition.get() && System.currentTimeMillis() < startTime + timeout.toMillis()) {
+        long deadline = System.currentTimeMillis() + timeout.toMillis();
+        while (true) {
+            // Latch the result so that a condition that is satisfied once does not fail the
+            // wait if it becomes false again before a re-evaluation.
+            if (condition.get()) {
+                return;
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                throw new TimeoutException(message);
+            }
             Thread.sleep(1);
-        }
-        if (!condition.get()) {
-            throw new TimeoutException(message);
         }
     }
 

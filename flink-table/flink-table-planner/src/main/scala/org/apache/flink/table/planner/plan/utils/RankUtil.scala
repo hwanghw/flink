@@ -357,9 +357,7 @@ object RankUtil {
     !rank.outputRankNumber && isLimit1 && isSortOnTimeAttribute && isRowNumberType
   }
 
-  private def sortOnTimeAttributeOnly(
-      sortCollation: RelCollation,
-      inputRowType: RelDataType): Boolean = {
+  def sortOnTimeAttributeOnly(sortCollation: RelCollation, inputRowType: RelDataType): Boolean = {
     if (sortCollation.getFieldCollations.size() != 1) {
       return false
     }
@@ -386,16 +384,18 @@ object RankUtil {
   }
 
   /**
+   * Whether the given rank is a deduplication ordered by a single time attribute. Any other
+   * deduplication is executed as a regular Top-1 Rank that retracts the previously kept row.
+   */
+  def isDeduplicationOnTimeAttribute(rank: Rank): Boolean =
+    isDeduplication(rank) && sortOnTimeAttributeOnly(rank.orderKey, rank.getInput.getRowType)
+
+  /**
    * Whether the given [[StreamPhysicalRank]] could be converted to
    * [[org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecDeduplicate]].
    */
-  def canConvertToDeduplicate(rank: StreamPhysicalRank): Boolean = {
-    lazy val inputInsertOnly = ChangelogPlanUtils.inputInsertOnly(rank)
-    lazy val sortOnTimeAttributeOnly =
-      RankUtil.sortOnTimeAttributeOnly(rank.orderKey, rank.getInput.getRowType)
-
-    isDeduplication(rank) && inputInsertOnly && sortOnTimeAttributeOnly
-  }
+  def canConvertToDeduplicate(rank: StreamPhysicalRank): Boolean =
+    isDeduplicationOnTimeAttribute(rank) && ChangelogPlanUtils.inputInsertOnly(rank)
 
   /**
    * Determines if the given order key indicates that the last row should be kept for deduplication.

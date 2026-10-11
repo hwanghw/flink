@@ -19,6 +19,8 @@
 package org.apache.flink.table.planner.calcite;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.table.planner.calcite.RexTableArgCall.OrderByInfo;
+import org.apache.flink.table.planner.calcite.RexTableArgCall.SortOrder;
 import org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable;
 
 import org.apache.calcite.rel.type.RelDataType;
@@ -36,6 +38,7 @@ import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlTableFunction;
 import org.apache.calcite.sql.SqlUtil;
+import org.apache.calcite.sql.fun.SqlJsonQueryFunction;
 import org.apache.calcite.sql.validate.SqlValidatorImpl;
 import org.apache.calcite.sql2rel.SqlRexContext;
 import org.apache.calcite.sql2rel.SqlRexConvertlet;
@@ -64,6 +67,8 @@ public class FlinkConvertletTable implements SqlRexConvertletTable {
         final SqlOperator operator = call.getOperator();
         if (operator == FlinkSqlOperatorTable.TRY_CAST) {
             return this::convertTryCast;
+        } else if (operator instanceof SqlJsonQueryFunction) {
+            return this::convertJsonQuery;
         } else if (operator instanceof SqlTableFunction) {
             return this::convertTableArgs;
         } else if (call instanceof SqlModelCall) {
@@ -76,6 +81,25 @@ public class FlinkConvertletTable implements SqlRexConvertletTable {
     private RexNode convertModelCall(SqlRexContext cx, final SqlCall call) {
         SqlModelCall modelCall = (SqlModelCall) call;
         return modelCall.getModel().toRex(cx);
+    }
+
+    private RexNode convertJsonQuery(SqlRexContext cx, SqlCall call) {
+        List<SqlNode> operands = new ArrayList<>();
+        for (SqlNode operand : call.getOperandList()) {
+            if (!(operand instanceof SqlDataTypeSpec)) {
+                operands.add(operand);
+            }
+        }
+        SqlCall strippedCall = call.getOperator().createCall(call.getParserPosition(), operands);
+        final List<RexNode> exprs = new ArrayList<>();
+        for (SqlNode operand : strippedCall.getOperandList()) {
+            exprs.add(cx.convertExpression(operand));
+        }
+        RelDataType returnType = cx.getValidator().getValidatedNodeTypeIfKnown(call);
+        if (returnType == null) {
+            returnType = cx.getRexBuilder().deriveReturnType(call.getOperator(), exprs);
+        }
+        return cx.getRexBuilder().makeCall(returnType, call.getOperator(), exprs);
     }
 
     // Slightly modified version of StandardConvertletTable::convertCast
@@ -175,16 +199,26 @@ public class FlinkConvertletTable implements SqlRexConvertletTable {
                 final SqlBasicCall setSemanticsCall = (SqlBasicCall) operand;
                 final SqlNodeList partitionKeys = setSemanticsCall.operand(1);
                 final SqlNodeList orderKeys = setSemanticsCall.operand(2);
-                checkArgument(
-                        orderKeys.isEmpty(), "Table functions do not support order keys yet.");
-                final int[] keys = getPartitionKeyIndices(tableType, partitionKeys);
+                final int[] partitionKeyIndices = getPartitionKeyIndices(tableType, partitionKeys);
+                final OrderByInfo orderByInfo =
+                        RexTableArgCall.extractOrderByInfo(tableType.getFieldNames(), orderKeys);
 
                 rewrittenOperands.add(
-                        new RexTableArgCall(tableType, tableInputCount++, keys, new int[0]));
+                        new RexTableArgCall(
+                                tableType,
+                                tableInputCount++,
+                                partitionKeyIndices,
+                                orderByInfo.columns,
+                                orderByInfo.order));
             } else if (operand.isA(SqlKind.QUERY)) {
                 final RelDataType tableType = cx.getValidator().getValidatedNodeType(operand);
                 rewrittenOperands.add(
-                        new RexTableArgCall(tableType, tableInputCount++, new int[0], new int[0]));
+                        new RexTableArgCall(
+                                tableType,
+                                tableInputCount++,
+                                new int[0],
+                                new int[0],
+                                new SortOrder[0]));
             } else {
                 rewrittenOperands.add(cx.convertExpression(operand));
             }

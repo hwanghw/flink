@@ -32,6 +32,31 @@ import org.apache.calcite.sql.SqlJsonEmptyOrError
  * built-in Calcite function is [[Object]] and needs to be cast based on the inferred return type
  * instead as users can change this using the RETURNING keyword. Furthermore, we need to provide the
  * proper default values in case not all arguments were given.
+ *
+ * When multiple JSON function calls share the same input expression, the parsed JSON context is
+ * reused via a shared member variable. For example, a query like:
+ * {{{
+ * SELECT JSON_VALUE(json_data, '$.type'), JSON_VALUE(json_data, '$.age') FROM t
+ * }}}
+ * generates code similar to:
+ * {{{
+ * // members (declared once)
+ * SqlJsonUtils.JsonValueContext jsonParsed$0;
+ * BinaryStringData jsonParsedInput$1;
+ *
+ * // parses once per input value and reuses the result for the same input
+ * private SqlJsonUtils.JsonValueContext parseJson$2(BinaryStringData in) {
+ *   if (in != jsonParsedInput$1) {
+ *     jsonParsedInput$1 = in;
+ *     jsonParsed$0 = SqlJsonUtils.jsonParse(in.toString());
+ *   }
+ *   return jsonParsed$0;
+ * }
+ *
+ * // whichever call runs first parses, the other ones reuse the result
+ * Object rawResult$3 = SqlJsonUtils.jsonValue(parseJson$2(field$0), "$.type", ...);
+ * Object rawResult$4 = SqlJsonUtils.jsonValue(parseJson$2(field$0), "$.age", ...);
+ * }}}
  */
 class JsonValueCallGen extends CallGenerator {
   override def generate(
@@ -39,13 +64,16 @@ class JsonValueCallGen extends CallGenerator {
       operands: Seq[GeneratedExpression],
       returnType: LogicalType): GeneratedExpression = {
 
+    val parsed = JsonParseReuse.parseSharedInput(ctx, operands)
+
     generateCallWithStmtIfArgsNotNull(ctx, returnType, operands, resultNullable = true) {
       argTerms =>
         {
           val emptyBehavior = getBehavior(operands, SqlJsonEmptyOrError.EMPTY)
           val errorBehavior = getBehavior(operands, SqlJsonEmptyOrError.ERROR)
+
           val terms = Seq(
-            s"${argTerms.head}.toString()",
+            parsed.resultTerm,
             s"${argTerms(1)}.toString()",
             qualifyEnum(emptyBehavior._1),
             emptyBehavior._2,
@@ -56,7 +84,8 @@ class JsonValueCallGen extends CallGenerator {
           val rawResultTerm = CodeGenUtils.newName(ctx, "rawResult")
           val call = s"""
                         |Object $rawResultTerm =
-                        |    ${qualifyMethod(BuiltInMethods.JSON_VALUE)}(${terms.mkString(", ")});
+                        |    ${qualifyMethod(BuiltInMethods.JSON_VALUE)}(${terms
+                         .mkString(", ")});
            """.stripMargin
 
           val convertedResult = returnType.getTypeRoot match {

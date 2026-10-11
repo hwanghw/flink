@@ -300,6 +300,15 @@ is scoped by a key context.
 It is also possible not to provide a key (if the argument is declared with `ArgumentTrait.OPTIONAL_PARTITION_BY`), in
 which case only one virtual processor handles the entire table, thereby losing scalability benefits.
 
+### Table Argument with Broadcast Semantics
+
+A PTF that takes at least one table with row or set semantics can additionally take a table with broadcast semantics.
+Every row of a broadcast table is sent to all virtual processors, independently of any key partitioning. Broadcast tables
+are intended for low-throughput data such as rules, configuration, or control events. They enable parameterizing a
+PTF instance during runtime, avoiding downtime due to restarts.
+
+See [Broadcast State](#broadcast-state) for more information.
+
 Call Syntax
 -----------
 
@@ -712,30 +721,102 @@ class CountingFunction extends ProcessTableFunction<String> {
 
 Flink's state backends provide different types of state to efficiently handle large state.
 
-Currently, PTFs support three types of state:
+Every state entry can store data ranging from a single scalar, a composite type, or even a whole list or map. What
+differs is *how* the data is accessed:
 
-- **Value state**: Represents a single value.
-- **List state**: Represents a list of values, supporting operations like appending, removing, and iterating.
-- **Map state**: Represents a map (key-value pair) for efficient lookups, modifications, and removal of individual entries.
+- **Eager value state**: The value follows a Read-Modify-Write cycle. On access the complete value is deserialized, and
+  on update it is serialized again - regardless of how much of it is actually read or changed.
+- **Value view** (`org.apache.flink.table.api.dataview.ValueView`): A value with lazy access. The complete value
+  is only deserialized on read and serialized on update.
+- **List view** (`org.apache.flink.table.api.dataview.ListView`): A list of values with lazy access for each element,
+  supporting operations like appending, removing, and iterating.
+- **Map view** (`org.apache.flink.table.api.dataview.MapView`): A map (key-value pair) with lazy access for each pair,
+  supporting efficient lookups, modifications, and removal of individual entries.
 
-By default, state entries in a PTF are represented as value state. This means that every state entry is fully read from
-the state backend when the evaluation method is called, and the value is written back to the state backend once the
-evaluation method finishes.
+By default, a state entry in a PTF is represented as eager value state. Value state is not limited to a single scalar. It can also
+hold a whole list or map (for example a `Row` or POJO with an `ARRAY` or `MAP` field). In that case the *complete* collection is
+deserialized when `eval()` is called and serialized again when it returns, no matter how many elements are actually accessed.
 
-To optimize state access and avoid unnecessary (de)serialization, state entries can be declared as:
-- `org.apache.flink.table.api.dataview.ListView` (for list state)
-- `org.apache.flink.table.api.dataview.MapView` (for map state)
+{{< tabs "2739eeed-3d13-455c-8e2f-5e164da9f844" >}}
+{{< tab "Java" >}}
+```java
+// Function that stores a whole list as eager value state.
+// The entire list is deserialized on entry and serialized on exit of every call.
+class HistoryFunction extends ProcessTableFunction<String> {
+  public static class MyState {
+    public List<String> events = new ArrayList<>();
+  }
 
-These provide direct views to the underlying Flink state backend.
+  public void eval(
+    @StateHint MyState memory,
+    @ArgumentHint(SET_SEMANTIC_TABLE) Row input
+  ) {
+    memory.events.add(input.getFieldAs("eventId"));
+    collect("Seen " + memory.events.size() + " events");
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
 
-For example, when using a `MapView`, accessing a value via `MapView#get` will only deserialize the value associated with
-the specified key. This allows for efficient access to individual entries without needing to load the entire map. This
-approach is particularly useful when the map does not fit entirely into memory.
+`ValueView`, `ListView`, and `MapView` are the lazy counterparts. They provide direct views to the underlying Flink
+state backend and are preferred over eager value state, especially when state is accessed conditionally or is too large
+to fit into memory.
+
+For example, a `ValueView` only deserializes its value when `ValueView#getValue` is called and only serializes it when
+`ValueView#setValue` or `ValueView#clear` is called. A `ListView` appends or iterates elements without materializing the
+full list, and a `MapView` accesses a value via `MapView#get` by only deserializing the value associated with the
+specified key. This allows for efficient access to individual entries without needing to load the entire collection.
 
 {{< hint info >}}
 State TTL is applied individually to each entry in a list or map, allowing for fine-grained expiration control over state
 elements.
 {{< /hint >}}
+
+The following example demonstrates how to declare and use a `ValueView` for counting events per user.
+
+{{< tabs "2837eeed-3d13-455c-8e2f-5e164da9f844" >}}
+{{< tab "Java" >}}
+```java
+// Function that uses a value view for counting events per user with lazy state access
+class CountingFunction extends ProcessTableFunction<String> {
+  public void eval(
+    @StateHint ValueView<Integer> count,
+    @ArgumentHint(SET_SEMANTIC_TABLE) Row input
+  ) {
+    Integer currentCount = count.getValue();
+    if (currentCount == null) {
+      currentCount = 0;
+    }
+    count.setValue(currentCount + 1);
+    collect("Count for user: " + (currentCount + 1));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+The `ValueView` value type is reflectively extracted. If reflection is not feasible - such as when a `Row` object is
+involved - a type hint can be provided. In contrast to list and map views, the hint defines the value type directly.
+
+{{< tabs "2937eeed-3d13-455c-8e2f-5e164da9f844" >}}
+{{< tab "Java" >}}
+```java
+// Function that uses a value view of a row
+class CountingFunction extends ProcessTableFunction<String> {
+  public void eval(
+    @StateHint(type = @DataTypeHint("ROW<count INT>")) ValueView<Row> count,
+    @ArgumentHint(SET_SEMANTIC_TABLE) Row input
+  ) {
+    Row v = count.getValue();
+    Integer c = (v == null) ? 0 : v.getFieldAs("count");
+    count.setValue(Row.of(c + 1));
+    collect("Count for user: " + (c + 1));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
 
 The following example demonstrates how to declare and use a `MapView`. It assumes the PTF processes a table with the
 schema `(userId, eventId, ...)`, partitioned by `userId`, with a high cardinality of distinct `eventId` values. For this
@@ -820,6 +901,28 @@ class CountingFunction extends ProcessTableFunction<String> {
 {{< /tab >}}
 {{< /tabs >}}
 
+We recommend the use of the [`VARIANT`]({{< ref "docs/sql/reference/data-types" >}}#variant) data type for future schema
+evolution. For example, a `ValueView<Variant>` can lazily store semi-structured data whose schema may
+change over time:
+
+{{< tabs "3037eeed-3d13-455c-8e2f-5e164da9f844" >}}
+{{< tab "Java" >}}
+```java
+// Function that lazily stores the latest semi-structured payload per key
+class VariantFunction extends ProcessTableFunction<String> {
+  public void eval(
+    @StateHint ValueView<Variant> last,
+    @ArgumentHint(SET_SEMANTIC_TABLE) Row input
+  ) {
+    Variant previous = last.getValue();
+    last.setValue(input.getFieldAs("payload"));
+    collect(previous == null ? "First payload" : "Updated payload");
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
 {{< top >}}
 
 Time and Timers
@@ -838,7 +941,8 @@ class can be passed as an argument to `timeContext()`.
 
 Every PTF takes an optional `on_time` argument. The `on_time` argument in the function call declares the time attribute
 column for which a watermark has been declared. When processing a table's row, this timestamp can be accessed via
-`TimeContext#time()` and the watermark via `TimeContext#currentWatermark()` respectively.
+`TimeContext#time()` and the watermark via `TimeContext#currentWatermark()`/`TimeContext#tableWatermark()`
+respectively.
 
 Specifying an `on_time` argument in the function call instructs the framework to return a `rowtime` column in the
 function's output for subsequent time-based operations.
@@ -932,22 +1036,37 @@ table.
 
 The timestamp of the firing timer currently being processed within the `onTimer()` method.
 
+#### Table Watermark
+
+`TimeContext#tableWatermark()` returns the event-time watermark of the input table currently being processed.
+
+Watermarks are generated in sources and sent through the topology for advancing the logical clock. The current watermark
+of an input table is the minimum watermark of all upstream Flink subtasks producing the table.
+
+In multi-input scenarios, each input table can have its own independent watermark. This method returns the watermark
+specific to the input table that is currently being processed in the `eval()` method, rather than the global minimum
+watermark across all input tables (which is returned by `currentWatermark()`).
+
+This is particularly useful for late event detection on a per-input basis.
+
+It returns the current watermark of the input table being processed. `null` if called within the `onTimer()` method or a
+watermark has not yet been received from all upstream Flink subtasks producing the table.
+
 #### Current Watermark
 
-`TimeContext#currentWatermark()` returns the current event-time watermark.
+`TimeContext#currentWatermark()` returns the current event-time watermark at this PTF instance.
 
-Watermarks are generated in sources and sent through the topology for advancing the logical clock in each Flink subtask.
-The current watermark of a Flink subtask is the global minimum watermark of all inputs (i.e. across all parallel inputs
-and table partitions).
+Watermarks are generated in sources and sent through the topology for advancing the logical clock. The current watermark
+of a PTF instance is the global minimum watermark of all input tables (i.e., across all upstream Flink subtasks and
+table partitions).
 
 This method returns the current watermark of the Flink subtask that evaluates the PTF. Thus, the returned timestamp
-represents the entire Flink subtask, independent of the currently processed partition. This behavior is similar to a call
-to `SELECT CURRENT_WATERMARK(...)` in SQL.
+represents the entire Flink subtask, independent of the currently processed input table and partition. This behavior is
+similar to a call to `SELECT CURRENT_WATERMARK(...)` in SQL.
 
-If a watermark was not received from all inputs, the method returns `null`.
-
-In case this method is called within the `onTimer()` method, the returned watermark is the triggering watermark
-that currently fires the timer.
+It returns the current watermark at the PTF instance across all upstream Flink subtasks and table partitions. A `null`
+value is returned if no minimum logical time could be calculated across all inputs; this happens during startup
+or recovery when one or more active (i.e. not idle) inputs haven't sent a watermark yet.
 
 ### Timers
 
@@ -991,7 +1110,7 @@ class TimerFunction extends ProcessTableFunction<String> {
     TimeContext<Instant> timeCtx = ctx.timeContext(Instant.class);
       if (memory.seen == null) {
         memory.seen = input.getField(0).toString();
-        timeCtx.registerOnTimer("timeout", timeCtx.time().plusSeconds(60));
+        timeCtx.registerOnTime("timeout", timeCtx.time().plusSeconds(60));
       } else {
         collect("Second event arrived for: " + memory.seen);
         ctx.clearAll();
@@ -1006,12 +1125,169 @@ class TimerFunction extends ProcessTableFunction<String> {
 {{< /tab >}}
 {{< /tabs >}}
 
+### Handling of Late Records
+
+A late record is a record with a time attribute value that is less than or equal to the current
+watermark. PTFs handle late records just like non-late records by calling the `eval()` method. If
+the `on_time` argument is specified, the late timestamp is preserved in the output. This behavior is
+the same for PTFs with row and set semantics.
+
+Registering a timer for a time that is less than or equal to the current watermark is allowed.
+If registered from within `eval()`, the timer fires on the next watermark advance. If registered
+from within `onTimer()`, the timer fires immediately after the current timer finishes. Note that
+unconditionally re-registering a past-time timer from within `onTimer()` causes an infinite loop.
+
 ### Efficiency and Design Principles
 
 Registering too many timers might affect performance. An ever-growing timer state can happen
 by an unlimited number of partitions (i.e. an open keyspace) or even within a partition. Thus,
 reduce the number of registered timers to a minimum and consider cleaning up timers if they are
 not needed anymore via `Context#clearAllTimers()` or `TimeContext#clearTimer(String)`.
+
+{{< top >}}
+
+Ordering
+--------
+
+A PTF that takes a table with set semantics can optionally specify an ORDER BY clause in the
+function call to define the order in which rows are processed within each partition. The ORDER BY
+clause guarantees that rows are delivered to the eval() method in the specified order.
+
+The ORDER BY clause requires that the first column is a time attribute column (i.e., a
+TIMESTAMP or TIMESTAMP_LTZ column with a watermark declaration). The first ORDER BY column must
+be specified in ascending order. This ensures that rows are processed in event-time order.
+Additional columns can be specified as secondary sort keys to define the ordering of
+rows with the same timestamp.
+
+{{< tabs "2137eeed-order-by-syntax" >}}
+{{< tab "SQL" >}}
+```sql
+SELECT * FROM my_ptf(
+  input_table => TABLE source_table
+    PARTITION BY user_id
+    ORDER BY (event_time ASC, priority DESC NULLS FIRST)
+)
+```
+{{< /tab >}}
+{{< tab "Java" >}}
+```java
+env.from("source_table")
+  .partitionBy($("user_id"))
+  .orderBy($("event_time").asc(), $("priority").desc())
+  .process(MyPTF.class, descriptor("event_time").asArgument("on_time"))
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+### Difference Between ORDER BY and on_time Argument
+
+While both ORDER BY and the `on_time` argument relate to time attributes, they serve
+different purposes:
+
+- **on_time**: Declares which time attribute column powers the time context (`TimeContext#time()`) and
+  output timestamp. It does NOT affect the processing order of rows.
+- **ORDER BY**: Physically buffers and sorts rows within each partition to guarantee ordered delivery
+  to the eval() method. If both ORDER BY and `on_time` are specified for the same table argument, they
+  must reference the same time attribute column.
+
+### Ordering Guarantees and Late Events
+
+When ORDER BY is specified on a time attribute column, the framework maintains a sort buffer
+per partition and input table to reorder out-of-order events. The sort buffer is flushed when the
+watermark for the given input table advances, at which point all buffered rows with timestamps
+less than or equal to the watermark are delivered to the eval() method in sorted order. Late
+events (arriving after the watermark) are dropped to maintain the ordering guarantee.
+
+This pattern is particularly useful for the built-in [`FROM_CHANGELOG`]({{< ref "docs/sql/reference/queries/changelog" >}}#from_changelog) PTF, which converts an append-only CDC stream into a changelog. Combining `PARTITION BY` on the primary key with `ORDER BY` on the event-time column reorders out-of-order CDC events per key before the conversion operations are applied.
+
+The following example demonstrates ordered processing with secondary sorting. First, the function implementation:
+
+```java
+// Function that processes events in order and captures the ordering
+public static class OrderedProcessor extends ProcessTableFunction<List<Event>> {
+  public record Event(Integer score, Instant ts) {}
+
+  public static class BufferState {
+    // Stores all input events that enter the eval() after sorting
+    public List<Event> events = new ArrayList<>();
+  }
+
+  public void eval(
+    Context ctx,
+    @StateHint BufferState state,
+    @ArgumentHint(SET_SEMANTIC_TABLE) Row input
+  ) {
+    // Optional: Access ordering information at runtime
+    TableSemantics semantics = ctx.tableSemanticsFor("input");
+    int[] orderColumns = semantics.orderByColumns();
+    SortDirection[] directions = semantics.orderByDirections();
+
+    // Buffer the incoming row
+    state.events.add(new Event(input.getFieldAs("score"), input.getFieldAs("ts")));
+
+    // Emit current buffer state
+    collect(state.events);
+  }
+}
+```
+
+The function can be called using either SQL or Table API:
+
+{{< tabs "2237eeed-order-by-example" >}}
+{{< tab "SQL" >}}
+```sql
+-- Create a watermarked table
+CREATE TABLE Events (
+  name STRING,
+  score INT,
+  ts TIMESTAMP_LTZ(3),
+  WATERMARK FOR ts AS ts - INTERVAL '1' SECOND
+) WITH (
+  'connector' = 'datagen'
+);
+
+-- Register the function
+CREATE FUNCTION OrderedProcessor AS 'org.example.OrderedProcessor';
+
+-- Use ORDER BY with primary and secondary sort columns
+SELECT * FROM OrderedProcessor(
+  input => TABLE Events
+    PARTITION BY name
+    ORDER BY (ts ASC, score DESC)
+);
+```
+{{< /tab >}}
+{{< tab "Java" >}}
+```java
+TableEnvironment env = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
+
+// Create a watermarked table
+env.executeSql(
+  "CREATE TABLE Events (" +
+    "name STRING, " +
+    "score INT, " +
+    "ts TIMESTAMP_LTZ(3), " +
+    "WATERMARK FOR ts AS ts - INTERVAL '1' SECOND" +
+  ") WITH ('connector' = 'datagen')"
+);
+
+// Use orderBy() with primary and secondary sort columns
+env.from("Events")
+  .partitionBy($("name"))
+  .orderBy($("ts").asc(), $("score").desc())
+  .process(OrderedProcessor.class)
+  .execute()
+  .print();
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+In this example:
+- Events are first sorted by `ts` (ascending), ensuring event-time order
+- Events with the same timestamp are then sorted by `score`
+- Late events (with timestamp less than the watermark) are automatically dropped
+- The `TableSemantics` API provides runtime access to the ordering configuration
+- The output is an ever-growing list of sorted input events
 
 {{< top >}}
 
@@ -1026,7 +1302,9 @@ A PTF can process multiple tables simultaneously. This enables a variety of use 
 
 The `eval()` method can specify multiple table arguments to support multiple inputs. All table arguments must be declared
 with set semantics and use consistent partitioning. In other words, the number of columns and their data types in the
-`PARTITION BY` clause must match across all involved table arguments.
+`PARTITION BY` clause must match across all involved table arguments. Tables with [broadcast semantics](#broadcast-state)
+are excluded from this rule. They can be declared next to a table with row semantics or one or more tables with set
+semantics.
 
 Rows from either input are passed to the function one at a time. Thus, only one table argument is non-null at a time. Use
 null checks to determine which input is currently being processed.
@@ -1105,6 +1383,97 @@ The result will look similar to:
 +----+--------------------------------+--------------------------------+--------------------------------+
 ```
 
+### Broadcast State
+
+Broadcast state enables patterns such as a **rule engine** where rules are dynamically updated at runtime, or **dynamic
+configuration** that influences the processing of the main table(s).
+
+Broadcast state is tightly coupled to a broadcast semantic table. A table argument declared with `ArgumentTrait.BROADCAST_SEMANTIC_TABLE`
+defines a broadcast semantic table, which acts as a "side" or "control" input. Every row of a broadcast table is
+sent to *all* virtual processors, regardless of any `PARTITION BY` clause. A PTF can store this broadcast information in
+state entries declared with `@StateHint(StateKind.BROADCAST)`. This *broadcast state* is shared across all sets and can
+be read when processing rows from the main table(s).
+
+The following example filters a stream of sentences using a dynamically updated list of bad words. The list is broadcast
+to all virtual processors, and processing the rows of the main table is embarrassingly parallelizable.
+
+{{< tabs "5a6f7b2c-7c1e-4a8e-9f2a-2b3c4d5e6f70" >}}
+{{< tab "Java" >}}
+```java
+TableEnvironment env = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
+
+env.executeSql("CREATE VIEW Sentences(sentence) AS VALUES ('Hello World'), ('Bad words are bad')");
+env.executeSql("CREATE VIEW BadWords(word) AS VALUES ('bad')");
+
+env.createFunction("RuleFilter", RuleFilter.class);
+
+env
+  .executeSql("SELECT * FROM RuleFilter(data => TABLE Sentences, rules => TABLE BadWords)")
+  .print();
+
+// --------------------
+// Function declaration
+// --------------------
+
+// Function that filters sentences based on a dynamic set of rules
+public static class RuleFilter extends ProcessTableFunction<String> {
+
+  public void eval(
+      @StateHint(StateKind.BROADCAST) MapView<String, Boolean> badWords,
+      @ArgumentHint(ROW_SEMANTIC_TABLE) Row data,
+      @ArgumentHint(BROADCAST_SEMANTIC_TABLE) Row rules
+  ) throws Exception {
+    // Process row from table BadWords: write access to broadcast state
+    if (rules != null) {
+      badWords.put(rules.getFieldAs("word"), true);
+      return;
+    }
+
+    // Process row from table Sentences: read access to broadcast state
+    String sentence = data.getFieldAs("sentence");
+    for (String word : sentence.toLowerCase().split(" ")) {
+      if (badWords.contains(word)) {
+        return;
+      }
+    }
+    collect(sentence);
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+The result will look similar to:
+
+```text
++----+--------------------------------+
+| op |                         EXPR$0 |
++----+--------------------------------+
+| +I |                    Hello World |
++----+--------------------------------+
+```
+
+{{< hint warning >}}
+Similar to other multi-table PTFs, the system decides which input row is streamed through the virtual processor next. A
+change to a broadcast state entry has no effect on rows of the main table(s) that have been processed before. In the
+example above, a sentence might pass the filter if it arrives before the corresponding bad word.
+{{< /hint >}}
+
+The following rules apply to broadcast tables and broadcast state:
+
+- At least one table argument with row or set semantics must be declared next to broadcast tables. Multiple broadcast
+  tables and multiple broadcast state entries are supported.
+- A broadcast table cannot be partitioned as it is broadcast to all virtual processors.
+- Broadcast state can only be modified while processing a broadcast row. When processing rows of the main table(s),
+  broadcast state is read-only.
+- While processing a broadcast row, there is no key context. State entries that are scoped to a set are passed as `null`,
+  results can not be emitted via `collect()`, and timers cannot be registered or cleared. `Context#clearAllState()`
+  only clears broadcast state in this case.
+- Broadcast state can be declared as `MapView` (recommended for many entries), `ValueView`, or eager value state (i.e. a
+  row or POJO). `ListView` and state TTL are not supported.
+- It is the responsibility of the PTF implementer to maintain identical broadcast state across all virtual processors,
+  i.e. broadcast state should only be updated deterministically based on the broadcast rows.
+
 ### Efficiency and Design Principles
 
 A high number of input tables can negatively impact a single TaskManager or subtask. Network buffers must be allocated
@@ -1126,7 +1495,7 @@ the surrounding operators of the query. The state entries of a PTF can be persis
 surrounding query or the PTF itself changes. As long as the schema of the state entries remains unchanged.
 
 For future query evolution, the framework enforces a unique identifier (UID) for all PTFs that operate on tables with set
-semantics. The UID can be provided through the implicit `uid` string argument. It is used when persisting the PTF's state
+or broadcast semantics. The UID can be provided through the implicit `uid` string argument. It is used when persisting the PTF's state
 entries to checkpoints or savepoints. If the `uid` argument is not specified, the function name will be used by the framework,
 ensuring one unique PTF invocation per statement. If a PTF is invoked multiple times, validation will require a manually
 specified UID to ensure it is unique across the entire Flink job.
@@ -1165,7 +1534,7 @@ END;
 Pass-Through Columns
 --------------------
 
-Depending on the table semantics and whether an `on_time` argument has been defined, the system adds addition columns for
+Depending on the table semantics and whether an `on_time` argument has been defined, the system adds additional columns for
 every function output.
 
 For table arguments with set semantics, the output is prefixed with the `PARTITION BY` columns.
@@ -1864,3 +2233,768 @@ Limitations
 PTFs are in an early stage. The following limitations apply:
 - PTFs cannot run in batch mode.
 - Broadcast state
+
+Testing Process Table Functions
+-------------------------------
+
+The `ProcessTableFunctionTestHarness` provides a lightweight unit testing framework for Process Table
+Functions (PTFs). It is useful for unit testing and validating PTF business logic, multi-table PTF
+behaviour and validating errors.
+
+For end-to-end integration testing with the full Flink planner and runtime, use integration tests
+instead.
+
+{{< top >}}
+
+### Quick Start
+
+{{< tabs "quickstart" >}}
+{{< tab "Java" >}}
+```java
+import org.apache.flink.table.annotation.*;
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.functions.ProcessTableFunction;
+import org.apache.flink.table.runtime.functions.ProcessTableFunctionTestHarness;
+import org.apache.flink.table.runtime.functions.ProcessTableFunctionTestHarness.TableArgument;
+import org.apache.flink.types.Row;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+// PTF under test
+@DataTypeHint("ROW<doubled INT>")
+public class DoublePTF extends ProcessTableFunction<Row> {
+  public void eval(@ArgumentHint(ArgumentTrait.ROW_SEMANTIC_TABLE) Row input) {
+    int value = input.getFieldAs("value");
+    collect(Row.of(value * 2));
+  }
+}
+
+// Test
+@Test
+void testDoublePTF() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+    ProcessTableFunctionTestHarness.ofClass(DoublePTF.class)
+    .withTableArgument(
+        TableArgument.forName("input")
+            .type(DataTypes.of("ROW<value INT>"))
+            .build())
+    .build()) {
+
+    harness.processElement(Row.of(5));
+    harness.processElement(Row.of(10));
+
+    List<Row> output = harness.getOutput();
+    assertThat(output).hasSize(2);
+    assertThat(output.get(0)).isEqualTo(Row.of(10));
+    assertThat(output.get(1)).isEqualTo(Row.of(20));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+{{< top >}}
+
+### Common Testing Scenarios
+
+#### Testing Row-Semantic Tables
+
+Use `TableArgument.forName(name).type(...)` to configure the input table schema:
+
+{{< tabs "row-semantic" >}}
+{{< tab "Java" >}}
+```java
+public class PassthroughPTF extends ProcessTableFunction<Integer> {
+  public void eval(@ArgumentHint(ArgumentTrait.ROW_SEMANTIC_TABLE) Row input) {
+    collect(input.getFieldAs("value"));
+  }
+}
+
+@Test
+void testPassthrough() throws Exception {
+  try (ProcessTableFunctionTestHarness<Integer> harness =
+    ProcessTableFunctionTestHarness.ofClass(PassthroughPTF.class)
+    .withTableArgument(
+        TableArgument.forName("input")
+            .type(DataTypes.of("ROW<value INT>"))
+            .build())
+    .build()) {
+
+    harness.processElement(Row.of(42));
+    harness.processElement(Row.of(100));
+
+    List<Integer> output = harness.getFunctionOutput();
+    assertThat(output).containsExactly(42, 100);
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+#### Testing Set-Semantic Tables with Partitioning
+
+For `SET_SEMANTIC_TABLE`, use `TableArgument.Builder#partitionBy()` to configure partition columns:
+
+{{< tabs "set-semantic" >}}
+{{< tab "Java" >}}
+```java
+@DataTypeHint("ROW<doubled INT>")
+public class PartitionedPTF extends ProcessTableFunction<Row> {
+  public void eval(@ArgumentHint(ArgumentTrait.SET_SEMANTIC_TABLE) Row input) {
+    int value = input.getFieldAs("value");
+    collect(Row.of(value * 2));
+  }
+}
+
+@Test
+void testPartitionedPTF() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+    ProcessTableFunctionTestHarness.ofClass(PartitionedPTF.class)
+    .withTableArgument(
+        TableArgument.forName("input")
+            .type(DataTypes.of("ROW<key STRING, value INT>"))
+            .partitionBy("key")
+            .build())
+    .build()) {
+
+    harness.processElement(Row.of("A", 10));
+    harness.processElement(Row.of("B", 20));
+
+    List<Row> output = harness.getOutput();
+    assertThat(output.get(0)).isEqualTo(Row.of("A", 20));
+    assertThat(output.get(1)).isEqualTo(Row.of("B", 40));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+#### Testing Multiple Table Arguments
+
+Use `processElementForTable()` to specify which table receives each row:
+
+{{< tabs "multi-table" >}}
+{{< tab "Java" >}}
+```java
+@DataTypeHint("ROW<output STRING>")
+public class JoinPTF extends ProcessTableFunction<Row> {
+  public void eval(
+    @ArgumentHint(ArgumentTrait.SET_SEMANTIC_TABLE) Row left,
+    @ArgumentHint(ArgumentTrait.SET_SEMANTIC_TABLE) Row right) {
+    if (left != null) {
+      collect(Row.of("LEFT: " + left));
+    }
+    if (right != null) {
+      collect(Row.of("RIGHT: " + right));
+    }
+  }
+}
+
+@Test
+void testMultiTable() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+    ProcessTableFunctionTestHarness.ofClass(JoinPTF.class)
+    .withTableArgument(
+        TableArgument.forName("left")
+            .type(DataTypes.of("ROW<id INT, name STRING>"))
+            .partitionBy("id")
+            .build())
+    .withTableArgument(
+        TableArgument.forName("right")
+            .type(DataTypes.of("ROW<id INT, city STRING>"))
+            .partitionBy("id")
+            .build())
+    .build()) {
+
+    // Use processElementForTable() to target specific tables
+    harness.processElementForTable("left", Row.of(1, "Alice"));
+    harness.processElementForTable("right", Row.of(1, "Berlin"));
+
+    List<Row> output = harness.getOutput();
+    assertThat(output.get(0)).isEqualTo(Row.of(1, 1, "LEFT: +I[1, Alice]"));
+    assertThat(output.get(1)).isEqualTo(Row.of(1, 1, "RIGHT: +I[1, Berlin]"));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+#### Testing with Scalar Arguments
+
+Use `.withScalarArgument()` to configure scalar parameter values:
+
+{{< tabs "scalar-args" >}}
+{{< tab "Java" >}}
+```java
+@DataTypeHint("ROW<value INT>")
+public class FilterPTF extends ProcessTableFunction<Row> {
+  public void eval(
+    @ArgumentHint(ArgumentTrait.ROW_SEMANTIC_TABLE) Row input,
+    int threshold) {
+    int value = input.getFieldAs("value");
+    if (value > threshold) {
+      collect(Row.of(value));
+    }
+  }
+}
+
+@Test
+void testFilter() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+    ProcessTableFunctionTestHarness.ofClass(FilterPTF.class)
+    .withTableArgument(
+        TableArgument.forName("input")
+            .type(DataTypes.of("ROW<value INT>"))
+            .build())
+    .withScalarArgument("threshold", 50) // Configure scalar value
+    .build()) {
+
+    harness.processElement(Row.of(30));
+    harness.processElement(Row.of(70));
+
+    List<Row> output = harness.getOutput();
+    assertThat(output).containsExactly(Row.of(70));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+**Scalar-Only PTFs**: For PTFs with only scalar arguments, use `process()` to trigger evaluation:
+
+{{< tabs "scalar-only" >}}
+{{< tab "Java" >}}
+```java
+@DataTypeHint("ROW<sum INT>")
+public class AddPTF extends ProcessTableFunction<Row> {
+  public void eval(int a, int b) {
+    collect(Row.of(a + b));
+  }
+}
+
+@Test
+void testScalarOnly() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+    ProcessTableFunctionTestHarness.ofClass(AddPTF.class)
+    .withScalarArgument("a", 5)
+    .withScalarArgument("b", 7)
+    .build()) {
+
+    harness.process(); // Use process() instead of processElement()
+
+    List<Row> output = harness.getOutput();
+    assertThat(output).containsExactly(Row.of(12));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+#### Testing with State
+
+The harness supports all PTF state types: value state (Pojo and `Row`), list state (`ListView`),
+and map state (`MapView`).
+
+{{< tabs "state-testing" >}}
+{{< tab "Java" >}}
+```java
+// A PTF that uses all four state types: Pojo value state, Row value state, ListView state, and MapView state.
+@DataTypeHint("ROW<count BIGINT>")
+public class StatefulPTF extends ProcessTableFunction<Row> {
+  public static class ValueState {
+    public long count = 0L;
+  }
+
+  public void eval(
+    @StateHint ValueState valueState,
+    @StateHint(type = @DataTypeHint("ROW<lastValue INT>")) Row rowState,
+    @StateHint(type = @DataTypeHint("ARRAY<INT>")) ListView<Integer> listState,
+    @StateHint MapView<String, Integer> mapState,
+    @ArgumentHint(ArgumentTrait.SET_SEMANTIC_TABLE) Row input) throws Exception {
+    // Value state — increment counter
+    valueState.count++;
+
+    // Row state — track the last value seen
+    int value = input.getFieldAs("value");
+    rowState.setField("lastValue", value);
+
+    // ListView state — accumulate values
+    listState.add(value);
+
+    // MapView state — count occurrences by name
+    String name = input.getFieldAs("name");
+    Integer tagCount = mapState.get(name);
+    mapState.put(name, tagCount == null ? 1 : tagCount + 1);
+
+    collect(Row.of(valueState.count));
+  }
+}
+
+@Test
+void testWithState() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+    ProcessTableFunctionTestHarness.ofClass(StatefulPTF.class)
+    .withTableArgument(
+        TableArgument.forName("input")
+            .type(DataTypes.of("ROW<name STRING, value INT>"))
+            .partitionBy("name")
+            .build())
+    .build()) {
+
+    harness.processElement(Row.of("Alice", 10));
+    harness.processElement(Row.of("Alice", 20));
+
+    List<Row> output = harness.getOutput();
+    assertThat(output.get(0)).isEqualTo(Row.of("Alice", 1L));
+    assertThat(output.get(1)).isEqualTo(Row.of("Alice", 2L));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+**Initial State Setup**: Use `.withInitialStateForKey()` to pre-populate state before processing.
+State initialization is scoped per partition key:
+
+{{< tabs "initial-state" >}}
+{{< tab "Java" >}}
+```java
+@Test
+void testWithInitialState() throws Exception {
+  // Value state
+  StatefulPTF.ValueState initialValue = new StatefulPTF.ValueState();
+  initialValue.count = 100L;
+
+  // Row state
+  Row initialRow = Row.withNames();
+  initialRow.setField("lastValue", 42);
+
+  // ListView state
+  ListView<Integer> initialList = new ListView<>();
+  initialList.add(10);
+  initialList.add(20);
+
+  // MapView state
+  MapView<String, Integer> initialMap = new MapView<>();
+  initialMap.put("Alice", 5);
+
+  try (ProcessTableFunctionTestHarness<Row> harness =
+    ProcessTableFunctionTestHarness.ofClass(StatefulPTF.class)
+    .withTableArgument(
+        TableArgument.forName("input")
+            .type(DataTypes.of("ROW<name STRING, value INT>"))
+            .partitionBy("name")
+            .build())
+    // Initial state is set per partition key
+    .withInitialStateForKey("valueState", Row.of("Alice"), initialValue)
+    .withInitialStateForKey("rowState", Row.of("Alice"), initialRow)
+    .withInitialStateForKey("listState", Row.of("Alice"), initialList)
+    .withInitialStateForKey("mapState", Row.of("Alice"), initialMap)
+    .build()) {
+
+    harness.processElement(Row.of("Alice", 10));
+
+    List<Row> output = harness.getOutput();
+    assertThat(output).containsExactly(Row.of("Alice", 101L));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+**State Introspection**: Use `getStateForKey()`, `getKeysForState()`, and `getStateForAllKeys()` to
+inspect state during tests:
+
+{{< tabs "state-introspection" >}}
+{{< tab "Java" >}}
+```java
+@Test
+void testStateIntrospection() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+    ProcessTableFunctionTestHarness.ofClass(StatefulPTF.class)
+    .withTableArgument(
+        TableArgument.forName("input")
+            .type(DataTypes.of("ROW<name STRING, value INT>"))
+            .partitionBy("name")
+            .build())
+    .build()) {
+
+    harness.processElement(Row.of("Alice", 10));
+    harness.processElement(Row.of("Bob", 20));
+
+    // Check value state
+    StatefulPTF.ValueState aliceState =
+      harness.getStateForKey("valueState", Row.of("Alice"));
+    assertThat(aliceState.count).isEqualTo(1L);
+
+    // Check Row state
+    Row aliceRowState = harness.getStateForKey("rowState", Row.of("Alice"));
+    assertThat(aliceRowState.getField("lastValue")).isEqualTo(10);
+
+    // Check ListView state
+    ListView<Integer> aliceList = harness.getStateForKey("listState", Row.of("Alice"));
+    assertThat(aliceList.getList()).containsExactly(10);
+
+    // Check MapView state
+    MapView<String, Integer> aliceMap = harness.getStateForKey("mapState", Row.of("Alice"));
+    assertThat(aliceMap.get("Alice")).isEqualTo(1);
+
+    // Get all partition keys with state
+    Set<Row> keys = harness.getKeysForState("valueState");
+    assertThat(keys).containsExactlyInAnyOrder(Row.of("Alice"), Row.of("Bob"));
+
+    // Get all state across partition keys
+    Map<Row, StatefulPTF.ValueState> allState =
+      harness.getStateForAllKeys("valueState");
+    assertThat(allState.get(Row.of("Bob")).count).isEqualTo(1L);
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+**State Mutation**: Use `setStateForKey()`, `clearAllStatesForKey()`, and `clearStateForKey()` to
+modify state during tests:
+
+{{< tabs "state-mutation" >}}
+{{< tab "Java" >}}
+```java
+@Test
+void testStateMutation() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+    ProcessTableFunctionTestHarness.ofClass(StatefulPTF.class)
+    .withTableArgument(
+        TableArgument.forName("input")
+            .type(DataTypes.of("ROW<name STRING, value INT>"))
+            .partitionBy("name")
+            .build())
+    .build()) {
+
+    harness.processElement(Row.of("Alice", 10));
+
+    // Overwrite a specific state entry for a partition key
+    StatefulPTF.ValueState newState = new StatefulPTF.ValueState();
+    newState.count = 100L;
+    harness.setStateForKey("valueState", Row.of("Alice"), newState);
+
+    // Verify the state was updated
+    StatefulPTF.ValueState state = harness.getStateForKey("valueState", Row.of("Alice"));
+    assertThat(state.count).isEqualTo(100L);
+
+    // Clear a specific state entry (resets to default)
+    harness.clearStateForKey("listState", Row.of("Alice"));
+
+    // Clear all state for a partition key
+    harness.clearAllStatesForKey(Row.of("Alice"));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+#### Testing with Timers and Context
+
+The harness supports the `Context` parameter, timer registration via `TimeContext`, and `onTimer`
+callbacks. Use `.withOnTimeColumn()` to configure the event time column and `.setWatermark()` to
+advance watermarks and fire eligible timers.
+
+{{< tabs "timer-testing" >}}
+{{< tab "Java" >}}
+```java
+// A PTF that registers a named timer 5 seconds after each event, and emits when it fires.
+@DataTypeHint("ROW<message STRING>")
+public class TimerPTF extends ProcessTableFunction<Row> {
+  public void eval(
+      Context ctx,
+      @ArgumentHint({ArgumentTrait.SET_SEMANTIC_TABLE, ArgumentTrait.REQUIRE_ON_TIME})
+          Row input) {
+    String name = input.getFieldAs("name");
+    TimeContext<LocalDateTime> timeCtx = ctx.timeContext(LocalDateTime.class);
+    timeCtx.registerOnTime("timeout-" + name, timeCtx.time().plus(Duration.ofSeconds(5)));
+    collect(Row.of("registered-" + name));
+  }
+
+  public void onTimer(OnTimerContext ctx) {
+    collect(Row.of("timer-fired-" + ctx.currentTimer()));
+  }
+}
+
+@Test
+void testTimerRegistrationAndFiring() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+      ProcessTableFunctionTestHarness.ofClass(TimerPTF.class)
+          .withTableArgument(
+              TableArgument.forName("input")
+                  .type(DataTypes.of("ROW<partition STRING, name STRING, ts TIMESTAMP(3)>"))
+                  .partitionBy("partition")
+                  .build())
+          .withOnTimeColumn("ts")
+          .build()) {
+
+    harness.processElement(Row.of("P1", "Alice", LocalDateTime.of(2025, 1, 1, 0, 0, 1)));
+
+    // Verify the timer was registered
+    assertThat(harness.getPendingTimers()).hasSize(1);
+    Timer timer = harness.getPendingTimers().get(0);
+    assertThat(timer.getName()).isEqualTo("timeout-Alice");
+    assertThat(timer.getTimestampAs(LocalDateTime.class))
+        .isEqualTo(LocalDateTime.of(2025, 1, 1, 0, 0, 6));
+
+    // Only eval() output so far — the timer has not fired yet
+    assertThat(harness.getOutput())
+        .containsExactly(
+            Row.of("P1", "registered-Alice", LocalDateTime.of(2025, 1, 1, 0, 0, 1)));
+
+    // Advance watermark past the timer's timestamp to fire it
+    harness.clearOutput();
+    harness.setWatermark(LocalDateTime.of(2025, 1, 1, 0, 0, 7));
+
+    assertThat(harness.getOutput())
+        .containsExactly(
+            Row.of("P1", "timer-fired-timeout-Alice", LocalDateTime.of(2025, 1, 1, 0, 0, 6)));
+
+    assertThat(harness.getPendingTimers()).isEmpty();
+    assertThat(harness.getFiredTimers()).hasSize(1);
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+**Timers with State**: State persisted during `eval()` is accessible in `onTimer()`:
+
+{{< tabs "timer-state-testing" >}}
+{{< tab "Java" >}}
+```java
+@DataTypeHint("ROW<message STRING>")
+public class TimerWithStatePTF extends ProcessTableFunction<Row> {
+  public static class CounterState {
+    public long count = 0L;
+  }
+
+  public void eval(
+      Context ctx,
+      @StateHint CounterState state,
+      @ArgumentHint({ArgumentTrait.SET_SEMANTIC_TABLE, ArgumentTrait.REQUIRE_ON_TIME})
+          Row input) {
+    state.count++;
+    TimeContext<LocalDateTime> timeCtx = ctx.timeContext(LocalDateTime.class);
+    timeCtx.registerOnTime("check", timeCtx.time().plus(Duration.ofSeconds(5)));
+  }
+
+  public void onTimer(OnTimerContext ctx, @StateHint CounterState state) {
+    collect(Row.of("count=" + state.count));
+  }
+}
+
+@Test
+void testTimerWithState() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+      ProcessTableFunctionTestHarness.ofClass(TimerWithStatePTF.class)
+          .withTableArgument(
+              TableArgument.forName("input")
+                  .type(DataTypes.of("ROW<partition STRING, ts TIMESTAMP(3)>"))
+                  .partitionBy("partition")
+                  .build())
+          .withOnTimeColumn("ts")
+          .build()) {
+
+    harness.processElement(Row.of("P1", LocalDateTime.of(2025, 1, 1, 0, 0, 1)));
+    harness.processElement(Row.of("P1", LocalDateTime.of(2025, 1, 1, 0, 0, 1)));
+    harness.processElement(Row.of("P1", LocalDateTime.of(2025, 1, 1, 0, 0, 1)));
+    harness.processElement(Row.of("P2", LocalDateTime.of(2025, 1, 1, 0, 0, 2)));
+
+    // One watermark advancement fires both timers (P1 at +5s, P2 at +5s)
+    harness.setWatermark(LocalDateTime.of(2025, 1, 1, 0, 0, 8));
+    assertThat(harness.getOutput())
+        .containsExactly(
+            Row.of("P1", "count=3", LocalDateTime.of(2025, 1, 1, 0, 0, 6)),
+            Row.of("P2", "count=1", LocalDateTime.of(2025, 1, 1, 0, 0, 7)));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+#### Optional Partitioning
+
+For PTFs with `OPTIONAL_PARTITION_BY`, you can omit `.partitionBy(...)` on `TableArgument.Builder`
+during harness setup. The
+harness executes the function as if it had a parallelism of 1, with the default `Row.of()` key,
+so all data is routed through the same function instance. Use `Row.of()` to access state:
+
+{{< tabs "optional-partition" >}}
+{{< tab "Java" >}}
+```java
+// A PTF with optional partitioning that counts all rows.
+@DataTypeHint("ROW<count BIGINT>")
+public class GlobalCountPTF extends ProcessTableFunction<Row> {
+    public static class CountState {
+        public long count = 0L;
+    }
+
+    public void eval(
+            @StateHint CountState state,
+            @ArgumentHint({ArgumentTrait.SET_SEMANTIC_TABLE, ArgumentTrait.OPTIONAL_PARTITION_BY})
+                    Row input) {
+        state.count++;
+        collect(Row.of(state.count));
+    }
+}
+
+@Test
+void testOptionalPartitionWithoutPartitionBy() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+      ProcessTableFunctionTestHarness.ofClass(GlobalCountPTF.class)
+      .withTableArgument(
+          TableArgument.forName("input")
+              .type(DataTypes.of("ROW<key STRING, value INT>"))
+              .build())
+      .build()) {
+
+      harness.processElement(Row.of("A", 10));
+      harness.processElement(Row.of("B", 20));
+
+      // All data shares a single Row.of() partition key
+      GlobalCountPTF.CountState state = harness.getStateForKey("state", Row.of());
+      assertThat(state.count).isEqualTo(2L);
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+#### Configuring Table Argument Types
+
+In contexts where the harness can't infer the table argument types for table arguments (when using unannotated `Row` inputs,
+for example), it is possible to specify the input table type during the builder setup.
+
+{{< tabs "type-config" >}}
+{{< tab "Java" >}}
+```java
+@DataTypeHint("ROW<doubled INT, original INT>")
+// Note - An ArgumentHint without a DataTypeHint does not provide a type for the annotated input argument.
+// In cases like this, the harness cannot infer type, and so it needs to be declared
+// during harness setup.
+public static class DoublePTF extends ProcessTableFunction<Row> {
+  public void eval(@ArgumentHint(ArgumentTrait.ROW_SEMANTIC_TABLE) Row input) {
+    int value = (Integer) input.getField(0);
+    collect(Row.of(value * 2, value));
+  }
+}
+
+@Test
+void testBuilderType() throws Exception {
+  try (ProcessTableFunctionTestHarness<Row> harness =
+    ProcessTableFunctionTestHarness.ofClass(DoublePTF.class)
+    .withTableArgument(
+        TableArgument.forName("input")
+            .type(DataTypes.of("ROW<value INT>"))
+            .build())
+    .build()) {
+
+    harness.processElement(Row.of(5));
+    assertThat(harness.getOutput()).containsExactly(Row.of(10, 5));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+**Structured Types**: The harness supports structured POJO types in addition to `Row`, both as PTF inputs
+and outputs:
+
+{{< tabs "pojo-types" >}}
+{{< tab "Java" >}}
+```java
+public static class Customer {
+  public String name;
+  public int age;
+}
+
+public class CustomerPTF extends ProcessTableFunction<Customer> {
+  public void eval(@ArgumentHint(ArgumentTrait.ROW_SEMANTIC_TABLE) Customer c) {
+    collect(c);
+  }
+}
+
+@Test
+void testPOJO() throws Exception {
+  try (ProcessTableFunctionTestHarness<Customer> harness =
+      ProcessTableFunctionTestHarness.ofClass(CustomerPTF.class)
+          .withTableArgument(
+              TableArgument.forName("c")
+                  .type(DataTypes.of(Customer.class))
+                  .build())
+          .build()) {
+
+    harness.processElement(Row.of(30, "Alice"));
+
+    List<Customer> output = harness.getFunctionOutput();
+    assertThat(output.get(0).name).isEqualTo("Alice");
+    assertThat(output.get(0).age).isEqualTo(30);
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+{{< top >}}
+
+### Testing Pure Function Output with getFunctionOutput()
+
+`getOutput()` returns the full row the Flink runtime emits: partition keys and pass-through
+columns are prepended, the `rowtime` column is appended when `on_time` is configured, and
+non-`Row` output — an atomic value or a POJO — is wrapped or flattened into a `Row`. Use
+`getFunctionOutput()` to inspect exactly what the PTF itself collected, without those additional
+columns.
+
+{{< tabs "function-output" >}}
+{{< tab "Java" >}}
+```java
+// A non-row output PTF with set-semantic partitioning and an on-time column.
+public class PartitionedAtomicPTF extends ProcessTableFunction<Integer> {
+  public void eval(
+      @ArgumentHint({ArgumentTrait.SET_SEMANTIC_TABLE, ArgumentTrait.REQUIRE_ON_TIME})
+          Row input) {
+    int value = input.getFieldAs("value");
+    collect(value * 2);
+  }
+}
+
+@Test
+void testAtomicOutputFunctionOutput() throws Exception {
+  try (ProcessTableFunctionTestHarness<Integer> harness =
+      ProcessTableFunctionTestHarness.ofClass(PartitionedAtomicPTF.class)
+          .withTableArgument(
+              TableArgument.forName("input")
+                  .type(DataTypes.of("ROW<key STRING, value INT, ts TIMESTAMP(3)>"))
+                  .partitionBy("key")
+                  .build())
+          .withOnTimeColumn("ts")
+          .build()) {
+
+    harness.processElement(Row.of("A", 21, LocalDateTime.of(2025, 1, 1, 0, 0, 1)));
+
+    // getFunctionOutput() returns the atomic value, unwrapped
+    assertThat(harness.getFunctionOutput()).containsExactly(42);
+
+    // getOutput() wraps the value into a single EXPR$0 column, prepends the
+    // partition key, and appends the rowtime column
+    assertThat(harness.getOutput())
+        .containsExactly(Row.of("A", 42, LocalDateTime.of(2025, 1, 1, 0, 0, 1)));
+  }
+}
+```
+{{< /tab >}}
+{{< /tabs >}}
+
+{{< top >}}
+
+### PTF Features Unsupported by the TestHarness
+
+- Update traits (`SUPPORTS_UPDATES`, `REQUIRE_UPDATE_BEFORE`)
+- State TTL (state is supported but TTL expiration is not yet implemented)

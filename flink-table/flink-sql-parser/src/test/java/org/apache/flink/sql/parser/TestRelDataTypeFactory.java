@@ -48,6 +48,11 @@ final class TestRelDataTypeFactory extends SqlTypeFactoryImpl implements Extende
         return canonize(new DummyStructuredType(className, typeList, fieldNameList));
     }
 
+    @Override
+    public RelDataType createBitmapType() {
+        return canonize(new DummyBitmapType());
+    }
+
     private static class DummyRawType extends RelDataTypeImpl {
 
         private final String className;
@@ -80,6 +85,7 @@ final class TestRelDataTypeFactory extends SqlTypeFactoryImpl implements Extende
             this.className = className;
             this.typeList = typeList;
             this.fieldNameList = fieldNameList;
+            computeDigest();
         }
 
         @Override
@@ -98,6 +104,18 @@ final class TestRelDataTypeFactory extends SqlTypeFactoryImpl implements Extende
                                 .collect(Collectors.joining(", ")));
             }
             sb.append(">");
+        }
+    }
+
+    private static class DummyBitmapType extends RelDataTypeImpl {
+
+        DummyBitmapType() {
+            computeDigest();
+        }
+
+        @Override
+        protected void generateTypeString(StringBuilder sb, boolean withDetail) {
+            sb.append("BITMAP");
         }
     }
 }

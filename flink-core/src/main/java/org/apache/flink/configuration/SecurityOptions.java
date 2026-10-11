@@ -148,30 +148,40 @@ public class SecurityOptions {
             key("security.delegation.tokens.enabled")
                     .booleanType()
                     .defaultValue(true)
-                    .withDeprecatedKeys("security.kerberos.fetch.delegation-token")
                     .withDescription(
                             "Indicates whether to start delegation tokens system for external services.");
 
     @Documentation.Section(value = Documentation.Sections.SECURITY_DELEGATION_TOKEN, position = 2)
-    public static final ConfigOption<Duration> DELEGATION_TOKENS_RENEWAL_RETRY_BACKOFF =
-            key("security.delegation.tokens.renewal.retry.backoff")
+    public static final ConfigOption<Duration> DELEGATION_TOKENS_RENEWAL_RETRY_INITIAL_BACKOFF =
+            key("security.delegation.tokens.renewal.retry.initial.backoff")
                     .durationType()
-                    .defaultValue(Duration.ofHours(1))
-                    .withDeprecatedKeys("security.kerberos.tokens.renewal.retry.backoff")
+                    .defaultValue(Duration.ofSeconds(10))
                     .withDescription(
-                            "The time period how long to wait before retrying to obtain new delegation tokens after a failure.");
+                            "Initial backoff time when retrying to obtain delegation tokens after a failure. "
+                                    + "Doubles on each subsequent failure up to "
+                                    + "security.delegation.tokens.renewal.retry.max.backoff.");
 
     @Documentation.Section(value = Documentation.Sections.SECURITY_DELEGATION_TOKEN, position = 3)
+    public static final ConfigOption<Duration> DELEGATION_TOKENS_RENEWAL_RETRY_MAX_BACKOFF =
+            key("security.delegation.tokens.renewal.retry.max.backoff")
+                    .durationType()
+                    .defaultValue(Duration.ofMinutes(5))
+                    .withDeprecatedKeys("security.delegation.tokens.renewal.retry.backoff")
+                    .withDescription(
+                            "Maximum backoff time between retries when obtaining delegation tokens fails. "
+                                    + "Retry delays start at security.delegation.tokens.renewal.retry.initial.backoff "
+                                    + "and double on each failure up to this cap.");
+
+    @Documentation.Section(value = Documentation.Sections.SECURITY_DELEGATION_TOKEN, position = 4)
     public static final ConfigOption<Double> DELEGATION_TOKENS_RENEWAL_TIME_RATIO =
             key("security.delegation.tokens.renewal.time-ratio")
                     .doubleType()
                     .defaultValue(0.75)
-                    .withDeprecatedKeys("security.kerberos.tokens.renewal.time-ratio")
                     .withDescription(
                             "Ratio of the tokens's expiration time when new credentials should be re-obtained.");
 
     @Documentation.SuffixOption(DELEGATION_TOKEN_PROVIDER_PREFIX)
-    @Documentation.Section(value = Documentation.Sections.SECURITY_DELEGATION_TOKEN, position = 4)
+    @Documentation.Section(value = Documentation.Sections.SECURITY_DELEGATION_TOKEN, position = 5)
     public static final ConfigOption<Boolean> DELEGATION_TOKEN_PROVIDER_ENABLED =
             key("enabled")
                     .booleanType()
@@ -493,33 +503,43 @@ public class SecurityOptions {
 
     // ------------------------ ssl parameters --------------------------------
 
-    /** SSL protocol version to be supported. */
+    /** SSL protocol version(s) to be supported. */
     @Documentation.Section(Documentation.Sections.SECURITY_SSL)
     public static final ConfigOption<String> SSL_PROTOCOL =
             key("security.ssl.protocol")
                     .stringType()
-                    .defaultValue("TLSv1.2")
+                    .defaultValue("TLSv1.2,TLSv1.3")
                     .withDescription(
-                            "The SSL protocol version to be supported for the ssl transport. Note that it doesn’t"
-                                    + " support comma separated list.");
+                            Description.builder()
+                                    .text(
+                                            "The comma separated list of SSL protocol versions to be supported for"
+                                                    + " the ssl transport, e.g. %s. The highest protocol version"
+                                                    + " supported by both communication endpoints and for which a"
+                                                    + " matching cipher suite is available (see %s) is negotiated;"
+                                                    + " the connection fails only if none of the listed protocols"
+                                                    + " has a matching cipher suite.",
+                                            code("TLSv1.2,TLSv1.3"),
+                                            code("security.ssl.algorithms"))
+                                    .build());
 
     /**
      * The standard SSL algorithms to be supported.
      *
      * <p>More options here -
-     * http://docs.oracle.com/javase/8/docs/technotes/guides/security/StandardNames.html#ciphersuites
+     * https://docs.oracle.com/en/java/javase/11/docs/specs/security/standard-names.html#jsse-cipher-suite-names
      */
     @Documentation.Section(Documentation.Sections.SECURITY_SSL)
     public static final ConfigOption<String> SSL_ALGORITHMS =
             key("security.ssl.algorithms")
                     .stringType()
-                    .defaultValue("TLS_RSA_WITH_AES_128_CBC_SHA")
+                    .defaultValue(
+                            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384")
                     .withDescription(
                             Description.builder()
                                     .text(
                                             "The comma separated list of standard SSL algorithms to be supported. Read more %s",
                                             link(
-                                                    "http://docs.oracle.com/javase/8/docs/technotes/guides/security/StandardNames.html#ciphersuites",
+                                                    "https://docs.oracle.com/en/java/javase/11/docs/specs/security/standard-names.html#jsse-cipher-suite-names",
                                                     "here"))
                                     .build());
 
@@ -648,4 +668,27 @@ public class SecurityOptions {
         checkNotNull(sslConfig, "sslConfig");
         return isRestSSLEnabled(sslConfig) && sslConfig.get(SSL_REST_AUTHENTICATION_ENABLED);
     }
+
+    // ------------------------------------------------------------------------
+    //  Sensitive key redaction
+    // ------------------------------------------------------------------------
+
+    /**
+     * Additional sensitive key substrings to redact beyond the built-in list.
+     *
+     * <p>Values are matched case-insensitively as substrings of configuration key names. The
+     * built-in sensitive key patterns are immutable and cannot be overridden or removed via this
+     * option.
+     */
+    public static final ConfigOption<List<String>> ADDITIONAL_SENSITIVE_KEYS =
+            key("security.redaction.additional-keys")
+                    .stringType()
+                    .asList()
+                    .defaultValues()
+                    .withDescription(
+                            "Comma-separated list of additional configuration key substrings whose"
+                                    + " values should be redacted in logs and REST API responses."
+                                    + " Matching is case-insensitive and based on substring containment."
+                                    + " The built-in sensitive key patterns are immutable and cannot"
+                                    + " be overridden via this option.");
 }

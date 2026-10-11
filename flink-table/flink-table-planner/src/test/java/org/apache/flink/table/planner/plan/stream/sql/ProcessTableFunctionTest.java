@@ -19,18 +19,30 @@
 package org.apache.flink.table.planner.plan.stream.sql;
 
 import org.apache.flink.table.annotation.ArgumentHint;
+import org.apache.flink.table.annotation.StateHint;
+import org.apache.flink.table.annotation.StateKind;
 import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.ExplainDetail;
+import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableConfig;
+import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.dataview.MapView;
 import org.apache.flink.table.catalog.DataTypeFactory;
 import org.apache.flink.table.functions.ProcessTableFunction;
 import org.apache.flink.table.functions.TableFunction;
 import org.apache.flink.table.functions.UserDefinedFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.AppendProcessTableFunctionBase;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BroadcastFilterFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BroadcastLookupFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.BroadcastTimersFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.DescriptorFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.EmptyArgFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.EmptyOutputFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.EmptyOutputRowSemanticFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.IntervalDayArgFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.IntervalYearArgFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.InvalidUpdatingSemanticsFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.MultiBroadcastFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.MultiInputFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.NoSystemArgsScalarFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.NoSystemArgsTableFunction;
@@ -40,8 +52,10 @@ import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctio
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.ScalarArgsFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.SetSemanticTableFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.SetSemanticTablePassThroughFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.SetSemanticTableRetractArgFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.TypedRowSemanticTableFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.TypedSetSemanticTableFunction;
+import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.UpdatingRetractRowSemanticFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.UpdatingUpsertFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.stream.ProcessTableFunctionTestUtils.User;
 import org.apache.flink.table.planner.utils.TableTestBase;
@@ -56,20 +70,29 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import javax.annotation.Nullable;
+
 import java.util.EnumSet;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
+import static java.util.Collections.singletonList;
 import static org.apache.flink.core.testutils.FlinkAssertions.anyCauseMatches;
+import static org.apache.flink.table.annotation.ArgumentTrait.BROADCAST_SEMANTIC_TABLE;
 import static org.apache.flink.table.annotation.ArgumentTrait.OPTIONAL_PARTITION_BY;
 import static org.apache.flink.table.annotation.ArgumentTrait.PASS_COLUMNS_THROUGH;
 import static org.apache.flink.table.annotation.ArgumentTrait.ROW_SEMANTIC_TABLE;
 import static org.apache.flink.table.annotation.ArgumentTrait.SET_SEMANTIC_TABLE;
 import static org.apache.flink.table.annotation.ArgumentTrait.SUPPORT_UPDATES;
+import static org.apache.flink.table.api.Expressions.$;
+import static org.apache.flink.table.api.Expressions.lit;
+import static org.apache.flink.table.api.Expressions.row;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for the type inference and planning part of {@link ProcessTableFunction}. */
-public class ProcessTableFunctionTest extends TableTestBase {
+class ProcessTableFunctionTest extends TableTestBase {
 
     private TableTestUtil util;
 
@@ -85,9 +108,21 @@ public class ProcessTableFunctionTest extends TableTestBase {
                 .executeSql("CREATE VIEW t_type_diff AS SELECT 'Bob' AS name, TRUE AS isValid");
         util.tableEnv()
                 .executeSql("CREATE VIEW t_updating AS SELECT name, COUNT(*) FROM t GROUP BY name");
+
+        util.addTemporarySystemFunction("upsertPtf", UpdatingUpsertFunction.class);
+        util.tableEnv()
+                .executeSql(
+                        "CREATE VIEW t_upsert AS SELECT * FROM upsertPtf(r => TABLE t_updating PARTITION BY name)");
         util.tableEnv()
                 .executeSql(
                         "CREATE TABLE t_watermarked (name STRING, score INT, ts TIMESTAMP_LTZ(3), WATERMARK FOR ts AS ts) "
+                                + "WITH ('connector' = 'datagen')");
+        util.tableEnv()
+                .executeSql(
+                        "CREATE VIEW t_rules AS SELECT * FROM (VALUES ('Bob', 1)) AS T(name, weight)");
+        util.tableEnv()
+                .executeSql(
+                        "CREATE TABLE t_watermarked_rules (name STRING, weight INT, ts TIMESTAMP_LTZ(3), WATERMARK FOR ts AS ts) "
                                 + "WITH ('connector' = 'datagen')");
         util.tableEnv()
                 .executeSql("CREATE TABLE t_sink (`out` STRING) WITH ('connector' = 'blackhole')");
@@ -98,12 +133,27 @@ public class ProcessTableFunctionTest extends TableTestBase {
                 .executeSql(
                         "CREATE TABLE t_full_delete_sink (`name` STRING PRIMARY KEY NOT ENFORCED, `name0` STRING, `count` BIGINT, `mode` STRING) "
                                 + "WITH ('connector' = 'values')");
+        util.tableEnv()
+                .executeSql(
+                        "CREATE TABLE t_no_pk_sink (`name` STRING, `name0` STRING, `count` BIGINT, `mode` STRING) "
+                                + "WITH ('connector' = 'values', 'sink-insert-only' = 'false')");
     }
 
     @Test
     void testScalarArgsNoUid() {
         util.addTemporarySystemFunction("f", ScalarArgsFunction.class);
         util.verifyRelPlan("SELECT * FROM f(i => 1, b => true)");
+    }
+
+    @Test
+    void testFunctionWithMultipleTableArgs() {
+        util.addTemporarySystemFunction("f", MultiInputFunction.class);
+        util.tableEnv()
+                .executeSql(
+                        "CREATE VIEW v AS SELECT * FROM f("
+                                + "in1 => TABLE t PARTITION BY name,"
+                                + "in2 => TABLE t PARTITION BY name)");
+        util.verifyRelPlan("SELECT * FROM v");
     }
 
     @Test
@@ -123,9 +173,25 @@ public class ProcessTableFunctionTest extends TableTestBase {
     @Test
     void testTypedRowSemanticTableIgnoringColumnNames() {
         util.addTemporarySystemFunction("f", TypedRowSemanticTableFunction.class);
-        // function expects <STRING name, INT score>
-        // but table is <STRING name, INT different>
+        // Function expects <STRING s, INT i> but table is <STRING name, INT different>
         util.verifyRelPlan("SELECT * FROM f(u => TABLE t_name_diff, i => 1)");
+    }
+
+    @Test
+    void testTypedSetSemanticTableForwardingOriginalColumnName() {
+        util.addTemporarySystemFunction("f", TypedSetSemanticTableFunction.class);
+        // Function expects <STRING s, INT i> but table is <STRING name, INT different>.
+        // The partition key is a valid pass-through column and its name should be preserved.
+        util.verifyRelPlan("SELECT * FROM f(u => TABLE t_name_diff PARTITION BY name, i => 1)");
+    }
+
+    @Test
+    void testTypedSetSemanticTableForwardingOriginalColumnNameTableApi() {
+        util.addTemporarySystemFunction("f", TypedSetSemanticTableFunction.class);
+        // Function expects <STRING s, INT i> but table is <STRING name, INT different>.
+        // The partition key is a valid pass-through column and its name should be preserved.
+        util.verifyRelPlan(
+                util.tableEnv().from("t_name_diff").partitionBy($("name")).process("f", 1));
     }
 
     @Test
@@ -149,6 +215,28 @@ public class ProcessTableFunctionTest extends TableTestBase {
     void testEmptyArgs() {
         util.addTemporarySystemFunction("f", EmptyArgFunction.class);
         util.verifyRelPlan("SELECT * FROM f(uid => 'my-ptf')");
+    }
+
+    @Test
+    void testPartitionOnlyColumnOutput() {
+        util.addTemporarySystemFunction("f", EmptyOutputFunction.class);
+        assertThat(
+                        util.tableEnv()
+                                .sqlQuery("SELECT * FROM f(r => TABLE t PARTITION BY name)")
+                                .getResolvedSchema()
+                                .getColumnNames())
+                .containsExactly("name");
+    }
+
+    @Test
+    void testZeroColumnOutput() {
+        util.addTemporarySystemFunction("f", EmptyOutputRowSemanticFunction.class);
+        assertThat(
+                        util.tableEnv()
+                                .sqlQuery("SELECT * FROM f(r => TABLE t)")
+                                .getResolvedSchema()
+                                .getColumnNames())
+                .isEmpty();
     }
 
     @Test
@@ -193,6 +281,16 @@ public class ProcessTableFunctionTest extends TableTestBase {
     }
 
     @Test
+    void testOrderBy() {
+        util.addTemporarySystemFunction("f", SetSemanticTableFunction.class);
+        util.verifyRelPlan(
+                "SELECT `out`, `rowtime` FROM f("
+                        + "r => TABLE t_watermarked PARTITION BY name ORDER BY (ts ASC, score DESC NULLS FIRST), "
+                        + "i => 42, "
+                        + "on_time => DESCRIPTOR(ts))");
+    }
+
+    @Test
     void testMissingUid() {
         // Function name contains special characters and can thus not be used as UID
         util.addTemporarySystemFunction("f*", SetSemanticTableFunction.class);
@@ -224,6 +322,63 @@ public class ProcessTableFunctionTest extends TableTestBase {
                 .satisfies(
                         anyCauseMatches(
                                 "Disabling system arguments is not supported for user-defined PTF."));
+    }
+
+    @Test
+    void testOnTimeArgRejectedForDisabledPtf() {
+        util.addTemporarySystemFunction("f", NoSystemArgsTableFunction.class);
+        assertThatThrownBy(
+                        () ->
+                                util.verifyRelPlan(
+                                        "SELECT * FROM f(r => TABLE t_watermarked, i => 1, "
+                                                + "on_time => DESCRIPTOR(ts));"))
+                .satisfies(
+                        anyCauseMatches(
+                                "The 'on_time' argument is not supported because function "
+                                        + "'f' does not use system arguments."));
+    }
+
+    @Test
+    void testUidArgRejectedForDisabledPtf() {
+        util.addTemporarySystemFunction("f", NoSystemArgsScalarFunction.class);
+        assertThatThrownBy(() -> util.verifyRelPlan("SELECT * FROM f(i => 1, uid => 'my-uid');"))
+                .satisfies(
+                        anyCauseMatches(
+                                "The 'uid' argument is not supported because function "
+                                        + "'f' does not use system arguments."));
+    }
+
+    @Test
+    void testSystemArgRejectedByNameBeforeTypeCheck() {
+        // System arguments are rejected by name, rather than a type mismatch.
+        util.addTemporarySystemFunction("f", NoSystemArgsTableFunction.class);
+        assertThatThrownBy(
+                        () ->
+                                util.verifyRelPlan(
+                                        "SELECT * FROM f(r => TABLE t, i => 1, on_time => 1);"))
+                .satisfies(
+                        anyCauseMatches(
+                                "The 'on_time' argument is not supported because function "
+                                        + "'f' does not use system arguments."));
+    }
+
+    @Test
+    void testSystemArgRejectedForDisabledPtfViaTableApi() {
+        // The same enforcement applies to the Table API path, which resolves calls via
+        // ResolveCallByArgumentsRule instead of the SQL validator.
+        util.addTemporarySystemFunction("f", NoSystemArgsTableFunction.class);
+        assertThatThrownBy(
+                        () ->
+                                util.tableEnv()
+                                        .fromCall(
+                                                "f",
+                                                util.tableEnv().from("t").asArgument("r"),
+                                                lit(1).asArgument("i"),
+                                                lit("my-uid").asArgument("uid")))
+                .satisfies(
+                        anyCauseMatches(
+                                "The 'uid' argument is not supported because function "
+                                        + "'f' does not use system arguments."));
     }
 
     @Test
@@ -272,6 +427,55 @@ public class ProcessTableFunctionTest extends TableTestBase {
                         .addInsertSql("INSERT INTO t_sink SELECT * FROM f(r => TABLE t, i => 42)"));
     }
 
+    @Test
+    void testRetractModeWithRowSemantics() {
+        util.addTemporarySystemFunction("f", UpdatingRetractRowSemanticFunction.class);
+        util.verifyRelPlan(
+                "SELECT * FROM f(r => TABLE t)", singletonList(ExplainDetail.CHANGELOG_MODE));
+    }
+
+    @Test
+    void testBroadcastTableWithSetSemanticTable() {
+        util.addTemporarySystemFunction("f", BroadcastLookupFunction.class);
+        util.verifyExecPlan(
+                "SELECT * FROM f(input => TABLE t PARTITION BY name, rules => TABLE t_rules)");
+    }
+
+    @Test
+    void testBroadcastTableWithRowSemanticTable() {
+        util.addTemporarySystemFunction("f", BroadcastFilterFunction.class);
+        util.verifyExecPlan("SELECT * FROM f(input => TABLE t, rule => TABLE t_rules)");
+    }
+
+    @Test
+    void testBroadcastTableWithMultipleTables() {
+        util.addTemporarySystemFunction("f", MultiBroadcastFunction.class);
+        util.verifyExecPlan(
+                "SELECT * FROM f("
+                        + "in1 => TABLE t PARTITION BY name, "
+                        + "rules1 => TABLE t_rules, "
+                        + "in2 => TABLE t PARTITION BY name, "
+                        + "rules2 => TABLE t_rules)");
+    }
+
+    @Test
+    void testBroadcastTableWithOnTime() {
+        util.addTemporarySystemFunction("f", BroadcastTimersFunction.class);
+        util.verifyExecPlan(
+                "SELECT * FROM f("
+                        + "input => TABLE t_watermarked PARTITION BY name, "
+                        + "rule => TABLE t_watermarked_rules, "
+                        + "on_time => DESCRIPTOR(ts))");
+    }
+
+    @Test
+    void testBroadcastTableWithUpdates() {
+        util.addTemporarySystemFunction("f", UpdatingBroadcastFunction.class);
+        util.verifyRelPlan(
+                "SELECT * FROM f(input => TABLE t PARTITION BY name, rule => TABLE t_updating)",
+                singletonList(ExplainDetail.CHANGELOG_MODE));
+    }
+
     @ParameterizedTest
     @MethodSource("errorSpecs")
     void testErrorBehavior(ErrorSpec spec) {
@@ -280,11 +484,14 @@ public class ProcessTableFunctionTest extends TableTestBase {
                         () -> {
                             if (spec.selectSql != null) {
                                 util.verifyExecPlan(spec.selectSql);
-                            } else {
+                            } else if (spec.insertIntoSql != null) {
                                 util.verifyExecPlan(
                                         util.tableEnv()
                                                 .createStatementSet()
                                                 .addInsertSql(spec.insertIntoSql));
+                            } else {
+                                assert spec.selectTableApi != null;
+                                util.verifyExecPlan(spec.selectTableApi.apply(util.tableEnv()));
                             }
                         })
                 .satisfies(anyCauseMatches(spec.errorMessage));
@@ -292,6 +499,11 @@ public class ProcessTableFunctionTest extends TableTestBase {
 
     private static Stream<ErrorSpec> errorSpecs() {
         return Stream.of(
+                ErrorSpec.ofSelect(
+                        "mixed positional and named arguments",
+                        ScalarArgsFunction.class,
+                        "SELECT * FROM f(1, b => true)",
+                        "Cannot mix positional and named arguments when calling function 'f'"),
                 ErrorSpec.ofSelect(
                         "invalid uid",
                         ScalarArgsFunction.class,
@@ -333,7 +545,45 @@ public class ProcessTableFunctionTest extends TableTestBase {
                         "multiple table args",
                         InvalidMultiTableWithRowFunction.class,
                         "SELECT * FROM f(r1 => TABLE t, r2 => TABLE t)",
-                        "All table arguments must use set semantics if multiple table arguments are declared."),
+                        "All main table arguments must use set semantics if multiple table arguments are declared."),
+                ErrorSpec.ofSelect(
+                        "only broadcast table args",
+                        InvalidBroadcastOnlyFunction.class,
+                        "SELECT * FROM f(rule => TABLE t)",
+                        "Table arguments with broadcast semantics require at least one table "
+                                + "argument with row or set semantics."),
+                ErrorSpec.ofSelect(
+                        "partition by on broadcast table",
+                        BroadcastLookupFunction.class,
+                        "SELECT * FROM f(input => TABLE t PARTITION BY name, rules => TABLE t_rules PARTITION BY name)",
+                        "PARTITION BY or ORDER BY are not supported for table arguments with broadcast semantics."),
+                ErrorSpec.ofSelect(
+                        "broadcast state without broadcast table",
+                        InvalidBroadcastStateFunction.class,
+                        "SELECT * FROM f(input => TABLE t PARTITION BY name)",
+                        "Broadcast state entry 's' requires at least one table argument with broadcast semantics."),
+                ErrorSpec.ofSelect(
+                        "missing on_time for broadcast table",
+                        BroadcastTimersFunction.class,
+                        "SELECT * FROM f(input => TABLE t_watermarked PARTITION BY name, rule => TABLE t_rules, on_time => DESCRIPTOR(ts))",
+                        "Invalid time attribute declaration. If multiple tables are declared, the `on_time` argument "
+                                + "must reference a time column for each table argument or none. "
+                                + "Missing time attributes for: [rule]"),
+                ErrorSpec.ofSelect(
+                        "order by on broadcast table",
+                        BroadcastTimersFunction.class,
+                        "SELECT * FROM f(input => TABLE t_watermarked PARTITION BY name, rule => TABLE t_watermarked_rules ORDER BY ts, on_time => DESCRIPTOR(ts))",
+                        "PARTITION BY or ORDER BY are not supported for table arguments with broadcast semantics."),
+                ErrorSpec.ofSelect(
+                        "pass-through columns next to broadcast table",
+                        InvalidPassThroughBroadcastFunction.class,
+                        "SELECT * FROM f(input => TABLE t, rule => TABLE t_rules)",
+                        "Pass-through columns are not supported if multiple table arguments are declared."),
+                ErrorSpec.ofSelect(
+                        "updates into insert-only broadcast table arg",
+                        BroadcastLookupFunction.class,
+                        "SELECT * FROM f(input => TABLE t PARTITION BY name, rules => TABLE t_updating)",
+                        "StreamPhysicalProcessTableFunction doesn't support consuming update changes"),
                 ErrorSpec.ofSelect(
                         "row instead of table",
                         RowSemanticTableFunction.class,
@@ -351,10 +601,45 @@ public class ProcessTableFunctionTest extends TableTestBase {
                         "SELECT * FROM f(r => TABLE t PARTITION BY invalid, i => 1)",
                         "Invalid column 'invalid' for PARTITION BY clause. Available columns are: [name, score]"),
                 ErrorSpec.ofSelect(
-                        "unsupported order by",
+                        "order by on row semantic table",
+                        RowSemanticTableFunction.class,
+                        "SELECT * FROM f(r => TABLE t_watermarked ORDER BY ts, i => 1)",
+                        "Only tables with set semantics may be ordered."),
+                ErrorSpec.ofSelect(
+                        "order by on non-timestamp column",
                         SetSemanticTableFunction.class,
-                        "SELECT * FROM f(r => TABLE t PARTITION BY name ORDER BY score, i => 1)",
-                        "ORDER BY clause is currently not supported."),
+                        "SELECT * FROM f(r => TABLE t_watermarked PARTITION BY name ORDER BY score, i => 1)",
+                        "Invalid ORDER BY clause for table argument 'r'. "
+                                + "The first ORDER BY column must be a TIMESTAMP or TIMESTAMP_LTZ column (up to precision 3). "
+                                + "However, column 'score' has data type 'INT'."),
+                ErrorSpec.ofSelect(
+                        "order by descending timestamp",
+                        SetSemanticTableFunction.class,
+                        "SELECT * FROM f(r => TABLE t_watermarked PARTITION BY name ORDER BY ts DESC, i => 1)",
+                        "Invalid ORDER BY clause for table argument 'r'. "
+                                + "The first ORDER BY column on a timestamp column must be in ascending order."),
+                ErrorSpec.ofSelect(
+                        "order by mismatch with on_time",
+                        SetSemanticTableFunction.class,
+                        "WITH dual_ts AS (SELECT name, score, ts, TO_TIMESTAMP_LTZ(10000, 3) AS ts2 FROM t_watermarked) "
+                                + "SELECT * FROM f(r => TABLE dual_ts PARTITION BY name ORDER BY ts2, i => 1, on_time => DESCRIPTOR(ts))",
+                        "Invalid ORDER BY clause for table argument 'r'. When both ORDER BY and the 'on_time' "
+                                + "argument are defined, the referenced timestamp columns must match."),
+                ErrorSpec.ofSelect(
+                        "order by duplicate column",
+                        SetSemanticTableFunction.class,
+                        "SELECT * FROM f(r => TABLE t_watermarked PARTITION BY name ORDER BY (ts, score, ts), i => 1)",
+                        "Invalid ORDER BY clause for table argument 'r'. "
+                                + "Column 'ts' appears more than once in ORDER BY."),
+                ErrorSpec.ofSelect(
+                        "order by on non-time attribute",
+                        SetSemanticTableFunction.class,
+                        "WITH dual_ts AS (SELECT name, score, TO_TIMESTAMP_LTZ(10000, 3) AS ts FROM t_watermarked) "
+                                + "SELECT * FROM f(r => TABLE dual_ts PARTITION BY name ORDER BY ts, i => 1)",
+                        "Invalid ORDER BY clause for table argument 'r'. The first ORDER BY "
+                                + "column 'ts' is not a valid time attribute. Only columns with "
+                                + "a watermark declaration qualify for ORDER BY. Also, make sure "
+                                + "that the watermarked column is forwarded without any modification."),
                 ErrorSpec.ofSelect(
                         "updates into insert-only table arg",
                         SetSemanticTableFunction.class,
@@ -410,10 +695,10 @@ public class ProcessTableFunctionTest extends TableTestBase {
                         "SELECT * FROM f()",
                         "Table arguments must not be optional."),
                 ErrorSpec.ofSelect(
-                        "no changelog support for tables with row semantics",
+                        "no upsert support for tables with row semantics",
                         InvalidUpdatingSemanticsFunction.class,
                         "SELECT * FROM f(r => TABLE t)",
-                        "PTFs that take table arguments with row semantics don't support updating output. "
+                        "PTFs that take table arguments with row semantics don't support upsert output. "
                                 + "Table argument 'r' of function 'f' must use set semantics."),
                 ErrorSpec.ofSelect(
                         "on_time is not supported on updating output",
@@ -421,6 +706,44 @@ public class ProcessTableFunctionTest extends TableTestBase {
                         "SELECT * FROM f(r => TABLE t_watermarked PARTITION BY name, on_time => DESCRIPTOR(ts))",
                         "Time operations using the `on_time` argument are currently not supported for "
                                 + "PTFs that consume or produce updates."),
+                ErrorSpec.ofInsertInto(
+                        "upsert output into sink without primary key",
+                        UpdatingUpsertFunction.class,
+                        "INSERT INTO t_no_pk_sink SELECT * FROM f(r => TABLE t_updating PARTITION BY name)",
+                        "There is a changelog mismatch between two operators. "
+                                + "One produces an upsert changelog (UPDATE_AFTER without UPDATE_BEFORE). "
+                                + "The other requires a retract changelog (UPDATE_BEFORE and UPDATE_AFTER), for example a sink without a primary key. "
+                                + "In such cases, ensure that the sink is able to digest upserts where the PRIMARY KEY serves as the upsert key, or make the input produce UPDATE_BEFORE.\n\n"
+                                + "The conflict is at:\n"
+                                + "Sink(expectedChangelogMode=[I,UB,UA,D])\n"
+                                + "  +- ProcessTableFunction(changelogMode=[I,UA,D])"),
+                ErrorSpec.ofSelect(
+                        "upsert conflict that does not surface at a sink",
+                        UpdatingUpsertFunction.class,
+                        "SELECT name, SUM(`count`) OVER (PARTITION BY name ORDER BY name) "
+                                + "FROM f(r => TABLE t_updating PARTITION BY name)",
+                        "Can't generate a valid execution plan for the given query because of a "
+                                + "changelog mismatch"),
+                ErrorSpec.ofSelect(
+                        // t_upsert produces an upsert changelog.
+                        // the table argument for f requires a retract changelog
+                        "retract requirement on an upsert table arg",
+                        SetSemanticTableRetractArgFunction.class,
+                        "SELECT * FROM f(r => TABLE t_upsert PARTITION BY name)",
+                        "Can't generate a valid execution plan for the given query because of a "
+                                + "changelog mismatch"),
+                ErrorSpec.ofInsertInto(
+                        "upsert conflict buried below a calc",
+                        UpdatingUpsertFunction.class,
+                        "INSERT INTO t_no_pk_sink SELECT name, name0, `count`, mode "
+                                + "FROM f(r => TABLE t_updating PARTITION BY name) WHERE name0 <> ''",
+                        "There is a changelog mismatch between two operators. "
+                                + "One produces an upsert changelog (UPDATE_AFTER without UPDATE_BEFORE). "
+                                + "The other requires a retract changelog (UPDATE_BEFORE and UPDATE_AFTER), for example a sink without a primary key. "
+                                + "In such cases, ensure that the sink is able to digest upserts where the PRIMARY KEY serves as the upsert key, or make the input produce UPDATE_BEFORE.\n\n"
+                                + "The conflict is at:\n"
+                                + "Sink(expectedChangelogMode=[I,UB,UA,D])\n"
+                                + "  +- Calc(changelogMode=[I,UA,D])"),
                 ErrorSpec.ofSelect(
                         "no pass-through for multiple table args",
                         InvalidPassThroughTables.class,
@@ -472,7 +795,18 @@ public class ProcessTableFunctionTest extends TableTestBase {
                                 + "in20 => TABLE t PARTITION BY score, "
                                 + "in21 => TABLE t PARTITION BY score"
                                 + ")",
-                        "Unsupported table argument count. Currently, the number of input tables is limited to 20."));
+                        "Unsupported table argument count. Currently, the number of input tables is limited to 20."),
+                ErrorSpec.ofTableApi(
+                        "invalid scalar args",
+                        TypedRowSemanticTableFunction.class,
+                        env -> env.from("t").process("f", 1.99),
+                        "Invalid argument type at position 1. Data type INT expected but DOUBLE NOT NULL passed."),
+                ErrorSpec.ofTableApi(
+                        "invalid table args in Table API",
+                        TypedRowSemanticTableFunction.class,
+                        env -> env.fromValues(row("Bob", 1.99)).process("f", 1),
+                        "Invalid argument value. Argument 'u' expects a typed table, but the provided "
+                                + "table is incompatible and cannot be cast to the target type."));
     }
 
     /** Testing function. */
@@ -482,6 +816,36 @@ public class ProcessTableFunctionTest extends TableTestBase {
     }
 
     /** Testing function. */
+    public static class InvalidBroadcastOnlyFunction extends ProcessTableFunction<String> {
+        @SuppressWarnings("unused")
+        public void eval(@ArgumentHint(BROADCAST_SEMANTIC_TABLE) Row rule) {}
+    }
+
+    /** Testing function. */
+    public static class InvalidPassThroughBroadcastFunction extends ProcessTableFunction<String> {
+        @SuppressWarnings("unused")
+        public void eval(
+                @ArgumentHint({ROW_SEMANTIC_TABLE, PASS_COLUMNS_THROUGH}) Row input,
+                @ArgumentHint(BROADCAST_SEMANTIC_TABLE) Row rule) {}
+    }
+
+    /** Testing function. */
+    public static class InvalidBroadcastStateFunction extends ProcessTableFunction<String> {
+        @SuppressWarnings("unused")
+        public void eval(
+                @StateHint(StateKind.BROADCAST) MapView<String, Integer> s,
+                @ArgumentHint(SET_SEMANTIC_TABLE) Row input) {}
+    }
+
+    /** Testing function. */
+    public static class UpdatingBroadcastFunction extends ProcessTableFunction<String> {
+        @SuppressWarnings("unused")
+        public void eval(
+                @StateHint(StateKind.BROADCAST) MapView<String, Long> s,
+                @ArgumentHint(SET_SEMANTIC_TABLE) Row input,
+                @ArgumentHint({BROADCAST_SEMANTIC_TABLE, SUPPORT_UPDATES}) Row rule) {}
+    }
+
     public static class InvalidMultiTableWithRowFunction extends ProcessTableFunction<String> {
         @SuppressWarnings("unused")
         public void eval(
@@ -567,19 +931,22 @@ public class ProcessTableFunctionTest extends TableTestBase {
     private static class ErrorSpec {
         private final String description;
         private final Class<? extends UserDefinedFunction> functionClass;
-        private final String selectSql;
-        private final String insertIntoSql;
+        private final @Nullable String selectSql;
+        private final @Nullable String insertIntoSql;
+        private final @Nullable Function<TableEnvironment, Table> selectTableApi;
         private final String errorMessage;
 
         private ErrorSpec(
                 String description,
                 Class<? extends UserDefinedFunction> functionClass,
-                String selectSql,
-                String insertIntoSql,
+                @Nullable String selectSql,
+                @Nullable String insertIntoSql,
+                @Nullable Function<TableEnvironment, Table> selectTableApi,
                 String errorMessage) {
             this.description = description;
             this.functionClass = functionClass;
             this.selectSql = selectSql;
+            this.selectTableApi = selectTableApi;
             this.insertIntoSql = insertIntoSql;
             this.errorMessage = errorMessage;
         }
@@ -589,7 +956,7 @@ public class ProcessTableFunctionTest extends TableTestBase {
                 Class<? extends UserDefinedFunction> functionClass,
                 String selectSql,
                 String errorMessage) {
-            return new ErrorSpec(description, functionClass, selectSql, null, errorMessage);
+            return new ErrorSpec(description, functionClass, selectSql, null, null, errorMessage);
         }
 
         static ErrorSpec ofInsertInto(
@@ -597,7 +964,17 @@ public class ProcessTableFunctionTest extends TableTestBase {
                 Class<? extends UserDefinedFunction> functionClass,
                 String insertIntoSql,
                 String errorMessage) {
-            return new ErrorSpec(description, functionClass, null, insertIntoSql, errorMessage);
+            return new ErrorSpec(
+                    description, functionClass, null, insertIntoSql, null, errorMessage);
+        }
+
+        static ErrorSpec ofTableApi(
+                String description,
+                Class<? extends UserDefinedFunction> functionClass,
+                Function<TableEnvironment, Table> selectTableApi,
+                String errorMessage) {
+            return new ErrorSpec(
+                    description, functionClass, null, null, selectTableApi, errorMessage);
         }
 
         @Override

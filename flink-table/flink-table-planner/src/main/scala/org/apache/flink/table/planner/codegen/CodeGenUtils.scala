@@ -43,7 +43,10 @@ import org.apache.flink.table.types.logical.utils.LogicalTypeUtils.toInternalCon
 import org.apache.flink.table.types.utils.DataTypeUtils.isInternal
 import org.apache.flink.table.utils.EncodingUtils
 import org.apache.flink.types.{ColumnList, Row, RowKind}
+import org.apache.flink.types.bitmap.Bitmap
 import org.apache.flink.types.variant.Variant
+
+import org.apache.calcite.rex.{RexNode, RexProgram}
 
 import java.lang.{Boolean => JBoolean, Byte => JByte, Double => JDouble, Float => JFloat, Integer => JInt, Long => JLong, Object => JObject, Short => JShort}
 import java.lang.reflect.Method
@@ -230,12 +233,16 @@ object CodeGenUtils {
       value match {
         case JFloat.NEGATIVE_INFINITY => "java.lang.Float.NEGATIVE_INFINITY"
         case JFloat.POSITIVE_INFINITY => "java.lang.Float.POSITIVE_INFINITY"
+        // NaN is not equal to itself, so it can't be matched by value like the infinities above.
+        case f: JFloat if f.isNaN => "java.lang.Float.NaN"
         case _ => value.toString + "f"
       }
     case _: JDouble =>
       value match {
         case JDouble.NEGATIVE_INFINITY => "java.lang.Double.NEGATIVE_INFINITY"
         case JDouble.POSITIVE_INFINITY => "java.lang.Double.POSITIVE_INFINITY"
+        // NaN is not equal to itself, so it can't be matched by value like the infinities above.
+        case d: JDouble if d.isNaN => "java.lang.Double.NaN"
         case _ => value.toString + "d"
       }
     case sd: StringData =>
@@ -256,7 +263,7 @@ object CodeGenUtils {
     // ordered by type root definition
     case CHAR | VARCHAR => BINARY_STRING
     case BOOLEAN => className[JBoolean]
-    case BINARY | VARBINARY => "byte[]"
+    case BINARY | VARBINARY | UUID => "byte[]"
     case DECIMAL => className[DecimalData]
     case TINYINT => className[JByte]
     case SMALLINT => className[JShort]
@@ -275,6 +282,7 @@ object CodeGenUtils {
     case RAW => className[BinaryRawValueData[_]]
     case DESCRIPTOR => className[ColumnList]
     case VARIANT => className[Variant]
+    case BITMAP => className[Bitmap]
     case SYMBOL | UNRESOLVED =>
       throw new IllegalArgumentException("Illegal type: " + t)
   }
@@ -321,7 +329,7 @@ object CodeGenUtils {
         s"$term.hashCode()"
       case BOOLEAN =>
         s"${className[JBoolean]}.hashCode($term)"
-      case BINARY | VARBINARY =>
+      case BINARY | VARBINARY | UUID =>
         // Instead of computing the BYTE_ARRAY_BASE_OFFSET value in JM, generate the code
         // and evaluate it in TM. This is required so that byte array offset will be consistent.
         // See FLINK-37833 for more details.
@@ -380,6 +388,10 @@ object CodeGenUtils {
         }
         val serTerm = ctx.addReusableObject(serializer, "serializer")
         s"$term.toObject($serTerm).hashCode()"
+      case VARIANT =>
+        s"$term.hashCode()"
+      case BITMAP =>
+        s"$term.hashCode()"
       case NULL | SYMBOL | UNRESOLVED =>
         throw new IllegalArgumentException("Illegal type: " + t)
     }
@@ -498,7 +510,7 @@ object CodeGenUtils {
         s"(($BINARY_STRING) $rowTerm.getString($indexTerm))"
       case BOOLEAN =>
         s"$rowTerm.getBoolean($indexTerm)"
-      case BINARY | VARBINARY =>
+      case BINARY | VARBINARY | UUID =>
         s"$rowTerm.getBinary($indexTerm)"
       case DECIMAL =>
         s"$rowTerm.getDecimal($indexTerm, ${getPrecision(t)}, ${getScale(t)})"
@@ -530,6 +542,8 @@ object CodeGenUtils {
         s"(($BINARY_RAW_VALUE) $rowTerm.getRawValue($indexTerm))"
       case VARIANT =>
         s"$rowTerm.getVariant($indexTerm)"
+      case BITMAP =>
+        s"$rowTerm.getBitmap($indexTerm)"
       case NULL | SYMBOL | UNRESOLVED =>
         throw new IllegalArgumentException("Illegal type: " + t)
     }
@@ -784,7 +798,7 @@ object CodeGenUtils {
       s"$writerTerm.writeString($indexTerm, $fieldValTerm)"
     case BOOLEAN =>
       s"$writerTerm.writeBoolean($indexTerm, $fieldValTerm)"
-    case BINARY | VARBINARY =>
+    case BINARY | VARBINARY | UUID =>
       s"$writerTerm.writeBinary($indexTerm, $fieldValTerm)"
     case DECIMAL =>
       s"$writerTerm.writeDecimal($indexTerm, $fieldValTerm, ${getPrecision(t)})"
@@ -825,6 +839,8 @@ object CodeGenUtils {
       s"$writerTerm.writeRawValue($indexTerm, $fieldValTerm, $ser)"
     case VARIANT =>
       s"$writerTerm.writeVariant($indexTerm, $fieldValTerm)"
+    case BITMAP =>
+      s"$writerTerm.writeBitmap($indexTerm, $fieldValTerm)"
     case NULL | SYMBOL | UNRESOLVED =>
       throw new IllegalArgumentException("Illegal type: " + t);
   }
@@ -1110,6 +1126,14 @@ object CodeGenUtils {
       // For single operator codegen case, this is needed.
       case None =>
         GenerateUtils.generateFieldAccess(ctx, inputType, inputTerm, index)
+    }
+  }
+
+  def getExprsFromProgramOrNull(rexProgram: RexProgram): java.util.List[RexNode] = {
+    if (rexProgram == null) {
+      null
+    } else {
+      rexProgram.getExprList
     }
   }
 }

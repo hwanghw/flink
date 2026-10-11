@@ -46,6 +46,7 @@ Flink 内置了以下这些开箱即用的 state backends ：
 
  - *HashMapStateBackend*
  - *EmbeddedRocksDBStateBackend*
+ - *ForStStateBackend*
 
 如果不设置，默认使用 HashMapStateBackend。
 
@@ -56,10 +57,15 @@ Flink 内置了以下这些开箱即用的 state backends ：
 
 在 *HashMapStateBackend* 内部，数据以 Java 对象的形式存储在堆中。 Key/value 形式的状态和窗口算子会持有一个 hash table，其中存储着状态值、触发器。
 
+HashMapStateBackend 的局限：
+
+  - 状态大小受限于 TaskManager 上可用的 JVM 堆内存。从 checkpoint 或 savepoint 恢复时，每个 TaskManager 必须有足够的堆内存来容纳其分配到的状态。
+  - 仅支持全量快照，不支持增量 checkpoint。每次 checkpoint 都会捕获完整的状态，随着状态规模增长，checkpoint 时长和恢复时间也会随之延长。
+
 HashMapStateBackend 的适用场景：
 
-  - 有较大 state，较长 window 和较大 key/value 状态的 Job。
-  - 所有的高可用场景。
+  - 状态可以完全放入 TaskManager JVM 堆内存的 Job，需要快速、基于内存的状态访问。
+  - 对延迟敏感、希望避免每次状态访问都进行序列化/反序列化开销的 Job。
 
 建议同时将 [managed memory]({{< ref "docs/deployment/memory/mem_setup_tm" >}}#managed-memory) 设为0，以保证将最大限度的内存分配给 JVM 上的用户代码。
 
@@ -96,6 +102,44 @@ EmbeddedRocksDBStateBackend 是目前唯一支持增量 CheckPoint 的 State Bac
 可以使用一些 RocksDB 的本地指标(metrics)，但默认是关闭的。你能在 [这里]({{< ref "docs/deployment/config" >}}#rocksdb-native-metrics) 找到关于 RocksDB 本地指标的文档。
 
 每个 slot 中的 RocksDB instance 的内存大小是有限制的，详情请见 [这里]({{< ref "docs/ops/state/large_state_tuning" >}})。
+
+<a name="the-forststatebackend"></a>
+
+### The ForStStateBackend
+
+The *ForStStateBackend* is a state backend that is based on [ForSt project](https://github.com/ververica/ForSt),
+which is also a LSM-tree structured key-value store and built on top of the RocksDB.
+It is designed for disaggregated state management, for more details, see [here]({{< ref "docs/ops/state/disaggregated_state" >}}).
+Most importantly, it can hold its sst files on remote file systems that Flink supports, such as HDFS, S3, etc.
+This allows Flink to scale the state size beyond the local disk capacity of the TaskManager.
+Moreover, by putting the sst files on remote file systems, it can also provide a more lightweight
+way to perform checkpoint and recovery.
+
+The ForStStateBackend is still in the experimental stage and is not fully available for production.
+It always performs asynchronous incremental snapshots.
+
+The ForStStateBackend is encouraged for:
+
+- Jobs with very large state, long windows, large key/value states. Local disk may not be enough to 
+store the state.
+- All high-availability setups.
+- Asynchronous state access is preferred. Since the ForStStateBackend is the only one supporting 
+asynchronous state access.
+- Jobs that require lightweight checkpoint and recovery, such as cloud-native applications.
+
+Limitations of the ForStStateBackend (for now):
+
+- Same as EmbeddedRocksDBStateBackend, the maximum supported size per key and per value is 2^31 bytes each.
+- Does not support canonical savepoint, full snapshot, changelog and file-merging checkpoints.
+Always perform incremental snapshots.
+
+Compared with EmbeddedRocksDBStateBackend, ForStStateBackend stores data on remote file system, thus
+the amount of state that you can keep is unlimited. The local disk of TaskManager is only used to
+store cache of file, to provide better performance. Note that when most of the active state is on
+remote file system, the performance of state access may be affected by the network latency. Flink
+introduces asynchronous state access to mitigate this issue. If you are using the asynchronous state
+methods in State API V2, you can benefit from the asynchronous state access. To get familiar with the
+State API V2, please refer to the [State API V2 documentation]({{< ref "docs/dev/datastream/fault-tolerance/state_v2" >}}).
 
 <a name="choose-the-right-state-backend"></a>
 

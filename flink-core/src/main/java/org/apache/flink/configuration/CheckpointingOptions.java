@@ -583,6 +583,19 @@ public class CheckpointingOptions {
                                                     + "will timeout and checkpoint barrier will start working as unaligned checkpoint.")
                                     .build());
 
+    public static final ConfigOption<Duration> CHECKPOINTING_SYNC_PHASE_TIMEOUT =
+            ConfigOptions.key("execution.checkpointing.sync-phase-timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(0L))
+                    .withDescription(
+                            "A timeout for the synchronous phase of a checkpoint, after which a task cancellation is triggered."
+                                    + " If the task thread is merely slow, the task will restart and continue."
+                                    + " If a true thread blockage is encountered, (e.g. by a blocking native call), "
+                                    + " a fatal error will be thrown after the "
+                                    + TaskManagerOptions.TASK_CANCELLATION_TIMEOUT.key()
+                                    + "and trigger a TM restart to address the blockage."
+                                    + " Defaults to 0 (disabled).");
+
     public static final ConfigOption<Boolean> FORCE_UNALIGNED =
             ConfigOptions.key("execution.checkpointing.unaligned.forced")
                     .booleanType()
@@ -610,6 +623,31 @@ public class CheckpointingOptions {
                             "Allows unaligned checkpoints to skip timers that are currently being fired."
                                     + " For this feature to be enabled, it must be also supported by the operator."
                                     + " Currently this is supported by all TableStreamOperators and CepOperator.");
+
+    /**
+     * Controls whether an intermediate watermark is emitted while a watermark advance is
+     * interrupted before completing, for unaligned checkpoints with interruptible timers enabled
+     * (see {@link #ENABLE_UNALIGNED_INTERRUPTIBLE_TIMERS}). Has no effect unless interruptible
+     * timers are enabled. The emission interval is governed by {@link
+     * PipelineOptions#AUTO_WATERMARK_INTERVAL}, the same as regular periodic watermark generation,
+     * since both have comparable performance implications.
+     */
+    @Experimental
+    public static final ConfigOption<Boolean>
+            UNALIGNED_INTERRUPTIBLE_TIMERS_EMIT_INTERMEDIATE_WATERMARKS =
+                    ConfigOptions.key(
+                                    "execution.checkpointing.unaligned.interruptible-timers.emit-intermediate-watermarks")
+                            .booleanType()
+                            .defaultValue(true)
+                            .withDescription(
+                                    "When unaligned checkpoints with interruptible timers are enabled (see"
+                                            + " 'execution.checkpointing.unaligned.interruptible-timers.enabled') and"
+                                            + " firing the timers due for a watermark advance is interrupted before"
+                                            + " completing, an intermediate watermark reflecting the progress made so"
+                                            + " far is emitted downstream, at most as often as configured by"
+                                            + " 'pipeline.auto-watermark-interval'. This keeps downstream operators"
+                                            + " from stalling on watermark progress during a long-running catch-up."
+                                            + " Set to false to disable intermediate watermark emission.");
 
     public static final ConfigOption<Boolean> ENABLE_CHECKPOINTS_AFTER_TASKS_FINISH =
             ConfigOptions.key("execution.checkpointing.checkpoints-after-tasks-finish")
@@ -659,6 +697,7 @@ public class CheckpointingOptions {
                                     + "Each subtask will create a new channel state file when this is configured to 1.");
 
     @Experimental
+    @Documentation.Section(Documentation.Sections.COMMON_CHECKPOINTING)
     public static final ConfigOption<Boolean> UNALIGNED_RECOVER_OUTPUT_ON_DOWNSTREAM =
             ConfigOptions.key(
                             "execution.checkpointing.unaligned.recover-output-on-downstream.enabled")
@@ -667,6 +706,31 @@ public class CheckpointingOptions {
                     .withDescription(
                             "Whether recovering output buffers of upstream task on downstream task directly "
                                     + "when job restores from the unaligned checkpoint.");
+
+    @Experimental
+    @Documentation.Section(Documentation.Sections.COMMON_CHECKPOINTING)
+    public static final ConfigOption<Boolean> CHECKPOINTING_DURING_RECOVERY_ENABLED =
+            ConfigOptions.key("execution.checkpointing.during-recovery.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "Whether to enable checkpointing during recovery from an unaligned checkpoint. "
+                                                    + "When enabled, the job can take checkpoints while still recovering channel state "
+                                                    + "(inflight data) from a previous unaligned checkpoint. This avoids the need to "
+                                                    + "wait for full recovery before the first checkpoint can be triggered, which "
+                                                    + "reduces the window of vulnerability to failures during recovery.")
+                                    .linebreak()
+                                    .linebreak()
+                                    .text(
+                                            "This option requires %s to be enabled. "
+                                                    + "It does not require unaligned checkpoints to be currently enabled, because "
+                                                    + "a job may restore from an unaligned checkpoint while having unaligned "
+                                                    + "checkpoints disabled for the new execution.",
+                                            TextElement.code(
+                                                    UNALIGNED_RECOVER_OUTPUT_ON_DOWNSTREAM.key()))
+                                    .build());
 
     /**
      * Determines whether checkpointing is enabled based on the configuration.
@@ -762,5 +826,25 @@ public class CheckpointingOptions {
             return false;
         }
         return config.get(ENABLE_UNALIGNED_INTERRUPTIBLE_TIMERS);
+    }
+
+    /**
+     * Determines whether unaligned checkpoint support during recovery is enabled.
+     *
+     * <p>Requires both {@link #UNALIGNED_RECOVER_OUTPUT_ON_DOWNSTREAM} and unaligned checkpoints to
+     * be enabled, because checkpointing during recovery is only supported on the unaligned
+     * barrier-handler path.
+     *
+     * @param config the configuration to check
+     * @return {@code true} if unaligned checkpointing during recovery is enabled, {@code false}
+     *     otherwise
+     */
+    @Internal
+    public static boolean isCheckpointingDuringRecoveryEnabled(Configuration config) {
+        if (!config.get(UNALIGNED_RECOVER_OUTPUT_ON_DOWNSTREAM)) {
+            return false;
+        }
+        return config.get(CHECKPOINTING_DURING_RECOVERY_ENABLED)
+                && isUnalignedCheckpointEnabled(config);
     }
 }

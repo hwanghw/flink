@@ -26,6 +26,7 @@ import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.types.Row;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.Objects;
@@ -34,6 +35,7 @@ import java.util.stream.Stream;
 import static org.apache.flink.table.api.DataTypes.ARRAY;
 import static org.apache.flink.table.api.DataTypes.BIGINT;
 import static org.apache.flink.table.api.DataTypes.BINARY;
+import static org.apache.flink.table.api.DataTypes.BITMAP;
 import static org.apache.flink.table.api.DataTypes.BOOLEAN;
 import static org.apache.flink.table.api.DataTypes.BYTES;
 import static org.apache.flink.table.api.DataTypes.FIELD;
@@ -248,6 +250,16 @@ class CastFunctionMiscITCase extends BuiltInFunctionTestBase {
                                 call("CreateMultiset", $("f0")).cast(STRING()),
                                 "{a=1, b=2}",
                                 STRING()),
+                TestSetSpec.forFunction(BuiltInFunctionDefinitions.CAST, "cast MULTISET to BITMAP")
+                        .onFieldsWithData(map(entry("a", 1), entry("b", 2)))
+                        .andDataTypes(MAP(STRING(), INT()))
+                        .withFunction(JsonFunctionsITCase.CreateMultiset.class)
+                        .testTableApiValidationError(
+                                call("CreateMultiset", $("f0")).cast(BITMAP()),
+                                "Unsupported cast from 'MULTISET<STRING>' to 'BITMAP'")
+                        .testSqlValidationError(
+                                "CAST(CreateMultiset(f0) AS BITMAP)",
+                                "Cast function cannot convert value of type VARCHAR(2147483647) MULTISET to type BITMAP"),
                 TestSetSpec.forFunction(BuiltInFunctionDefinitions.CAST, "cast RAW to STRING")
                         .onFieldsWithData("2020-11-11T18:08:01.123")
                         .andDataTypes(STRING())
@@ -333,7 +345,23 @@ class CastFunctionMiscITCase extends BuiltInFunctionTestBase {
                                 $("f1").tryCast(MAP(INT(), ARRAY(INT()))),
                                 "TRY_CAST(f1 AS MAP<INT, ARRAY<INT>>)",
                                 null,
-                                MAP(INT(), ARRAY(INT())).nullable()));
+                                MAP(INT(), ARRAY(INT())).nullable()),
+                TestSetSpec.forFunction(
+                                BuiltInFunctionDefinitions.TRY_CAST,
+                                "try cast from BYTES with invalid UTF-8 to STRING returns NULL")
+                        .onFieldsWithData(
+                                new byte[] {(byte) 0x80}, "Hello".getBytes(StandardCharsets.UTF_8))
+                        .andDataTypes(BYTES(), BYTES())
+                        .testResult(
+                                $("f0").tryCast(STRING()),
+                                "TRY_CAST(f0 AS STRING)",
+                                null,
+                                STRING().nullable())
+                        .testResult(
+                                $("f1").tryCast(STRING()),
+                                "TRY_CAST(f1 AS STRING)",
+                                "Hello",
+                                STRING().nullable()));
     }
 
     // --------------------------------------------------------------------------------------------

@@ -20,11 +20,14 @@ package org.apache.flink.table.api;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.PublicEvolving;
+import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.api.config.TableConfigOptions;
 import org.apache.flink.table.catalog.CatalogStore;
 import org.apache.flink.table.expressions.SqlFactory;
 import org.apache.flink.table.functions.UserDefinedFunction;
+import org.apache.flink.table.secret.SecretStore;
+import org.apache.flink.util.Preconditions;
 
 import javax.annotation.Nullable;
 
@@ -66,16 +69,19 @@ public class EnvironmentSettings {
 
     private final @Nullable CatalogStore catalogStore;
     private final @Nullable SqlFactory sqlFactory;
+    private final @Nullable SecretStore secretStore;
 
     private EnvironmentSettings(
             Configuration configuration,
             ClassLoader classLoader,
             CatalogStore catalogStore,
-            SqlFactory sqlFactory) {
+            SqlFactory sqlFactory,
+            SecretStore secretStore) {
         this.configuration = configuration;
         this.classLoader = classLoader;
         this.catalogStore = catalogStore;
         this.sqlFactory = sqlFactory;
+        this.secretStore = secretStore;
     }
 
     /**
@@ -153,6 +159,11 @@ public class EnvironmentSettings {
         return Optional.ofNullable(sqlFactory);
     }
 
+    @Internal
+    public Optional<SecretStore> getSecretStore() {
+        return Optional.ofNullable(secretStore);
+    }
+
     /** A builder for {@link EnvironmentSettings}. */
     @PublicEvolving
     public static class Builder {
@@ -162,6 +173,7 @@ public class EnvironmentSettings {
 
         private @Nullable CatalogStore catalogStore;
         private @Nullable SqlFactory sqlFactory;
+        private @Nullable SecretStore secretStore;
 
         public Builder() {}
 
@@ -174,6 +186,20 @@ public class EnvironmentSettings {
         /** Sets that the components should work in a streaming mode. Enabled by default. */
         public Builder inStreamingMode() {
             configuration.set(RUNTIME_MODE, STREAMING);
+            return this;
+        }
+
+        /** Sets the {@link RuntimeExecutionMode} that the components should work in. */
+        public Builder inRuntimeExecutionMode(RuntimeExecutionMode mode) {
+            Preconditions.checkArgument(
+                    mode == STREAMING || mode == BATCH,
+                    "Unsupported value '%s' for '%s'. "
+                            + "Only an explicit %s or %s mode is supported in Table API.",
+                    mode,
+                    RUNTIME_MODE.key(),
+                    STREAMING,
+                    BATCH);
+            configuration.set(RUNTIME_MODE, mode);
             return this;
         }
 
@@ -250,12 +276,28 @@ public class EnvironmentSettings {
             return this;
         }
 
+        /**
+         * Specifies the {@link SecretStore} to be used for managing secrets in the {@link
+         * TableEnvironment}.
+         *
+         * <p>The secret store allows for secure storage and retrieval of sensitive configuration
+         * data such as credentials, tokens, and passwords.
+         *
+         * @param secretStore the secret store instance to use
+         * @return this builder
+         */
+        public Builder withSecretStore(SecretStore secretStore) {
+            this.secretStore = secretStore;
+            return this;
+        }
+
         /** Returns an immutable instance of {@link EnvironmentSettings}. */
         public EnvironmentSettings build() {
             if (classLoader == null) {
                 classLoader = Thread.currentThread().getContextClassLoader();
             }
-            return new EnvironmentSettings(configuration, classLoader, catalogStore, sqlFactory);
+            return new EnvironmentSettings(
+                    configuration, classLoader, catalogStore, sqlFactory, secretStore);
         }
     }
 }

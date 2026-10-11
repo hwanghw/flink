@@ -17,7 +17,6 @@
  */
 package org.apache.flink.table.planner.codegen
 
-import org.apache.flink.api.common.functions.Function
 import org.apache.flink.api.common.typeutils.TypeSerializer
 import org.apache.flink.configuration.ReadableConfig
 import org.apache.flink.table.data.GenericRowData
@@ -32,7 +31,7 @@ import org.apache.flink.table.runtime.util.collections._
 import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.logical._
 import org.apache.flink.table.types.logical.LogicalTypeRoot._
-import org.apache.flink.table.utils.DateTimeUtils
+import org.apache.flink.table.utils.{DateTimeUtils, EncodingUtils}
 import org.apache.flink.util.InstantiationUtil
 
 import java.time.ZoneId
@@ -116,6 +115,36 @@ class CodeGeneratorContext(
   val reusableInputUnboxingExprs: mutable.Map[(String, Int), GeneratedExpression] =
     mutable.Map[(String, Int), GeneratedExpression]()
 
+  // Stack of RexLocalRef cache scopes (`exprList-index -> generated body`).
+  //   * Bottom scope == getReusableLocalRefExprBottomScope: bodies are hoisted to the top of the method
+  //     and run unconditionally for every row.
+  //   * Inner scopes (push/popLocalRefScope): bodies are folded into a single guarded
+  //     operand's code by ExprCodeGenerator.visitOperandInScopedCache and run only when
+  //     the guard fires. Inserts always target the innermost scope; lookup walks innermost-out.
+  //
+  // Example — `CASE WHEN b <> 0 THEN a / b ELSE NULL`:
+  //
+  //   With scoping (correct):
+  //     boolean cmp = b != 0;
+  //     if (cmp) {
+  //       int div = a / b;        // emitted inside the guarded scope
+  //       result = div;
+  //     } else {
+  //       result = null;
+  //     }
+  //
+  //   Without scoping (buggy):
+  //     int div = a / b;          // throws ArithmeticException when b == 0
+  //     boolean cmp = b != 0;
+  //     if (cmp) { result = div; }
+  //     else     { result = null; }
+  //
+  // The set of operand positions that get scoped lives in
+  // ExprCodeGenerator.conditionalOperandIndices — extend it when adding new short-circuit
+  // operators.
+  private val localRefScopes =
+    mutable.ArrayBuffer(mutable.LinkedHashMap.empty[Int, GeneratedExpression])
+
   // set of constructor statements that will be added only once
   // we use a LinkedHashSet to keep the insertion order
   private val reusableConstructorStatements: mutable.LinkedHashSet[(String, String)] =
@@ -128,6 +157,14 @@ class CodeGeneratorContext(
   // map of string constants that will be added only once
   // string_constant -> reused_term
   private val reusableStringConstants: mutable.Map[String, String] = mutable.Map[String, String]()
+
+  // set of function instance term that will be added only once
+  private val reusableFunctionTerms: mutable.HashSet[String] = mutable.HashSet[String]()
+
+  // UDF-metrics handle field terms keyed on UDF name. All call sites of the same function in one
+  // operator share a single UdfMetrics registration (one histogram + one counter), because
+  // registering the same metric name twice on a group is silently dropped.
+  private val reusableUdfMetricsTerms: mutable.Map[String, String] = mutable.Map[String, String]()
 
   // map of type serializer that will be added only once
   // LogicalType -> reused_term
@@ -645,9 +682,10 @@ class CodeGeneratorContext(
             " This is a bug, please file an issue.")
       })
 
+    val escapedQueryStartCurrentDatabase = EncodingUtils.escapeJava(queryStartCurrentDatabase);
     reusableMemberStatements.add(s"""
                                     |private static final $BINARY_STRING $fieldTerm =
-                                    |$BINARY_STRING.fromString("$queryStartCurrentDatabase");
+                                    |$BINARY_STRING.fromString("$escapedQueryStartCurrentDatabase");
                                     |""".stripMargin)
 
     fieldTerm
@@ -779,6 +817,7 @@ class CodeGeneratorContext(
 
   /**
    * Adds a reusable Object to the member area of the generated class
+   *
    * @param obj
    *   the object to be added to the generated class
    * @param fieldNamePrefix
@@ -835,10 +874,13 @@ class CodeGeneratorContext(
       function: UserDefinedFunction,
       functionContextClass: Class[_ <: FunctionContext] = classOf[FunctionContext],
       contextArgs: Seq[String] = null): String = {
-    val classQualifier = function.getClass.getName
     val fieldTerm = CodeGenUtils.udfFieldName(function)
-
-    addReusableObjectInternal(function, fieldTerm, classQualifier)
+    // check if function has been added before to avoid duplicate function instances
+    if (!reusableFunctionTerms.contains(fieldTerm)) {
+      reusableFunctionTerms += fieldTerm
+      val classQualifier = function.getClass.getName
+      addReusableObjectInternal(function, fieldTerm, classQualifier)
+    }
 
     val openFunction = if (contextArgs != null) {
       s"""
@@ -860,6 +902,33 @@ class CodeGeneratorContext(
     reusableCloseStatements.add(closeFunction)
 
     fieldTerm
+  }
+
+  /**
+   * Returns the member field term of the [[UdfMetrics]] handle for the given UDF name, registering
+   * it in the generated `open()` on first use. Subsequent calls for the same name return the cached
+   * term, so every call site of one function in an operator feeds a single histogram and counter.
+   *
+   * @param udfName
+   *   registered UDF identifier, used as the metric-group name under `<operator>.udf.<udfName>`
+   * @param sampleInterval
+   *   measure one invocation out of every `sampleInterval`
+   */
+  def addReusableUdfMetrics(udfName: String, sampleInterval: Int): String = {
+    reusableUdfMetricsTerms.getOrElseUpdate(
+      udfName, {
+        val fieldTerm = newName(this, "udfMetrics")
+        addReusableMember(
+          s"private transient org.apache.flink.table.runtime.operators.metrics.UdfMetrics $fieldTerm;")
+        val escapedName = EncodingUtils.escapeJava(udfName)
+        addReusableOpenStatement(
+          s"""
+             |$fieldTerm = org.apache.flink.table.runtime.operators.metrics.UdfMetrics.register(
+             |    getRuntimeContext().getMetricGroup(), "$escapedName", $sampleInterval);
+             |""".stripMargin)
+        fieldTerm
+      }
+    )
   }
 
   /**
@@ -982,22 +1051,21 @@ class CodeGeneratorContext(
   }
 
   /**
-   * Adds a reusable string constant to the member area of the generated class.
+   * Adds an already pre-escaped string constant to the reusable member area of the generated class.
    *
-   * The string must be already escaped with
-   * [[org.apache.flink.table.utils.EncodingUtils.escapeJava()]].
+   * The string must be already escaped with [[EncodingUtils.escapeJava()]].
    */
-  def addReusableEscapedStringConstant(value: String): String = {
-    reusableStringConstants.get(value) match {
+  def addReusablePreEscapedStringConstant(alreadyEscapedValue: String): String = {
+    reusableStringConstants.get(alreadyEscapedValue) match {
       case Some(field) => field
       case None =>
         val field = newName(this, "str")
         val stmt =
           s"""
-             |private final $BINARY_STRING $field = $BINARY_STRING.fromString("$value");
+             |private final $BINARY_STRING $field = $BINARY_STRING.fromString("$alreadyEscapedValue");
            """.stripMargin
         reusableMemberStatements.add(stmt)
-        reusableStringConstants(value) = field
+        reusableStringConstants(alreadyEscapedValue) = field
         field
     }
   }
@@ -1068,5 +1136,62 @@ class CodeGeneratorContext(
     reusableInitStatements.add(nullableInit)
 
     fieldTerm
+  }
+
+  // ---------------------------------------------------------------------------------
+  // Reusable local ref code with scope
+  // ---------------------------------------------------------------------------------
+
+  // Bottom scope of localRefScopes: holds unconditionally evaluated local refs.
+  def getReusableLocalRefExprBottomScope: mutable.LinkedHashMap[Int, GeneratedExpression] =
+    localRefScopes(0)
+
+  /**
+   * Adds a reusable [[org.apache.calcite.rex.RexLocalRef]] expression keyed by its index in the
+   * program's exprList. The expression is stored in the innermost active scope.
+   */
+  def addReusableLocalRefExpr(index: Int, expr: GeneratedExpression): Unit =
+    localRefScopes.last(index) = expr
+
+  /**
+   * Looks up a previously cached [[org.apache.calcite.rex.RexLocalRef]] expression by its exprList
+   * index. Scopes are searched innermost-out so that a body cached inside a guarded scope takes
+   * precedence over an outer entry.
+   */
+  def getReusableLocalRefExpr(index: Int): Option[GeneratedExpression] = {
+    // Search innermost-out: a body cached in an inner (guarded) scope wins over outer
+    // entries. In practice the cache is monotone — an entry never appears in two scopes
+    // simultaneously.
+    var i = localRefScopes.size - 1
+    while (i >= 0) {
+      val maybe = localRefScopes(i).get(index)
+      if (maybe.isDefined) return maybe
+      i -= 1
+    }
+    None
+  }
+
+  /**
+   * Returns the generated code for all unconditionally-evaluated local-ref expressions (bottom
+   * scope), concatenated in insertion order.
+   */
+  def reuseLocalRefCode(): String = {
+    getReusableLocalRefExprBottomScope.values.map(_.code).mkString("\n")
+  }
+
+  /** Pushes a new, empty local-ref cache scope onto the scope stack. */
+  def pushLocalRefScope(): Unit = {
+    localRefScopes.append(mutable.LinkedHashMap.empty)
+  }
+
+  /**
+   * Pops the innermost local-ref cache scope and returns its entries. The bottom scope
+   * ([[getReusableLocalRefExprBottomScope]]) cannot be popped.
+   */
+  def popLocalRefScope(): scala.collection.Map[Int, GeneratedExpression] = {
+    require(
+      localRefScopes.size > 1,
+      "Cannot pop the bottom RexLocalRef cache scope (reusableLocalRefExprs).")
+    localRefScopes.remove(localRefScopes.size - 1)
   }
 }

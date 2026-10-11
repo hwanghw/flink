@@ -33,6 +33,7 @@ import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.serialization.SerializerConfig;
 import org.apache.flink.api.common.typeinfo.BasicArrayTypeInfo;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
+import org.apache.flink.api.common.typeinfo.BitmapTypeInfo;
 import org.apache.flink.api.common.typeinfo.PrimitiveArrayTypeInfo;
 import org.apache.flink.api.common.typeinfo.SqlTimeTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeHint;
@@ -54,6 +55,8 @@ import org.apache.flink.types.IntValue;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.StringValue;
 import org.apache.flink.types.Value;
+import org.apache.flink.types.bitmap.Bitmap;
+import org.apache.flink.types.bitmap.RoaringBitmapData;
 import org.apache.flink.types.variant.BinaryVariant;
 import org.apache.flink.types.variant.Variant;
 import org.apache.flink.util.Collector;
@@ -74,6 +77,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -110,6 +114,26 @@ public class TypeExtractorTest {
 
         // use getForObject()
         assertThat(TypeExtractor.getForObject(true)).isEqualTo(BasicTypeInfo.BOOLEAN_TYPE_INFO);
+    }
+
+    @Test
+    void testMapWithExplicitUuidType() {
+        // A lambda would bypass the input validation exercised by this test.
+        final MapFunction<UUID, String> mapper =
+                new MapFunction<UUID, String>() {
+                    @Override
+                    public String map(UUID value) {
+                        return value.toString();
+                    }
+                };
+
+        assertThat(TypeExtractor.getMapReturnTypes(mapper, Types.UUID)).isEqualTo(Types.STRING);
+    }
+
+    @Test
+    void testUuidIsNotAutomaticallyExtracted() {
+        assertThat(TypeExtractor.getForObject(new UUID(0L, 0L)))
+                .isEqualTo(new GenericTypeInfo<>(UUID.class));
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -2113,6 +2137,13 @@ public class TypeExtractorTest {
         assertThat(TypeExtractor.createTypeInfo(Variant.class)).isEqualTo(VariantTypeInfo.INSTANCE);
         assertThat(TypeExtractor.createTypeInfo(BinaryVariant.class))
                 .isEqualTo(VariantTypeInfo.INSTANCE);
+    }
+
+    @Test
+    void testBitmapType() {
+        assertThat(TypeExtractor.createTypeInfo(Bitmap.class)).isEqualTo(BitmapTypeInfo.INSTANCE);
+        assertThat(TypeExtractor.createTypeInfo(RoaringBitmapData.class))
+                .isEqualTo(BitmapTypeInfo.INSTANCE);
     }
 
     public static class MapperWithMultiDimGenericArray<T>

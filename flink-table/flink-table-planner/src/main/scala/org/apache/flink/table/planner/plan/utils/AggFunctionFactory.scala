@@ -37,7 +37,7 @@ import org.apache.calcite.sql.fun._
 
 import java.util
 
-import scala.collection.JavaConversions._
+import scala.collection.JavaConverters._
 
 /**
  * Factory for creating runtime implementation for internal aggregate functions that are declared as
@@ -62,7 +62,7 @@ class AggFunctionFactory(
   /** The entry point to create an aggregate function from the given [[AggregateCall]]. */
   def createAggFunction(call: AggregateCall, index: Int): UserDefinedFunction = {
 
-    val argTypes: Array[LogicalType] = call.getArgList
+    val argTypes: Array[LogicalType] = call.getArgList.asScala
       .map(inputRowType.getChildren.get(_))
       .toArray
 
@@ -142,10 +142,6 @@ class AggFunctionFactory(
       case _: SqlListAggFunction if call.getArgList.size() == 2 =>
         createListAggWsFunction(argTypes, index)
 
-      case a: SqlBasicAggFunction
-          if a.getName == BuiltInFunctionDefinitions.INTERNAL_WELFORD_M2.getName =>
-        createWelfordM2AggFunction(argTypes)
-
       // TODO supports SqlCardinalityCountAggFunction
 
       case a: SqlAggFunction if a.getKind == SqlKind.COLLECT =>
@@ -172,8 +168,26 @@ class AggFunctionFactory(
       case bridge: BridgingSqlAggFunction =>
         bridge.getDefinition match {
           // built-in imperativeFunction
+          case BuiltInFunctionDefinitions.INTERNAL_WELFORD_M2 =>
+            createWelfordM2AggFunction(argTypes)
           case BuiltInFunctionDefinitions.PERCENTILE =>
             createPercentileAggFunction(argTypes)
+          case BuiltInFunctionDefinitions.BITMAP_BUILD_AGG =>
+            createBitmapBuildAggFunction(argTypes, index)
+          case BuiltInFunctionDefinitions.BITMAP_BUILD_CARDINALITY_AGG =>
+            createBitmapBuildCardinalityAggFunction(argTypes, index)
+          case BuiltInFunctionDefinitions.BITMAP_AND_AGG =>
+            createBitmapAndAggFunction(argTypes, index)
+          case BuiltInFunctionDefinitions.BITMAP_AND_CARDINALITY_AGG =>
+            createBitmapAndCardinalityAggFunction(argTypes, index)
+          case BuiltInFunctionDefinitions.BITMAP_OR_AGG =>
+            createBitmapOrAggFunction(argTypes, index)
+          case BuiltInFunctionDefinitions.BITMAP_OR_CARDINALITY_AGG =>
+            createBitmapOrCardinalityAggFunction(argTypes, index)
+          case BuiltInFunctionDefinitions.BITMAP_XOR_AGG =>
+            createBitmapXorAggFunction(argTypes, index)
+          case BuiltInFunctionDefinitions.BITMAP_XOR_CARDINALITY_AGG =>
+            createBitmapXorCardinalityAggFunction(argTypes, index)
           // DeclarativeAggregateFunction & UDF
           case _ =>
             bridge.getDefinition.asInstanceOf[UserDefinedFunction]
@@ -318,7 +332,8 @@ class AggFunctionFactory(
         case DATE =>
           new MinAggFunction.DateMinAggFunction
         case TIME_WITHOUT_TIME_ZONE =>
-          new MinAggFunction.TimeMinAggFunction
+          val t = argTypes(0).asInstanceOf[TimeType]
+          new MinAggFunction.TimeMinAggFunction(t)
         case TIMESTAMP_WITHOUT_TIME_ZONE =>
           val d = argTypes(0).asInstanceOf[TimestampType]
           new MinAggFunction.TimestampMinAggFunction(d)
@@ -377,7 +392,8 @@ class AggFunctionFactory(
       case DATE =>
         new LeadLagAggFunction.DateLeadLagAggFunction(argTypes.length)
       case TIME_WITHOUT_TIME_ZONE =>
-        new LeadLagAggFunction.TimeLeadLagAggFunction(argTypes.length)
+        val t = argTypes(0).asInstanceOf[TimeType]
+        new LeadLagAggFunction.TimeLeadLagAggFunction(t, argTypes.length)
       case TIMESTAMP_WITHOUT_TIME_ZONE =>
         val d = argTypes(0).asInstanceOf[TimestampType]
         new LeadLagAggFunction.TimestampLeadLagAggFunction(argTypes.length, d)
@@ -427,7 +443,8 @@ class AggFunctionFactory(
         case DATE =>
           new MaxAggFunction.DateMaxAggFunction
         case TIME_WITHOUT_TIME_ZONE =>
-          new MaxAggFunction.TimeMaxAggFunction
+          val t = argTypes(0).asInstanceOf[TimeType]
+          new MaxAggFunction.TimeMaxAggFunction(t)
         case TIMESTAMP_WITHOUT_TIME_ZONE =>
           val d = argTypes(0).asInstanceOf[TimestampType]
           new MaxAggFunction.TimestampMaxAggFunction(d)
@@ -520,7 +537,8 @@ class AggFunctionFactory(
       case DATE =>
         new DateSingleValueAggFunction
       case TIME_WITHOUT_TIME_ZONE =>
-        new TimeSingleValueAggFunction
+        val t = argTypes(0).asInstanceOf[TimeType]
+        new TimeSingleValueAggFunction(t)
       case TIMESTAMP_WITHOUT_TIME_ZONE =>
         val d = argTypes(0).asInstanceOf[TimestampType]
         new TimestampSingleValueAggFunction(d)
@@ -643,6 +661,90 @@ class AggFunctionFactory(
       new MultiPercentileAggFunction(firstArg, secondArg)
     } else {
       new SinglePercentileAggFunction(firstArg, secondArg)
+    }
+  }
+
+  private def createBitmapBuildAggFunction(
+      argTypes: Array[LogicalType],
+      index: Int): UserDefinedFunction = {
+    if (aggCallNeedRetractions(index)) {
+      new AbstractBitmapBuildWithRetractAggFunction.BitmapBuildWithRetractAggFunction(argTypes(0))
+    } else {
+      new AbstractBitmapBuildAggFunction.BitmapBuildAggFunction(argTypes(0))
+    }
+  }
+
+  private def createBitmapBuildCardinalityAggFunction(
+      argTypes: Array[LogicalType],
+      index: Int): UserDefinedFunction = {
+    if (aggCallNeedRetractions(index)) {
+      new AbstractBitmapBuildWithRetractAggFunction.BitmapBuildCardinalityWithRetractAggFunction(
+        argTypes(0))
+    } else {
+      new AbstractBitmapBuildAggFunction.BitmapBuildCardinalityAggFunction(argTypes(0))
+    }
+  }
+
+  private def createBitmapAndAggFunction(
+      argTypes: Array[LogicalType],
+      index: Int): UserDefinedFunction = {
+    if (aggCallNeedRetractions(index)) {
+      new AbstractBitmapAndWithRetractAggFunction.BitmapAndWithRetractAggFunction(argTypes(0))
+    } else {
+      new AbstractBitmapAndAggFunction.BitmapAndAggFunction(argTypes(0))
+    }
+  }
+
+  private def createBitmapAndCardinalityAggFunction(
+      argTypes: Array[LogicalType],
+      index: Int): UserDefinedFunction = {
+    if (aggCallNeedRetractions(index)) {
+      new AbstractBitmapAndWithRetractAggFunction.BitmapAndCardinalityWithRetractAggFunction(
+        argTypes(0))
+    } else {
+      new AbstractBitmapAndAggFunction.BitmapAndCardinalityAggFunction(argTypes(0))
+    }
+  }
+
+  private def createBitmapOrAggFunction(
+      argTypes: Array[LogicalType],
+      index: Int): UserDefinedFunction = {
+    if (aggCallNeedRetractions(index)) {
+      new AbstractBitmapOrWithRetractAggFunction.BitmapOrWithRetractAggFunction(argTypes(0))
+    } else {
+      new AbstractBitmapOrAggFunction.BitmapOrAggFunction(argTypes(0))
+    }
+  }
+
+  private def createBitmapOrCardinalityAggFunction(
+      argTypes: Array[LogicalType],
+      index: Int): UserDefinedFunction = {
+    if (aggCallNeedRetractions(index)) {
+      new AbstractBitmapOrWithRetractAggFunction.BitmapOrCardinalityWithRetractAggFunction(
+        argTypes(0))
+    } else {
+      new AbstractBitmapOrAggFunction.BitmapOrCardinalityAggFunction(argTypes(0))
+    }
+  }
+
+  private def createBitmapXorAggFunction(
+      argTypes: Array[LogicalType],
+      index: Int): UserDefinedFunction = {
+    if (aggCallNeedRetractions(index)) {
+      new AbstractBitmapXorWithRetractAggFunction.BitmapXorWithRetractAggFunction(argTypes(0))
+    } else {
+      new AbstractBitmapXorAggFunction.BitmapXorAggFunction(argTypes(0))
+    }
+  }
+
+  private def createBitmapXorCardinalityAggFunction(
+      argTypes: Array[LogicalType],
+      index: Int): UserDefinedFunction = {
+    if (aggCallNeedRetractions(index)) {
+      new AbstractBitmapXorWithRetractAggFunction.BitmapXorCardinalityWithRetractAggFunction(
+        argTypes(0))
+    } else {
+      new AbstractBitmapXorAggFunction.BitmapXorCardinalityAggFunction(argTypes(0))
     }
   }
 }

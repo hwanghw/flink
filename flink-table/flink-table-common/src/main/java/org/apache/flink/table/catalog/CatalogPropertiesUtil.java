@@ -96,6 +96,9 @@ public final class CatalogPropertiesUtil {
             final Optional<TableDistribution> distribution = resolvedTable.getDistribution();
             distribution.ifPresent(d -> serializeTableDistribution(properties, d));
 
+            final Optional<UnresolvedIdentifier> connection = resolvedTable.getConnection();
+            connection.ifPresent(c -> serializeConnection(properties, c));
+
             properties.putAll(resolvedTable.getOptions());
 
             properties.remove(IS_GENERIC); // reserved option
@@ -251,6 +254,8 @@ public final class CatalogPropertiesUtil {
             final @Nullable TableDistribution distribution =
                     deserializeTableDistribution(properties);
 
+            final @Nullable UnresolvedIdentifier connection = deserializeConnection(properties);
+
             return CatalogTable.newBuilder()
                     .schema(schema)
                     .comment(comment)
@@ -258,6 +263,7 @@ public final class CatalogPropertiesUtil {
                     .distribution(distribution)
                     .options(options)
                     .snapshot(snapshot)
+                    .connection(connection)
                     .build();
         } catch (Exception e) {
             throw new CatalogException("Error in deserializing catalog table.", e);
@@ -288,8 +294,8 @@ public final class CatalogPropertiesUtil {
             final String expandedQuery = properties.get(EXPANDED_QUERY);
 
             final String freshnessInterval = properties.get(FRESHNESS_INTERVAL);
-            final IntervalFreshness.TimeUnit timeUnit =
-                    IntervalFreshness.TimeUnit.valueOf(properties.get(FRESHNESS_UNIT));
+            final Interval.TimeUnit timeUnit =
+                    Interval.TimeUnit.valueOf(properties.get(FRESHNESS_UNIT));
             final IntervalFreshness freshness = IntervalFreshness.of(freshnessInterval, timeUnit);
 
             final LogicalRefreshMode logicalRefreshMode =
@@ -376,6 +382,8 @@ public final class CatalogPropertiesUtil {
 
     private static final String PRIMARY_KEY = "primary-key";
 
+    private static final String IMMUTABLE = "immutable";
+
     private static final String COLUMNS = "columns";
 
     private static final String PARTITION = "partition";
@@ -398,6 +406,10 @@ public final class CatalogPropertiesUtil {
     private static final String PRIMARY_KEY_NAME = compoundKey(PRIMARY_KEY, NAME);
 
     private static final String PRIMARY_KEY_COLUMNS = compoundKey(PRIMARY_KEY, COLUMNS);
+
+    private static final String IMMUTABLE_NAME = compoundKey(IMMUTABLE, NAME);
+
+    private static final String IMMUTABLE_COLUMNS = compoundKey(IMMUTABLE, COLUMNS);
 
     private static final String INDEX = "index";
 
@@ -439,12 +451,17 @@ public final class CatalogPropertiesUtil {
 
     private static final String DISTRIBUTION_KEYS = compoundKey(DISTRIBUTION, KEYS);
 
+    private static final String CONNECTION = "connection";
+
+    private static final String CONNECTION_IDENTIFIER = compoundKey(CONNECTION, "identifier");
+
     private static Map<String, String> deserializeOptions(Map<String, String> map) {
         return map.entrySet().stream()
                 .filter(
                         e -> {
                             final String key = e.getKey();
                             return !key.startsWith(DISTRIBUTION + SEPARATOR)
+                                    && !key.startsWith(CONNECTION + SEPARATOR)
                                     && !key.startsWith(PARTITION_KEYS + SEPARATOR)
                                     && !key.startsWith(SCHEMA)
                                     && !key.equals(COMMENT)
@@ -515,6 +532,8 @@ public final class CatalogPropertiesUtil {
 
         deserializePrimaryKey(map, schemaKey, builder);
 
+        deserializeImmutableCols(map, schemaKey, builder);
+
         deserializeIndexes(map, schemaKey, builder);
 
         return builder.build();
@@ -542,6 +561,17 @@ public final class CatalogPropertiesUtil {
             final String constraintName = getValue(map, constraintNameKey);
             final String[] columns = getValue(map, columnsKey, s -> s.split(","));
             builder.primaryKeyNamed(constraintName, columns);
+        }
+    }
+
+    private static void deserializeImmutableCols(
+            Map<String, String> map, String schemaKey, Builder builder) {
+        final String constraintNameKey = compoundKey(schemaKey, IMMUTABLE_NAME);
+        final String columnsKey = compoundKey(schemaKey, IMMUTABLE_COLUMNS);
+        if (map.containsKey(constraintNameKey)) {
+            final String constraintName = getValue(map, constraintNameKey);
+            final String[] columns = getValue(map, columnsKey, s -> s.split(","));
+            builder.immutableColumnsNamed(constraintName, columns);
         }
     }
 
@@ -633,6 +663,34 @@ public final class CatalogPropertiesUtil {
                         .collect(Collectors.toList()));
     }
 
+    private static void serializeConnection(
+            Map<String, String> map, UnresolvedIdentifier connection) {
+        final List<String> parts = new ArrayList<>();
+        connection.getCatalogName().ifPresent(parts::add);
+        connection.getDatabaseName().ifPresent(parts::add);
+        parts.add(connection.getObjectName());
+
+        putIndexedProperties(
+                map,
+                CONNECTION_IDENTIFIER,
+                Collections.singletonList(NAME),
+                parts.stream().map(Collections::singletonList).collect(Collectors.toList()));
+    }
+
+    private static UnresolvedIdentifier deserializeConnection(Map<String, String> map) {
+        final List<String> parts = new ArrayList<>();
+        int i = 0;
+        String partKey = compoundKey(CONNECTION_IDENTIFIER, i, NAME);
+        while (map.containsKey(partKey)) {
+            parts.add(getValue(map, partKey));
+            partKey = compoundKey(CONNECTION_IDENTIFIER, ++i, NAME);
+        }
+        if (parts.isEmpty()) {
+            return null;
+        }
+        return UnresolvedIdentifier.of(parts);
+    }
+
     private static void serializeResolvedModelSchema(
             Map<String, String> map,
             ResolvedSchema inputSchema,
@@ -653,6 +711,8 @@ public final class CatalogPropertiesUtil {
         serializeWatermarkSpecs(map, schema.getWatermarkSpecs(), sqlFactory);
 
         schema.getPrimaryKey().ifPresent(pk -> serializePrimaryKey(map, pk));
+
+        schema.getImmutableColumns().ifPresent(ics -> serializeImmutableCols(map, ics));
 
         serializeIndexes(map, schema.getIndexes());
     }
@@ -677,6 +737,12 @@ public final class CatalogPropertiesUtil {
         map.put(
                 compoundKey(SCHEMA, PRIMARY_KEY_COLUMNS),
                 String.join(",", constraint.getColumns()));
+    }
+
+    private static void serializeImmutableCols(
+            Map<String, String> map, ImmutableColumnsConstraint constraint) {
+        map.put(compoundKey(SCHEMA, IMMUTABLE_NAME), constraint.getName());
+        map.put(compoundKey(SCHEMA, IMMUTABLE_COLUMNS), String.join(",", constraint.getColumns()));
     }
 
     private static void serializeWatermarkSpecs(

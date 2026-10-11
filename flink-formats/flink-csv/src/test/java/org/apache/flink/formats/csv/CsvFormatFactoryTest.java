@@ -20,6 +20,11 @@ package org.apache.flink.formats.csv;
 
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.serialization.SerializationSchema;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.connector.file.src.FileSourceSplit;
+import org.apache.flink.connector.file.src.reader.BulkFormat;
+import org.apache.flink.connector.file.src.util.Utils;
+import org.apache.flink.core.fs.Path;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.Column;
@@ -33,11 +38,17 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.factories.TestDynamicTableFactory;
 import org.apache.flink.table.runtime.connector.source.ScanRuntimeProviderContext;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
+import org.apache.flink.table.types.DataType;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -59,6 +70,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /** Tests for {@link CsvFormatFactory}. */
 class CsvFormatFactoryTest {
 
+    private static final DataType HEADER_ROW_DATA_TYPE =
+            ResolvedSchema.of(
+                            Column.physical("id", DataTypes.STRING()),
+                            Column.physical("name", DataTypes.STRING()),
+                            Column.physical("amount", DataTypes.STRING()))
+                    .toPhysicalRowDataType();
+
+    private static final String CSV_WITH_HEADER = "id,name,amount\n1,Alice,100\n2,Bob,200";
+
     @Test
     void testSeDeSchema() {
         final CsvRowDataDeserializationSchema expectedDeser =
@@ -71,9 +91,16 @@ class CsvFormatFactoryTest {
                         .setArrayElementDelimiter("|")
                         .setEscapeCharacter('\\')
                         .setNullLiteral("n/a")
+                        .setTrimSpaces(true)
+                        .setEmptyStringAsNull(true)
                         .build();
         open(expectedDeser);
-        final Map<String, String> options = getAllOptions();
+        final Map<String, String> options =
+                getModifiedOptions(
+                        opts -> {
+                            opts.put("csv.trim-spaces", "true");
+                            opts.put("csv.empty-string-as-null", "true");
+                        });
         DeserializationSchema<RowData> actualDeser = createDeserializationSchema(options);
         assertThat(actualDeser).isEqualTo(expectedDeser);
 
@@ -347,6 +374,142 @@ class CsvFormatFactoryTest {
         assertThat(deserialized).isEqualTo(expected);
     }
 
+    @Test
+    void testTrimSpaces() throws IOException {
+        final Map<String, String> options =
+                getModifiedOptions(opts -> opts.put("csv.trim-spaces", "true"));
+        DeserializationSchema<RowData> deserializationSchema = createDeserializationSchema(options);
+        RowData actual = deserializationSchema.deserialize(" abc ;123;false".getBytes());
+        GenericRowData expected = GenericRowData.of(fromString("abc"), 123, false);
+        assertThat(actual).isEqualTo(expected);
+    }
+
+    @Test
+    void testEmptyStringAsNull() throws IOException {
+        final Map<String, String> options =
+                getModifiedOptions(opts -> opts.put("csv.empty-string-as-null", "true"));
+        DeserializationSchema<RowData> deserializationSchema = createDeserializationSchema(options);
+        RowData actual = deserializationSchema.deserialize(";123;false".getBytes());
+        assertThat(actual.isNullAt(0)).isTrue();
+        assertThat(actual.getInt(1)).isEqualTo(123);
+        assertThat(actual.getBoolean(2)).isFalse();
+    }
+
+    @Test
+    void testAllowTrailingComma() throws IOException {
+        final Map<String, String> options =
+                getModifiedOptions(opts -> opts.put("csv.allow-trailing-comma", "true"));
+        DeserializationSchema<RowData> deserializationSchema = createDeserializationSchema(options);
+        RowData actual = deserializationSchema.deserialize("abc;123;false;".getBytes());
+        GenericRowData expected = GenericRowData.of(fromString("abc"), 123, false);
+        assertThat(actual).isEqualTo(expected);
+    }
+
+    @Test
+    void testIgnoreTrailingUnmappable() throws IOException {
+        final Map<String, String> options =
+                getModifiedOptions(opts -> opts.put("csv.ignore-trailing-unmappable", "true"));
+        DeserializationSchema<RowData> deserializationSchema = createDeserializationSchema(options);
+        RowData actual = deserializationSchema.deserialize("abc;123;false;extra".getBytes());
+        GenericRowData expected = GenericRowData.of(fromString("abc"), 123, false);
+        assertThat(actual).isEqualTo(expected);
+    }
+
+    @Test
+    void testFailOnMissingColumns() {
+        final Map<String, String> options =
+                getModifiedOptions(
+                        opts -> {
+                            opts.put("csv.fail-on-missing-columns", "true");
+                            opts.remove("csv.ignore-parse-errors");
+                        });
+        DeserializationSchema<RowData> deserializationSchema = createDeserializationSchema(options);
+        assertThatThrownBy(() -> deserializationSchema.deserialize("abc;123".getBytes()))
+                .isInstanceOf(IOException.class);
+    }
+
+    @Test
+    void testDeserializationSchemaEqualityWithFeatures() {
+        final CsvRowDataDeserializationSchema schema1 =
+                new CsvRowDataDeserializationSchema.Builder(
+                                PHYSICAL_TYPE, InternalTypeInfo.of(PHYSICAL_TYPE))
+                        .setTrimSpaces(true)
+                        .setEmptyStringAsNull(true)
+                        .build();
+        final CsvRowDataDeserializationSchema schema2 =
+                new CsvRowDataDeserializationSchema.Builder(
+                                PHYSICAL_TYPE, InternalTypeInfo.of(PHYSICAL_TYPE))
+                        .setTrimSpaces(true)
+                        .setEmptyStringAsNull(true)
+                        .build();
+        final CsvRowDataDeserializationSchema schema3 =
+                new CsvRowDataDeserializationSchema.Builder(
+                                PHYSICAL_TYPE, InternalTypeInfo.of(PHYSICAL_TYPE))
+                        .setTrimSpaces(false)
+                        .build();
+
+        assertThat(schema1).isEqualTo(schema2);
+        assertThat(schema1).isNotEqualTo(schema3);
+    }
+
+    @Test
+    void testBulkFormatWithParserFeatures() {
+        final Configuration formatOptions = new Configuration();
+        formatOptions.set(CsvFormatOptions.FIELD_DELIMITER, ";");
+        formatOptions.set(CsvFormatOptions.TRIM_SPACES, true);
+        formatOptions.set(CsvFormatOptions.IGNORE_TRAILING_UNMAPPABLE, true);
+        formatOptions.set(CsvFormatOptions.ALLOW_TRAILING_COMMA, true);
+        formatOptions.set(CsvFormatOptions.EMPTY_STRING_AS_NULL, true);
+
+        CsvFileFormatFactory.CsvBulkDecodingFormat bulkDecodingFormat =
+                new CsvFileFormatFactory.CsvBulkDecodingFormat(formatOptions);
+
+        // Verify the bulk format can be created without errors
+        BulkFormat<RowData, FileSourceSplit> bulkFormat =
+                bulkDecodingFormat.createRuntimeDecoder(
+                        ScanRuntimeProviderContext.INSTANCE,
+                        PHYSICAL_DATA_TYPE,
+                        Projection.all(PHYSICAL_DATA_TYPE).toNestedIndexes());
+        assertThat(bulkFormat).isNotNull();
+    }
+
+    @Test
+    void testIgnoreFirstLineSkipsFirstRecord(@TempDir java.nio.file.Path tempDir) throws Exception {
+        final File file = tempDir.resolve("with-header.csv").toFile();
+        Files.writeString(file.toPath(), CSV_WITH_HEADER, StandardCharsets.UTF_8);
+
+        final Configuration formatOptions = new Configuration();
+        formatOptions.set(CsvFormatOptions.IGNORE_FIRST_LINE, true);
+
+        final List<RowData> rows = readBulkFormatRows(formatOptions, file, HEADER_ROW_DATA_TYPE);
+
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0).getString(0).toString()).isEqualTo("1");
+        assertThat(rows.get(0).getString(1).toString()).isEqualTo("Alice");
+        assertThat(rows.get(0).getString(2).toString()).isEqualTo("100");
+        assertThat(rows.get(1).getString(0).toString()).isEqualTo("2");
+        assertThat(rows.get(1).getString(1).toString()).isEqualTo("Bob");
+        assertThat(rows.get(1).getString(2).toString()).isEqualTo("200");
+    }
+
+    @Test
+    void testIgnoreFirstLineDisabledByDefault(@TempDir java.nio.file.Path tempDir)
+            throws Exception {
+        final File file = tempDir.resolve("with-header.csv").toFile();
+        Files.writeString(file.toPath(), CSV_WITH_HEADER, StandardCharsets.UTF_8);
+
+        final List<RowData> rows =
+                readBulkFormatRows(new Configuration(), file, HEADER_ROW_DATA_TYPE);
+
+        assertThat(rows).hasSize(3);
+        assertThat(rows.get(0).getString(0).toString()).isEqualTo("id");
+        assertThat(rows.get(0).getString(1).toString()).isEqualTo("name");
+        assertThat(rows.get(0).getString(2).toString()).isEqualTo("amount");
+        assertThat(rows.get(1).getString(0).toString()).isEqualTo("1");
+        assertThat(rows.get(1).getString(2).toString()).isEqualTo("100");
+        assertThat(rows.get(2).getString(1).toString()).isEqualTo("Bob");
+    }
+
     // ------------------------------------------------------------------------
     //  Utilities
     // ------------------------------------------------------------------------
@@ -379,6 +542,33 @@ class CsvFormatFactoryTest {
         options.put("csv.null-literal", "n/a");
         options.put("csv.write-bigdecimal-in-scientific-notation", "true");
         return options;
+    }
+
+    private static List<RowData> readBulkFormatRows(
+            Configuration formatOptions, File file, DataType dataType) throws IOException {
+        final CsvFileFormatFactory.CsvBulkDecodingFormat bulkDecodingFormat =
+                new CsvFileFormatFactory.CsvBulkDecodingFormat(formatOptions);
+        final BulkFormat<RowData, FileSourceSplit> bulkFormat =
+                bulkDecodingFormat.createRuntimeDecoder(
+                        ScanRuntimeProviderContext.INSTANCE,
+                        dataType,
+                        Projection.all(dataType).toNestedIndexes());
+
+        final FileSourceSplit split =
+                new FileSourceSplit(
+                        "split-0",
+                        new Path(file.toURI()),
+                        0,
+                        file.length(),
+                        file.lastModified(),
+                        file.length());
+
+        final List<RowData> rows = new ArrayList<>();
+        try (BulkFormat.Reader<RowData> reader =
+                bulkFormat.createReader(new Configuration(), split)) {
+            Utils.forEachRemaining(reader, rows::add);
+        }
+        return rows;
     }
 
     private static DeserializationSchema<RowData> createDeserializationSchema(

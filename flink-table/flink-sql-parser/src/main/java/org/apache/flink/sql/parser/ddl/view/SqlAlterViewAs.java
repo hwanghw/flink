@@ -20,8 +20,13 @@ package org.apache.flink.sql.parser.ddl.view;
 
 import org.apache.flink.sql.parser.SqlUnparseUtils;
 
+import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlIdentifier;
+import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlOperator;
+import org.apache.calcite.sql.SqlSpecialOperator;
 import org.apache.calcite.sql.SqlWriter;
 import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.util.ImmutableNullableList;
@@ -33,11 +38,34 @@ import java.util.List;
 /** ALTER DDL to change a view's query. */
 public class SqlAlterViewAs extends SqlAlterView {
 
+    private static final SqlSpecialOperator AS_OPERATOR =
+            new SqlSpecialOperator("ALTER VIEW AS", SqlKind.ALTER_VIEW) {
+                @Override
+                public SqlCall createCall(
+                        SqlLiteral functionQualifier, SqlParserPos pos, SqlNode... operands) {
+                    return new SqlAlterViewAs(
+                            pos, (SqlIdentifier) operands[0], operands[1], SqlParserPos.ZERO);
+                }
+            };
+
     private final SqlNode newQuery;
 
-    public SqlAlterViewAs(SqlParserPos pos, SqlIdentifier viewIdentifier, SqlNode newQuery) {
+    private final SqlParserPos asQueryKeywordPos;
+
+    public SqlAlterViewAs(
+            SqlParserPos pos,
+            SqlIdentifier viewIdentifier,
+            SqlNode newQuery,
+            SqlParserPos asQueryKeywordPos) {
         super(pos, viewIdentifier);
         this.newQuery = newQuery;
+        this.asQueryKeywordPos = asQueryKeywordPos;
+    }
+
+    @Nonnull
+    @Override
+    public SqlOperator getOperator() {
+        return AS_OPERATOR;
     }
 
     @Nonnull
@@ -54,5 +82,10 @@ public class SqlAlterViewAs extends SqlAlterView {
 
     public SqlNode getNewQuery() {
         return newQuery;
+    }
+
+    /** Returns the parser position of the {@code AS} keyword. */
+    public SqlParserPos getAsQueryKeywordPos() {
+        return asQueryKeywordPos;
     }
 }

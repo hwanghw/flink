@@ -19,6 +19,7 @@
 package org.apache.flink.table.planner.plan.nodes.exec.stream;
 
 import org.apache.flink.FlinkVersion;
+import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.configuration.ReadableConfig;
@@ -28,32 +29,39 @@ import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.functions.ProcessTableFunction;
+import org.apache.flink.table.functions.TableSemantics;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.calcite.RexTableArgCall;
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
 import org.apache.flink.table.planner.codegen.EqualiserCodeGenerator;
 import org.apache.flink.table.planner.codegen.HashCodeGenerator;
 import org.apache.flink.table.planner.codegen.ProcessTableRunnerGenerator;
+import org.apache.flink.table.planner.codegen.sort.SortCodeGenerator;
 import org.apache.flink.table.planner.delegation.PlannerBase;
+import org.apache.flink.table.planner.functions.bridging.BridgingSqlFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeContext;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeMetadata;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTranslator;
+import org.apache.flink.table.planner.plan.nodes.exec.StateMetadata;
+import org.apache.flink.table.planner.plan.nodes.exec.spec.SortSpec;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.TransformationMetadata;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalProcessTableFunction;
 import org.apache.flink.table.planner.plan.utils.KeySelectorUtil;
 import org.apache.flink.table.runtime.generated.GeneratedHashFunction;
 import org.apache.flink.table.runtime.generated.GeneratedProcessTableRunner;
+import org.apache.flink.table.runtime.generated.GeneratedRecordComparator;
 import org.apache.flink.table.runtime.generated.GeneratedRecordEqualiser;
 import org.apache.flink.table.runtime.keyselector.RowDataKeySelector;
 import org.apache.flink.table.runtime.operators.process.ProcessTableOperatorFactory;
-import org.apache.flink.table.runtime.operators.process.RuntimeChangelogMode;
 import org.apache.flink.table.runtime.operators.process.RuntimeStateInfo;
 import org.apache.flink.table.runtime.operators.process.RuntimeTableSemantics;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
+import org.apache.flink.table.runtime.util.RuntimeChangelogMode;
+import org.apache.flink.table.runtime.util.StateConfigUtil;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.inference.StaticArgument;
 import org.apache.flink.table.types.inference.StaticArgumentTrait;
@@ -61,6 +69,7 @@ import org.apache.flink.table.types.inference.TypeInferenceUtil.StateInfo;
 import org.apache.flink.table.types.logical.RowType;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 
 import org.apache.calcite.linq4j.Ord;
@@ -71,6 +80,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -100,6 +110,7 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
     public static final String FIELD_NAME_FUNCTION_CALL = "functionCall";
     public static final String FIELD_NAME_INPUT_CHANGELOG_MODES = "inputChangelogModes";
     public static final String FIELD_NAME_OUTPUT_CHANGELOG_MODE = "outputChangelogMode";
+    public static final String FIELD_NAME_INPUT_UPSERT_KEYS = "inputUpsertKeys";
 
     @JsonProperty(FIELD_NAME_UID)
     private final @Nullable String uid;
@@ -113,6 +124,10 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
     @JsonProperty(FIELD_NAME_OUTPUT_CHANGELOG_MODE)
     private final ChangelogMode outputChangelogMode;
 
+    @JsonProperty(FIELD_NAME_INPUT_UPSERT_KEYS)
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private final List<List<int[]>> inputUpsertKeys;
+
     public StreamExecProcessTableFunction(
             ReadableConfig tableConfig,
             List<InputProperty> inputProperties,
@@ -121,7 +136,8 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
             @Nullable String uid,
             RexCall invocation,
             List<ChangelogMode> inputChangelogModes,
-            ChangelogMode outputChangelogMode) {
+            ChangelogMode outputChangelogMode,
+            List<List<int[]>> inputUpsertKeys) {
         this(
                 ExecNodeContext.newNodeId(),
                 ExecNodeContext.newContext(StreamExecProcessTableFunction.class),
@@ -133,7 +149,8 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
                 uid,
                 invocation,
                 inputChangelogModes,
-                outputChangelogMode);
+                outputChangelogMode,
+                inputUpsertKeys);
     }
 
     @JsonCreator
@@ -147,12 +164,18 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
             @JsonProperty(FIELD_NAME_UID) @Nullable String uid,
             @JsonProperty(FIELD_NAME_FUNCTION_CALL) RexNode invocation,
             @JsonProperty(FIELD_NAME_INPUT_CHANGELOG_MODES) List<ChangelogMode> inputChangelogModes,
-            @JsonProperty(FIELD_NAME_OUTPUT_CHANGELOG_MODE) ChangelogMode outputChangelogMode) {
+            @JsonProperty(FIELD_NAME_OUTPUT_CHANGELOG_MODE) ChangelogMode outputChangelogMode,
+            @JsonProperty(FIELD_NAME_INPUT_UPSERT_KEYS)
+                    @Nullable List<List<int[]>> inputUpsertKeys) {
         super(id, context, persistedConfig, inputProperties, outputType, description);
         this.uid = uid;
-        this.invocation = (RexCall) invocation;
+        // Mirror the FlinkLogicalTableFunctionScan converter for the compiled-plan restore path:
+        // bake StaticArgument#withConditionalTrait rules into the operator's static args so
+        // downstream code can use plain arg.is(SET_SEMANTIC_TABLE) checks.
+        this.invocation = BridgingSqlFunction.resolveCallTraits((RexCall) invocation);
         this.inputChangelogModes = inputChangelogModes;
         this.outputChangelogMode = outputChangelogMode;
+        this.inputUpsertKeys = inputUpsertKeys != null ? inputUpsertKeys : List.of();
     }
 
     public @Nullable String getUid() {
@@ -191,7 +214,12 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
         final RexCall udfCall = StreamPhysicalProcessTableFunction.toUdfCall(invocation);
         final GeneratedRunnerResult generated =
                 ProcessTableRunnerGenerator.generate(
-                        ctx, udfCall, inputTimeColumns, inputChangelogModes, outputChangelogMode);
+                        ctx,
+                        udfCall,
+                        inputTimeColumns,
+                        inputChangelogModes,
+                        outputChangelogMode,
+                        inputUpsertKeys);
         final GeneratedProcessTableRunner generatedRunner = generated.runner();
         final LinkedHashMap<String, StateInfo> stateInfos = generated.stateInfos();
 
@@ -224,14 +252,36 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
         final RuntimeChangelogMode producedChangelogMode =
                 RuntimeChangelogMode.serialize(outputChangelogMode);
 
+        // Generate comparators for ORDER BY columns
+        final GeneratedRecordComparator[] orderByComparators =
+                generateOrderByComparators(
+                        planner.getFlinkContext().getClassLoader(),
+                        ctx,
+                        config,
+                        providedInputArgs,
+                        operands);
+
+        // Create TTL config for input sort buffers (one per input)
+        // Use empty state metadata list as input sort buffers don't have user-defined state
+        final List<Long> inputBufferTtlMillis =
+                StateMetadata.getStateTtlForMultiInputOperator(
+                        config, runtimeTableSemantics.size(), List.of());
+        // Convert to StateTtlConfig list (one per input)
+        final List<StateTtlConfig> inputBufferTtlConfigs =
+                inputBufferTtlMillis.stream()
+                        .map(StateConfigUtil::createTtlConfig)
+                        .collect(Collectors.toList());
+
         final ProcessTableOperatorFactory operatorFactory =
                 new ProcessTableOperatorFactory(
                         runtimeTableSemantics,
                         runtimeStateInfos,
+                        orderByComparators,
                         generatedRunner,
                         stateHashCode,
                         stateEquals,
-                        producedChangelogMode);
+                        producedChangelogMode,
+                        inputBufferTtlConfigs);
 
         final String effectiveUid =
                 uid != null ? uid : createTransformationUid(PROCESS_TRANSFORMATION, config);
@@ -251,6 +301,11 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
                             operatorFactory,
                             planner,
                             runtimeTableSemantics);
+        } else if (runtimeTableSemantics.stream()
+                .anyMatch(RuntimeTableSemantics::hasBroadcastSemantics)) {
+            transform =
+                    createNonKeyedMultiInputTransformation(
+                            inputTransforms, metadata, operatorFactory, runtimeTableSemantics);
         } else {
             transform = createNonKeyedTransformation(inputTransforms, metadata, operatorFactory);
         }
@@ -265,9 +320,9 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
 
     private RuntimeTableSemantics createRuntimeTableSemantics(
             StaticArgument tableArg, RexTableArgCall tableArgCall, List<Integer> inputTimeColumns) {
+        final int inputIndex = tableArgCall.getInputIndex();
         final RuntimeChangelogMode consumedChangelogMode =
-                RuntimeChangelogMode.serialize(
-                        inputChangelogModes.get(tableArgCall.getInputIndex()));
+                RuntimeChangelogMode.serialize(inputChangelogModes.get(inputIndex));
         final DataType dataType;
         if (tableArg.getDataType().isPresent()) {
             dataType = tableArg.getDataType().get();
@@ -275,17 +330,22 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
             dataType = DataTypes.of(FlinkTypeFactory.toLogicalRowType(tableArgCall.type));
         }
 
-        final int timeColumn = inputTimeColumns.get(tableArgCall.getInputIndex());
-
+        final int timeColumn = inputTimeColumns.get(inputIndex);
+        final List<int[]> upsertKeys =
+                inputIndex < inputUpsertKeys.size() ? inputUpsertKeys.get(inputIndex) : List.of();
         return new RuntimeTableSemantics(
                 tableArg.getName(),
-                tableArgCall.getInputIndex(),
+                inputIndex,
                 dataType,
                 tableArgCall.getPartitionKeys(),
+                tableArgCall.getOrderKeys(),
+                RexTableArgCall.toSortDirections(tableArgCall.getSortOrder()),
                 consumedChangelogMode,
                 tableArg.is(StaticArgumentTrait.PASS_COLUMNS_THROUGH),
                 tableArg.is(StaticArgumentTrait.SET_SEMANTIC_TABLE),
-                timeColumn);
+                tableArg.is(StaticArgumentTrait.BROADCAST_SEMANTIC_TABLE),
+                timeColumn,
+                upsertKeys);
     }
 
     private Transformation<RowData> createKeyedTransformation(
@@ -299,21 +359,36 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
         final List<KeySelector<RowData, RowData>> keySelectors =
                 runtimeTableSemantics.stream()
                         .map(
-                                inputSemantics ->
-                                        KeySelectorUtil.getRowDataSelector(
-                                                planner.getFlinkContext().getClassLoader(),
-                                                inputSemantics.partitionByColumns(),
-                                                (InternalTypeInfo<RowData>)
-                                                        inputTransforms
-                                                                .get(inputSemantics.getInputIndex())
-                                                                .getOutputType()))
+                                inputSemantics -> {
+                                    // Tables with broadcast semantics have no key context
+                                    if (inputSemantics.hasBroadcastSemantics()) {
+                                        return null;
+                                    }
+                                    return (KeySelector<RowData, RowData>)
+                                            KeySelectorUtil.getRowDataSelector(
+                                                    planner.getFlinkContext().getClassLoader(),
+                                                    inputSemantics.partitionByColumns(),
+                                                    (InternalTypeInfo<RowData>)
+                                                            inputTransforms
+                                                                    .get(
+                                                                            inputSemantics
+                                                                                    .getInputIndex())
+                                                                    .getOutputType());
+                                })
                         .collect(Collectors.toList());
+
+        final RowDataKeySelector keySelector =
+                keySelectors.stream()
+                        .filter(Objects::nonNull)
+                        .map(RowDataKeySelector.class::cast)
+                        .findFirst()
+                        .orElseThrow(IllegalStateException::new);
 
         final KeyedMultipleInputTransformation<RowData> transform =
                 ExecNodeUtil.createKeyedMultiInputTransformation(
                         inputTransforms,
                         keySelectors,
-                        ((RowDataKeySelector) keySelectors.get(0)).getProducedType(),
+                        keySelector.getProducedType(),
                         metadata,
                         operatorFactory,
                         InternalTypeInfo.of(getOutputType()),
@@ -323,6 +398,28 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
         transform.setChainingStrategy(ChainingStrategy.HEAD_WITH_SOURCES);
 
         return transform;
+    }
+
+    private Transformation<RowData> createNonKeyedMultiInputTransformation(
+            List<Transformation<RowData>> inputTransforms,
+            TransformationMetadata metadata,
+            ProcessTableOperatorFactory operatorFactory,
+            List<RuntimeTableSemantics> runtimeTableSemantics) {
+        // A table with row semantics next to tables with broadcast semantics. The operator is
+        // chained to the table with row semantics and inherits its parallelism.
+        final Transformation<RowData> rowSemanticTransform =
+                runtimeTableSemantics.stream()
+                        .filter(t -> !t.hasBroadcastSemantics())
+                        .map(s -> inputTransforms.get(s.getInputIndex()))
+                        .findFirst()
+                        .orElseThrow(IllegalStateException::new);
+        return ExecNodeUtil.createMultiInputTransformation(
+                inputTransforms,
+                metadata,
+                operatorFactory,
+                InternalTypeInfo.of(getOutputType()),
+                rowSemanticTransform.getParallelism(),
+                false);
     }
 
     private Transformation<RowData> createNonKeyedTransformation(
@@ -341,11 +438,15 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
 
     private static RuntimeStateInfo createRuntimeStateInfo(
             String name, StateInfo stateInfo, ExecNodeConfig config) {
+        // Broadcast state does not support TTL
+        final long timeToLive =
+                stateInfo.isBroadcast()
+                        ? 0L
+                        : deriveStateTimeToLive(
+                                stateInfo.getTimeToLive().orElse(null),
+                                config.getStateRetentionTime());
         return new RuntimeStateInfo(
-                name,
-                stateInfo.getDataType(),
-                deriveStateTimeToLive(
-                        stateInfo.getTimeToLive().orElse(null), config.getStateRetentionTime()));
+                name, stateInfo.getDataType(), timeToLive, stateInfo.isBroadcast());
     }
 
     private static long deriveStateTimeToLive(
@@ -363,5 +464,47 @@ public class StreamExecProcessTableFunction extends ExecNodeBase<RowData>
             return Long.MAX_VALUE;
         }
         return globalRetentionTime;
+    }
+
+    private GeneratedRecordComparator[] generateOrderByComparators(
+            ClassLoader classLoader,
+            CodeGeneratorContext ctx,
+            ExecNodeConfig config,
+            List<Ord<StaticArgument>> providedInputArgs,
+            List<RexNode> operands) {
+        final GeneratedRecordComparator[] comparators =
+                new GeneratedRecordComparator[providedInputArgs.size()];
+
+        for (int i = 0; i < providedInputArgs.size(); i++) {
+            final Ord<StaticArgument> providedInputArg = providedInputArgs.get(i);
+            final RexTableArgCall tableArgCall = (RexTableArgCall) operands.get(providedInputArg.i);
+            final int[] orderKeys = tableArgCall.getOrderKeys();
+
+            if (orderKeys.length > 0) {
+                final RowType inputType = FlinkTypeFactory.toLogicalRowType(tableArgCall.getType());
+                final TableSemantics.SortDirection[] sortDirections =
+                        RexTableArgCall.toSortDirections(tableArgCall.getSortOrder());
+
+                // Convert to SortSpec
+                final SortSpec.SortSpecBuilder builder = SortSpec.builder();
+                for (int j = 0; j < orderKeys.length; j++) {
+                    final TableSemantics.SortDirection direction = sortDirections[j];
+                    builder.addField(
+                            orderKeys[j], !direction.isDescending(), direction.isNullsLast());
+                }
+                final SortSpec sortSpec = builder.build();
+
+                final SortCodeGenerator sortCodeGen =
+                        new SortCodeGenerator(config, classLoader, inputType, sortSpec, ctx);
+
+                comparators[i] =
+                        sortCodeGen.generateRecordComparator(
+                                "ProcessTableFunctionOrderByComparator" + i);
+            } else {
+                comparators[i] = null;
+            }
+        }
+
+        return comparators;
     }
 }

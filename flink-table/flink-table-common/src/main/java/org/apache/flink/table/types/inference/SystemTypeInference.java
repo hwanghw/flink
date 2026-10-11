@@ -27,6 +27,7 @@ import org.apache.flink.table.functions.FunctionDefinition;
 import org.apache.flink.table.functions.FunctionKind;
 import org.apache.flink.table.functions.ProcessTableFunction;
 import org.apache.flink.table.functions.TableSemantics;
+import org.apache.flink.table.functions.TableSemantics.SortDirection;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -45,6 +46,7 @@ import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -110,6 +112,9 @@ public class SystemTypeInference {
                         systemArgs,
                         origin.getInputTypeStrategy(),
                         origin.disableSystemArguments()));
+        if (functionKind == FunctionKind.PROCESS_TABLE) {
+            checkBroadcastState(systemArgs, origin.getStateTypeStrategies());
+        }
         builder.stateTypeStrategies(origin.getStateTypeStrategies());
         builder.outputTypeStrategy(
                 deriveSystemOutputStrategy(
@@ -123,6 +128,41 @@ public class SystemTypeInference {
 
     public static boolean isInvalidUidForProcessTableFunction(String uid) {
         return !UID_FORMAT.test(uid);
+    }
+
+    /**
+     * Rejects the implicit system arguments ({@code on_time}, {@code uid}) for a function that
+     * disables them via {@link TypeInference#disableSystemArguments()}.
+     *
+     * <p>The system arguments are not part of such a function's signature. Enforcing this from
+     * every translation path (SQL operand checking and Table API call resolution) rejects them
+     * consistently, regardless of whether the function is processed by the generic PTF rule or a
+     * dedicated optimizer rule (e.g. ML_PREDICT, LATERAL SNAPSHOT).
+     */
+    public static void checkNoSystemArguments(
+            boolean sysArgsDisabled,
+            Collection<String> suppliedArgumentNames,
+            Collection<String> declaredArgumentNames,
+            String functionName) {
+        if (!sysArgsDisabled) {
+            return;
+        }
+        for (StaticArgument systemArg : PROCESS_TABLE_FUNCTION_SYSTEM_ARGS) {
+            final String systemArgName = systemArg.getName();
+            // A function that disabled the automatic system arguments may still declare an argument
+            // with a reserved name. A supplied argument that matches such a declared name is
+            // handled as an ordinary argument, not a system argument.
+            if (declaredArgumentNames.contains(systemArgName)) {
+                continue;
+            }
+            if (suppliedArgumentNames.contains(systemArgName)) {
+                throw new ValidationException(
+                        String.format(
+                                "Invalid function call. The '%s' argument is not supported "
+                                        + "because function '%s' does not use system arguments.",
+                                systemArgName, functionName));
+            }
+        }
     }
 
     // --------------------------------------------------------------------------------------------
@@ -155,7 +195,9 @@ public class SystemTypeInference {
                     "Function requires a static signature that is not overloaded and doesn't contain varargs.");
         }
 
-        checkReservedArgs(declaredArgs);
+        if (!disableSystemArgs) {
+            checkReservedArgs(declaredArgs);
+        }
         checkMultipleTableArgs(declaredArgs);
         checkPassThroughColumns(declaredArgs);
 
@@ -181,18 +223,85 @@ public class SystemTypeInference {
         }
     }
 
+    /**
+     * Resolves conditional traits (see {@link StaticArgument#withConditionalTrait}) on every static
+     * arg using the call's semantics and operands. Called once at the top of {@link
+     * SystemInputStrategy#inferInputTypes} and {@link SystemOutputStrategy#inferType}; downstream
+     * helpers receive the resolved list and iterate it directly.
+     */
+    private static List<StaticArgument> resolveStaticArgs(
+            final CallContext callContext, final @Nullable List<StaticArgument> staticArgs) {
+        if (staticArgs == null) {
+            return null;
+        }
+        return IntStream.range(0, staticArgs.size())
+                .mapToObj(
+                        pos -> {
+                            final StaticArgument arg = staticArgs.get(pos);
+                            if (!arg.hasConditionalTraits()) {
+                                return arg;
+                            }
+                            final TableSemantics semantics =
+                                    callContext.getTableSemantics(pos).orElse(null);
+                            return arg.applyConditionalTraits(
+                                    TraitContext.of(semantics, callContext, staticArgs));
+                        })
+                .collect(Collectors.toList());
+    }
+
     private static void checkMultipleTableArgs(List<StaticArgument> staticArgs) {
         final List<StaticArgument> tableArgs =
                 staticArgs.stream()
                         .filter(arg -> arg.is(StaticArgumentTrait.TABLE))
                         .collect(Collectors.toList());
-        if (tableArgs.size() <= 1) {
+        if (tableArgs.isEmpty()) {
             return;
         }
-        if (tableArgs.stream().anyMatch(arg -> !arg.is(StaticArgumentTrait.SET_SEMANTIC_TABLE))) {
+        // Broadcast tables are side inputs and are excluded from the rules below
+        final List<StaticArgument> mainTableArgs =
+                tableArgs.stream()
+                        .filter(arg -> !arg.is(StaticArgumentTrait.BROADCAST_SEMANTIC_TABLE))
+                        .collect(Collectors.toList());
+        if (mainTableArgs.isEmpty()) {
             throw new ValidationException(
-                    "All table arguments must use set semantics if multiple table arguments are declared.");
+                    "Table arguments with broadcast semantics require at least one table argument "
+                            + "with row or set semantics.");
         }
+        if (mainTableArgs.size() == 1) {
+            return;
+        }
+        if (mainTableArgs.stream()
+                .anyMatch(arg -> !arg.is(StaticArgumentTrait.SET_SEMANTIC_TABLE))) {
+            throw new ValidationException(
+                    "All main table arguments must use set semantics if multiple table arguments are declared.");
+        }
+    }
+
+    private static void checkBroadcastState(
+            @Nullable List<StaticArgument> staticArgs,
+            Map<String, StateTypeStrategy> stateTypeStrategies) {
+        final boolean hasBroadcastTables =
+                staticArgs != null
+                        && staticArgs.stream()
+                                .anyMatch(
+                                        arg ->
+                                                arg.is(
+                                                        StaticArgumentTrait
+                                                                .BROADCAST_SEMANTIC_TABLE));
+        if (hasBroadcastTables) {
+            return;
+        }
+        stateTypeStrategies.entrySet().stream()
+                .filter(e -> e.getValue().isBroadcast())
+                .findFirst()
+                .ifPresent(
+                        e -> {
+                            throw new ValidationException(
+                                    String.format(
+                                            "Broadcast state entry '%s' requires at least one table "
+                                                    + "argument with broadcast semantics.",
+                                            e.getKey()));
+                        });
     }
 
     private static void checkPassThroughColumns(List<StaticArgument> staticArgs) {
@@ -261,6 +370,10 @@ public class SystemTypeInference {
             return origin.inferType(callContext)
                     .map(
                             functionDataType -> {
+                                // Resolve once so all helpers see the same effective signature
+                                // (PARTITION BY / scalar literals applied to conditional traits).
+                                final List<StaticArgument> resolvedArgs =
+                                        resolveStaticArgs(callContext, staticArgs);
                                 final List<Field> fields = new ArrayList<>();
 
                                 // According to the SQL standard, pass-through columns should
@@ -272,11 +385,11 @@ public class SystemTypeInference {
                                 // - Flink SESSION windows add pass-through columns at the beginning
                                 // - Oracle adds pass-through columns for all ROW semantics args, so
                                 // this whole topic is kind of vendor specific already
-                                fields.addAll(derivePassThroughFields(callContext));
+                                fields.addAll(derivePassThroughFields(callContext, resolvedArgs));
                                 fields.addAll(deriveFunctionOutputFields(functionDataType));
 
                                 if (!disableSystemArgs) {
-                                    fields.addAll(deriveRowtimeField(callContext));
+                                    fields.addAll(deriveRowtimeField(callContext, resolvedArgs));
                                 }
 
                                 final List<Field> uniqueFields = makeFieldNamesUnique(fields);
@@ -302,7 +415,8 @@ public class SystemTypeInference {
                     .collect(Collectors.toList());
         }
 
-        private List<Field> derivePassThroughFields(CallContext callContext) {
+        private List<Field> derivePassThroughFields(
+                CallContext callContext, List<StaticArgument> staticArgs) {
             if (functionKind != FunctionKind.PROCESS_TABLE) {
                 return List.of();
             }
@@ -333,22 +447,22 @@ public class SystemTypeInference {
         }
 
         private List<Field> deriveFunctionOutputFields(DataType functionDataType) {
-            final List<DataType> fieldTypes = DataType.getFieldDataTypes(functionDataType);
-            final List<String> fieldNames = DataType.getFieldNames(functionDataType);
-
-            if (fieldTypes.isEmpty()) {
-                // Before the system type inference was introduced, SQL and
-                // Table API chose a different default field name.
-                // EXPR$0 is chosen for best-effort backwards compatibility for
-                // SQL users.
+            final boolean isScalarOutput =
+                    !LogicalTypeChecks.isCompositeType(functionDataType.getLogicalType());
+            if (isScalarOutput) {
+                // Scalar output has no field name of its own; EXPR$0 is kept for
+                // backwards compatibility with the pre-system-type-inference default.
                 return List.of(DataTypes.FIELD("EXPR$0", functionDataType));
             }
+            final List<DataType> fieldTypes = DataType.getFieldDataTypes(functionDataType);
+            final List<String> fieldNames = DataType.getFieldNames(functionDataType);
             return IntStream.range(0, fieldTypes.size())
                     .mapToObj(pos -> DataTypes.FIELD(fieldNames.get(pos), fieldTypes.get(pos)))
                     .collect(Collectors.toList());
         }
 
-        private List<Field> deriveRowtimeField(CallContext callContext) {
+        private List<Field> deriveRowtimeField(
+                CallContext callContext, List<StaticArgument> staticArgs) {
             if (this.functionKind != FunctionKind.PROCESS_TABLE) {
                 return List.of();
             }
@@ -374,14 +488,20 @@ public class SystemTypeInference {
                                 if (!staticArg.is(StaticArgumentTrait.TABLE)) {
                                     return;
                                 }
+                                final String argName = staticArg.getName();
                                 final RowType rowType =
                                         LogicalTypeUtils.toRowType(args.get(pos).getLogicalType());
                                 final int onTimeColumn =
-                                        findUniqueOnTimeColumn(
-                                                staticArg.getName(), rowType, onTimeFields);
+                                        findUniqueOnTimeColumn(argName, rowType, onTimeFields);
                                 if (onTimeColumn >= 0) {
                                     usedOnTimeFields.add(rowType.getFieldNames().get(onTimeColumn));
                                     onTimeColumns.add(rowType.getTypeAt(onTimeColumn));
+                                    // If ORDER BY is defined, it must match the on_time column
+                                    final TableSemantics semantics =
+                                            callContext
+                                                    .getTableSemantics(pos)
+                                                    .orElseThrow(IllegalStateException::new);
+                                    checkOrderByMatchesOnTime(argName, semantics, onTimeColumn);
                                     return;
                                 }
                                 if (staticArg.is(StaticArgumentTrait.REQUIRE_ON_TIME)) {
@@ -390,9 +510,9 @@ public class SystemTypeInference {
                                                     "Table argument '%s' requires a time attribute. "
                                                             + "Please provide one using the implicit `on_time` argument. "
                                                             + "For example: myFunction(..., on_time => DESCRIPTOR(`my_timestamp`)",
-                                                    staticArg.getName()));
+                                                    argName));
                                 } else {
-                                    missingOnTimeColumns.add(staticArg.getName());
+                                    missingOnTimeColumns.add(argName);
                                 }
                             });
 
@@ -500,9 +620,21 @@ public class SystemTypeInference {
             }
         }
 
-        private static boolean isUnsupportedOnTimeColumn(LogicalType type) {
-            return !LogicalTypeChecks.canBeTimeAttributeType(type)
-                    || LogicalTypeChecks.getPrecision(type) > 3;
+        private static void checkOrderByMatchesOnTime(
+                String argName, TableSemantics semantics, int onTimeColumn) {
+            final int[] orderByColumns = semantics.orderByColumns();
+            if (orderByColumns.length == 0) {
+                return;
+            }
+            final int firstOrderByColumn = orderByColumns[0];
+            if (onTimeColumn != firstOrderByColumn) {
+                throw new ValidationException(
+                        String.format(
+                                "Invalid ORDER BY clause for table argument '%s'. "
+                                        + "When both ORDER BY and the 'on_time' argument are defined, "
+                                        + "the referenced timestamp columns must match.",
+                                argName));
+            }
         }
     }
 
@@ -547,8 +679,10 @@ public class SystemTypeInference {
                                 + "that is not overloaded and doesn't contain varargs.");
             }
 
+            // Resolve once so the rest of validation iterates the effective signature.
+            final List<StaticArgument> resolvedArgs = resolveStaticArgs(callContext, staticArgs);
             try {
-                checkTableArgs(staticArgs, callContext);
+                checkTableArgs(resolvedArgs, callContext);
                 if (!disableSystemArgs) {
                     checkUidArg(callContext);
                 }
@@ -603,7 +737,12 @@ public class SystemTypeInference {
                                 }
                                 checkRowSemantics(staticArg, semantics);
                                 checkSetSemantics(staticArg, semantics);
-                                tableSemantics.add(semantics);
+                                checkBroadcastSemantics(staticArg, semantics);
+                                // Broadcast tables are side inputs without a key context and are
+                                // therefore excluded from co-partitioning.
+                                if (!staticArg.is(StaticArgumentTrait.BROADCAST_SEMANTIC_TABLE)) {
+                                    tableSemantics.add(semantics);
+                                }
                             });
             checkCoPartitioning(tableSemantics);
         }
@@ -656,6 +795,18 @@ public class SystemTypeInference {
             }
         }
 
+        private static void checkBroadcastSemantics(
+                StaticArgument staticArg, TableSemantics semantics) {
+            if (!staticArg.is(StaticArgumentTrait.BROADCAST_SEMANTIC_TABLE)) {
+                return;
+            }
+            if (semantics.partitionByColumns().length > 0
+                    || semantics.orderByColumns().length > 0) {
+                throw new ValidationException(
+                        "PARTITION BY or ORDER BY are not supported for table arguments with broadcast semantics.");
+            }
+        }
+
         private static void checkSetSemantics(StaticArgument staticArg, TableSemantics semantics) {
             if (!staticArg.is(StaticArgumentTrait.SET_SEMANTIC_TABLE)) {
                 return;
@@ -667,6 +818,68 @@ public class SystemTypeInference {
                                 "Table argument '%s' requires a PARTITION BY clause for parallel processing.",
                                 staticArg.getName()));
             }
+
+            checkOrderBy(staticArg, semantics);
         }
+
+        private static void checkOrderByDuplicates(
+                StaticArgument staticArg, List<String> fieldNames, int[] orderByColumns) {
+            final Set<Integer> seenColumns = new HashSet<>();
+            for (int columnIndex : orderByColumns) {
+                if (!seenColumns.add(columnIndex)) {
+                    throw new ValidationException(
+                            String.format(
+                                    "Invalid ORDER BY clause for table argument '%s'. "
+                                            + "Column '%s' appears more than once in ORDER BY.",
+                                    staticArg.getName(), fieldNames.get(columnIndex)));
+                }
+            }
+        }
+
+        private static void checkOrderBy(StaticArgument staticArg, TableSemantics semantics) {
+            final int[] orderByColumns = semantics.orderByColumns();
+            if (orderByColumns.length == 0) {
+                return;
+            }
+
+            final LogicalType tableType = semantics.dataType().getLogicalType();
+            final List<String> fieldNames = LogicalTypeChecks.getFieldNames(tableType);
+            final List<LogicalType> fieldTypes = LogicalTypeChecks.getFieldTypes(tableType);
+
+            checkOrderByDuplicates(staticArg, fieldNames, orderByColumns);
+
+            // The first ORDER BY column must be a supported time attribute
+            final int firstOrderByColumn = orderByColumns[0];
+            final LogicalType firstOrderByType = fieldTypes.get(firstOrderByColumn);
+            if (isUnsupportedOnTimeColumn(firstOrderByType)) {
+                throw new ValidationException(
+                        String.format(
+                                "Invalid ORDER BY clause for table argument '%s'. "
+                                        + "The first ORDER BY column must be a TIMESTAMP or TIMESTAMP_LTZ column (up to precision 3). "
+                                        + "However, column '%s' has data type '%s'.",
+                                staticArg.getName(),
+                                fieldNames.get(firstOrderByColumn),
+                                firstOrderByType.asSummaryString()));
+            }
+
+            // The first ORDER BY column must be ascending
+            final SortDirection[] orderByDirections = semantics.orderByDirections();
+            if (orderByDirections[0] != SortDirection.ASC_NULLS_LAST) {
+                throw new ValidationException(
+                        String.format(
+                                "Invalid ORDER BY clause for table argument '%s'. "
+                                        + "The first ORDER BY column on a timestamp column must be in ascending order.",
+                                staticArg.getName()));
+            }
+        }
+    }
+
+    /**
+     * Checks whether a column referenced by an {@code on_time} argument has an unsupported data
+     * type. A supported column is a TIMESTAMP or TIMESTAMP_LTZ column up to precision 3.
+     */
+    public static boolean isUnsupportedOnTimeColumn(LogicalType type) {
+        return !LogicalTypeChecks.canBeTimeAttributeType(type)
+                || LogicalTypeChecks.getPrecision(type) > 3;
     }
 }

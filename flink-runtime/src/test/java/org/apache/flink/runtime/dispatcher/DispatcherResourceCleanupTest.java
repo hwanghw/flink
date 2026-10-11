@@ -18,11 +18,14 @@
 
 package org.apache.flink.runtime.dispatcher;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.core.failure.FailureEnricher;
 import org.apache.flink.core.testutils.OneShotLatch;
+import org.apache.flink.runtime.application.SingleJobApplication;
 import org.apache.flink.runtime.blob.BlobServer;
 import org.apache.flink.runtime.blob.BlobUtils;
 import org.apache.flink.runtime.blob.TestingBlobStoreBuilder;
@@ -30,6 +33,7 @@ import org.apache.flink.runtime.client.DuplicateJobSubmissionException;
 import org.apache.flink.runtime.client.JobSubmissionException;
 import org.apache.flink.runtime.dispatcher.cleanup.TestingResourceCleanerFactory;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
+import org.apache.flink.runtime.executiongraph.ErrorInfo;
 import org.apache.flink.runtime.executiongraph.JobStatusListener;
 import org.apache.flink.runtime.heartbeat.HeartbeatServices;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
@@ -91,6 +95,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /** Tests the resource cleanup by the {@link Dispatcher}. */
@@ -112,6 +117,10 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 
     private JobGraph jobGraph;
 
+    private SingleJobApplication application;
+
+    private ApplicationID applicationId;
+
     private TestingDispatcher dispatcher;
 
     private DispatcherGateway dispatcherGateway;
@@ -130,6 +139,8 @@ public class DispatcherResourceCleanupTest extends TestLogger {
     public void setup() throws Exception {
         jobGraph = JobGraphTestUtils.singleNoOpJobGraph();
         jobId = jobGraph.getJobID();
+        application = new SingleJobApplication(jobGraph);
+        applicationId = application.getApplicationId();
 
         globalCleanupFuture = new CompletableFuture<>();
         localCleanupFuture = new CompletableFuture<>();
@@ -141,23 +152,23 @@ public class DispatcherResourceCleanupTest extends TestLogger {
                         new TestingBlobStoreBuilder().createTestingBlobStore());
     }
 
-    private TestingJobManagerRunnerFactory startDispatcherAndSubmitJob() throws Exception {
-        return startDispatcherAndSubmitJob(0);
+    private TestingJobManagerRunnerFactory startDispatcherAndSubmitApplication() throws Exception {
+        return startDispatcherAndSubmitApplication(0);
     }
 
-    private TestingJobManagerRunnerFactory startDispatcherAndSubmitJob(
+    private TestingJobManagerRunnerFactory startDispatcherAndSubmitApplication(
             int numBlockingJobManagerRunners) throws Exception {
-        return startDispatcherAndSubmitJob(
+        return startDispatcherAndSubmitApplication(
                 createTestingDispatcherBuilder(), numBlockingJobManagerRunners);
     }
 
-    private TestingJobManagerRunnerFactory startDispatcherAndSubmitJob(
+    private TestingJobManagerRunnerFactory startDispatcherAndSubmitApplication(
             TestingDispatcher.Builder dispatcherBuilder, int numBlockingJobManagerRunners)
             throws Exception {
         final TestingJobMasterServiceLeadershipRunnerFactory testingJobManagerRunnerFactoryNG =
                 new TestingJobMasterServiceLeadershipRunnerFactory(numBlockingJobManagerRunners);
         startDispatcher(dispatcherBuilder, testingJobManagerRunnerFactoryNG);
-        submitJobAndWait();
+        submitApplicationAndWait();
 
         return testingJobManagerRunnerFactoryNG;
     }
@@ -227,10 +238,10 @@ public class DispatcherResourceCleanupTest extends TestLogger {
     @Test
     public void testGlobalCleanupWhenJobFinished() throws Exception {
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob();
+                startDispatcherAndSubmitApplication();
 
         // complete the job
-        finishJob(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
+        finishJobAndApplication(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
 
         assertGlobalCleanupTriggered(jobId);
     }
@@ -238,7 +249,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
     @Test
     public void testGlobalCleanupWhenJobCanceled() throws Exception {
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob();
+                startDispatcherAndSubmitApplication();
 
         // complete the job
         cancelJob(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
@@ -246,18 +257,18 @@ public class DispatcherResourceCleanupTest extends TestLogger {
         assertGlobalCleanupTriggered(jobId);
     }
 
-    private CompletableFuture<Acknowledge> submitJob() {
-        return dispatcherGateway.submitJob(jobGraph, timeout);
+    private CompletableFuture<Acknowledge> submitApplication() {
+        return dispatcherGateway.submitApplication(application, timeout);
     }
 
-    private void submitJobAndWait() {
-        submitJob().join();
+    private void submitApplicationAndWait() {
+        submitApplication().join();
     }
 
     @Test
     public void testLocalCleanupWhenJobNotFinished() throws Exception {
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob();
+                startDispatcherAndSubmitApplication();
 
         // job not finished
         final TestingJobManagerRunner testingJobManagerRunner =
@@ -270,7 +281,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
     @Test
     public void testGlobalCleanupWhenJobSubmissionFails() throws Exception {
         startDispatcher(new FailingJobManagerRunnerFactory(new FlinkException("Test exception")));
-        final CompletableFuture<Acknowledge> submissionFuture = submitJob();
+        final CompletableFuture<Acknowledge> submissionFuture = submitApplication();
 
         assertThatThrownBy(submissionFuture::get).hasCauseInstanceOf(JobSubmissionException.class);
 
@@ -279,7 +290,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 
     @Test
     public void testLocalCleanupWhenClosingDispatcher() throws Exception {
-        startDispatcherAndSubmitJob();
+        startDispatcherAndSubmitApplication();
 
         dispatcher.closeAsync().get();
 
@@ -298,7 +309,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
                 new ArrayDeque<>(Arrays.asList(testingJobManagerRunner));
 
         startDispatcher(new QueueJobManagerRunnerFactory(jobManagerRunners));
-        submitJobAndWait();
+        submitApplicationAndWait();
 
         final CompletableFuture<Void> dispatcherTerminationFuture = dispatcher.closeAsync();
 
@@ -340,9 +351,9 @@ public class DispatcherResourceCleanupTest extends TestLogger {
                                         .build());
 
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob(dispatcherBuilder, 0);
+                startDispatcherAndSubmitApplication(dispatcherBuilder, 0);
 
-        finishJob(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
+        finishJobAndApplication(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
 
         assertThatNoCleanupWasTriggered();
 
@@ -395,9 +406,9 @@ public class DispatcherResourceCleanupTest extends TestLogger {
                         .setResourceCleanerFactory(resourceCleanerFactory);
 
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob(dispatcherBuilder, 0);
+                startDispatcherAndSubmitApplication(dispatcherBuilder, 0);
 
-        finishJob(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
+        finishJobAndApplication(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
 
         assertThat(markAsCleanFuture.isDone(), is(false));
 
@@ -415,7 +426,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
     @Test
     public void testJobSubmissionUnderSameJobId() throws Exception {
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob(1);
+                startDispatcherAndSubmitApplication(1);
 
         final TestingJobManagerRunner testingJobManagerRunner =
                 jobManagerRunnerFactory.takeCreatedJobManagerRunner();
@@ -450,7 +461,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
     @Test
     public void testDuplicateJobSubmissionDoesNotDeleteJobMetaData() throws Exception {
         final TestingJobManagerRunnerFactory testingJobManagerRunnerFactoryNG =
-                startDispatcherAndSubmitJob();
+                startDispatcherAndSubmitApplication();
 
         final CompletableFuture<Acknowledge> submissionFuture =
                 dispatcherGateway.submitJob(jobGraph, timeout);
@@ -468,18 +479,30 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 
             assertThatNoCleanupWasTriggered();
         } finally {
-            finishJob(testingJobManagerRunnerFactoryNG.takeCreatedJobManagerRunner());
+            finishJobAndApplication(testingJobManagerRunnerFactoryNG.takeCreatedJobManagerRunner());
         }
 
         assertGlobalCleanupTriggered(jobId);
     }
 
-    private void finishJob(TestingJobManagerRunner takeCreatedJobManagerRunner) {
+    private void finishJobAndApplication(TestingJobManagerRunner takeCreatedJobManagerRunner) {
         terminateJobWithState(takeCreatedJobManagerRunner, JobStatus.FINISHED);
+        application.jobStatusChanges(
+                takeCreatedJobManagerRunner.getJobID(),
+                JobStatus.FINISHED,
+                System.currentTimeMillis());
     }
 
     private void suspendJob(TestingJobManagerRunner takeCreatedJobManagerRunner) {
         terminateJobWithState(takeCreatedJobManagerRunner, JobStatus.SUSPENDED);
+    }
+
+    private void failJobAndApplication(TestingJobManagerRunner takeCreatedJobManagerRunner) {
+        terminateJobWithState(takeCreatedJobManagerRunner, JobStatus.FAILED);
+        application.jobStatusChanges(
+                takeCreatedJobManagerRunner.getJobID(),
+                JobStatus.FAILED,
+                System.currentTimeMillis());
     }
 
     private void cancelJob(TestingJobManagerRunner takeCreatedJobManagerRunner) {
@@ -488,12 +511,17 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 
     private void terminateJobWithState(
             TestingJobManagerRunner takeCreatedJobManagerRunner, JobStatus state) {
+        final ArchivedExecutionGraphBuilder archivedExecutionGraphBuilder =
+                new ArchivedExecutionGraphBuilder().setJobID(jobId).setState(state);
+
+        if (state == JobStatus.FAILED) {
+            archivedExecutionGraphBuilder.setFailureCause(
+                    new ErrorInfo(
+                            new FlinkException("Test job failure"), System.currentTimeMillis()));
+        }
+
         takeCreatedJobManagerRunner.completeResultFuture(
-                new ExecutionGraphInfo(
-                        new ArchivedExecutionGraphBuilder()
-                                .setJobID(jobId)
-                                .setState(state)
-                                .build()));
+                new ExecutionGraphInfo(archivedExecutionGraphBuilder.build()));
     }
 
     private void assertThatNoCleanupWasTriggered() {
@@ -504,7 +532,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
     @Test
     public void testDispatcherTerminationTerminatesRunningJobMasters() throws Exception {
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob();
+                startDispatcherAndSubmitApplication();
 
         dispatcher.closeAsync().get();
 
@@ -517,7 +545,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
     @Test
     public void testDispatcherTerminationWaitsForJobMasterTerminations() throws Exception {
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob(1);
+                startDispatcherAndSubmitApplication(1);
 
         final CompletableFuture<Void> dispatcherTerminationFuture = dispatcher.closeAsync();
 
@@ -556,7 +584,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
                         .build();
 
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob(
+                startDispatcherAndSubmitApplication(
                         createTestingDispatcherBuilder().setJobResultStore(jobResultStore), 0);
 
         ArchivedExecutionGraph executionGraph =
@@ -592,7 +620,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
                         .build();
 
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob(
+                startDispatcherAndSubmitApplication(
                         createTestingDispatcherBuilder().setJobResultStore(jobResultStore), 0);
 
         ArchivedExecutionGraph executionGraph =
@@ -640,6 +668,10 @@ public class DispatcherResourceCleanupTest extends TestLogger {
         final DispatcherGateway dispatcherGateway =
                 dispatcher.getSelfGateway(DispatcherGateway.class);
 
+        // submit a mocked application to hold the job
+        dispatcherGateway.submitApplication(
+                TestingApplication.builder().setApplicationId(applicationId).build(), timeout);
+
         // submit and fail during job master runner construction
         queue.offer(Optional.of(testException));
         assertThatThrownBy(() -> dispatcherGateway.submitJob(jobGraph, Duration.ofMinutes(1)).get())
@@ -652,7 +684,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
         // don't fail this time
         queue.offer(Optional.empty());
         // submit job again
-        dispatcherGateway.submitJob(jobGraph, Duration.ofMinutes(1L)).get();
+        dispatcherGateway.submitJob(jobGraph, Duration.ofMinutes(1)).get();
         blockingJobManagerRunnerFactory.setJobStatus(JobStatus.RUNNING);
 
         // Ensure job is running
@@ -674,9 +706,9 @@ public class DispatcherResourceCleanupTest extends TestLogger {
                                         .build());
 
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob(testingDispatcherBuilder, 0);
+                startDispatcherAndSubmitApplication(testingDispatcherBuilder, 0);
 
-        finishJob(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
+        finishJobAndApplication(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
 
         // Before the archiving is finished, the cleanup is not finished and the job is not
         // terminated
@@ -710,7 +742,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
                                         .build());
 
         final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
-                startDispatcherAndSubmitJob(testingDispatcherBuilder, 0);
+                startDispatcherAndSubmitApplication(testingDispatcherBuilder, 0);
 
         suspendJob(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
 
@@ -718,6 +750,72 @@ public class DispatcherResourceCleanupTest extends TestLogger {
         dispatcher.getJobTerminationFuture(jobId, Duration.ofHours(1)).join();
 
         assertFalse(isArchived.get());
+    }
+
+    @Test
+    public void testNotArchivingFinishedJobToHistoryServerWhenOnlyFailedJobsConfigured()
+            throws Exception {
+
+        final AtomicBoolean isArchived = new AtomicBoolean(false);
+
+        final Configuration configuration = new Configuration();
+        configuration.set(JobManagerOptions.ARCHIVE_ON_FAILED_JOBS_ONLY, true);
+
+        final TestingDispatcher.Builder testingDispatcherBuilder =
+                createTestingDispatcherBuilder()
+                        .setConfiguration(configuration)
+                        .setHistoryServerArchivist(
+                                TestingHistoryServerArchivist.builder()
+                                        .setArchiveExecutionGraphFunction(
+                                                (executionGraphInfo, applicationId) -> {
+                                                    isArchived.set(true);
+                                                    return CompletableFuture.completedFuture(
+                                                            Acknowledge.get());
+                                                })
+                                        .build());
+
+        final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
+                startDispatcherAndSubmitApplication(testingDispatcherBuilder, 0);
+
+        finishJobAndApplication(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
+
+        assertGlobalCleanupTriggered(jobId);
+        dispatcher.getJobTerminationFuture(jobId, Duration.ofHours(1)).join();
+
+        assertFalse(isArchived.get());
+    }
+
+    @Test
+    public void testArchivingFailedJobToHistoryServerWhenOnlyFailedJobsConfigured()
+            throws Exception {
+
+        final AtomicBoolean isArchived = new AtomicBoolean(false);
+
+        final Configuration configuration = new Configuration();
+        configuration.set(JobManagerOptions.ARCHIVE_ON_FAILED_JOBS_ONLY, true);
+
+        final TestingDispatcher.Builder testingDispatcherBuilder =
+                createTestingDispatcherBuilder()
+                        .setConfiguration(configuration)
+                        .setHistoryServerArchivist(
+                                TestingHistoryServerArchivist.builder()
+                                        .setArchiveExecutionGraphFunction(
+                                                (executionGraphInfo, applicationId) -> {
+                                                    isArchived.set(true);
+                                                    return CompletableFuture.completedFuture(
+                                                            Acknowledge.get());
+                                                })
+                                        .build());
+
+        final TestingJobManagerRunnerFactory jobManagerRunnerFactory =
+                startDispatcherAndSubmitApplication(testingDispatcherBuilder, 0);
+
+        failJobAndApplication(jobManagerRunnerFactory.takeCreatedJobManagerRunner());
+
+        assertGlobalCleanupTriggered(jobId);
+        dispatcher.getJobTerminationFuture(jobId, Duration.ofHours(1)).join();
+
+        assertTrue(isArchived.get());
     }
 
     private static final class BlockingJobManagerRunnerFactory

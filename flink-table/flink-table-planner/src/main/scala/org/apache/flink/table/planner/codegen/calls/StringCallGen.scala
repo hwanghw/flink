@@ -79,10 +79,6 @@ object StringCallGen {
       case NOT_SIMILAR_TO =>
         generateNot(ctx, generateSimilarTo(ctx, operands, returnType), returnType)
 
-      case REGEXP_EXTRACT => generateRegexpExtract(ctx, operands, returnType)
-
-      case REGEXP_REPLACE => generateRegexpReplace(ctx, operands, returnType)
-
       case IS_DECIMAL => generateIsDecimal(ctx, operands, returnType)
 
       case IS_DIGIT => generateIsDigit(ctx, operands, returnType)
@@ -137,8 +133,6 @@ object StringCallGen {
       case TO_BASE64 => generateToBase64(ctx, operands, returnType)
 
       case CHR => generateChr(ctx, operands, returnType)
-
-      case REGEXP => generateRegExp(ctx, operands, returnType)
 
       case BIN => generateBin(ctx, operands, returnType)
 
@@ -563,16 +557,6 @@ object StringCallGen {
     val className = classOf[SqlFunctionUtils].getCanonicalName
     generateStringResultCallIfArgsNotNull(ctx, operands, returnType) {
       terms => s"$className.splitIndex(${toStringTerms(terms, operands)})"
-    }
-  }
-
-  def generateKeyValue(
-      ctx: CodeGeneratorContext,
-      operands: Seq[GeneratedExpression],
-      returnType: LogicalType): GeneratedExpression = {
-    val className = classOf[SqlFunctionUtils].getCanonicalName
-    generateCallIfArgsNullable(ctx, returnType, operands) {
-      terms => s"$className.keyValue(${terms.mkString(",")})"
     }
   }
 

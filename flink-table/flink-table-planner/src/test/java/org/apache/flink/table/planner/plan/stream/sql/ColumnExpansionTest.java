@@ -18,20 +18,30 @@
 
 package org.apache.flink.table.planner.plan.stream.sql;
 
+import org.apache.flink.table.annotation.ArgumentHint;
+import org.apache.flink.table.annotation.DataTypeHint;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.config.TableConfigOptions;
+import org.apache.flink.table.functions.ProcessTableFunction;
+import org.apache.flink.types.Row;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
+import static org.apache.flink.table.annotation.ArgumentTrait.OPTIONAL_PARTITION_BY;
+import static org.apache.flink.table.annotation.ArgumentTrait.PASS_COLUMNS_THROUGH;
+import static org.apache.flink.table.annotation.ArgumentTrait.ROW_SEMANTIC_TABLE;
+import static org.apache.flink.table.annotation.ArgumentTrait.SET_SEMANTIC_TABLE;
 import static org.apache.flink.table.api.config.TableConfigOptions.ColumnExpansionStrategy.EXCLUDE_ALIASED_VIRTUAL_METADATA_COLUMNS;
 import static org.apache.flink.table.api.config.TableConfigOptions.ColumnExpansionStrategy.EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS;
 import static org.apache.flink.table.api.config.TableConfigOptions.TABLE_COLUMN_EXPANSION_STRATEGY;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link TableConfigOptions#TABLE_COLUMN_EXPANSION_STRATEGY}. */
 class ColumnExpansionTest {
@@ -87,7 +97,7 @@ class ColumnExpansionTest {
         tableEnv.getConfig()
                 .set(
                         TABLE_COLUMN_EXPANSION_STRATEGY,
-                        Collections.singletonList(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
+                        List.of(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
 
         // From one table
         assertColumnNames(
@@ -158,7 +168,7 @@ class ColumnExpansionTest {
         tableEnv.getConfig()
                 .set(
                         TABLE_COLUMN_EXPANSION_STRATEGY,
-                        Collections.singletonList(EXCLUDE_ALIASED_VIRTUAL_METADATA_COLUMNS));
+                        List.of(EXCLUDE_ALIASED_VIRTUAL_METADATA_COLUMNS));
 
         // From one table
         assertColumnNames(
@@ -238,7 +248,7 @@ class ColumnExpansionTest {
         tableEnv.getConfig()
                 .set(
                         TABLE_COLUMN_EXPANSION_STRATEGY,
-                        Collections.singletonList(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
+                        List.of(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
 
         // t3_m_virtual is selected due to expansion of the explicit table expression
         // with hints from descriptor
@@ -265,7 +275,7 @@ class ColumnExpansionTest {
         tableEnv.getConfig()
                 .set(
                         TABLE_COLUMN_EXPANSION_STRATEGY,
-                        Collections.singletonList(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
+                        List.of(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
 
         // t3_m_virtual is selected due to expansion of the explicit table expression
         // with hints from descriptor
@@ -293,7 +303,7 @@ class ColumnExpansionTest {
         tableEnv.getConfig()
                 .set(
                         TABLE_COLUMN_EXPANSION_STRATEGY,
-                        Collections.singletonList(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
+                        List.of(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
 
         tableEnv.executeSql(
                 "CREATE TABLE sink (\n"
@@ -318,7 +328,7 @@ class ColumnExpansionTest {
         tableEnv.getConfig()
                 .set(
                         TABLE_COLUMN_EXPANSION_STRATEGY,
-                        Collections.singletonList(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
+                        List.of(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
 
         tableEnv.executeSql(
                 "CREATE TABLE sink (\n"
@@ -346,7 +356,7 @@ class ColumnExpansionTest {
         tableEnv.getConfig()
                 .set(
                         TABLE_COLUMN_EXPANSION_STRATEGY,
-                        Collections.singletonList(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
+                        List.of(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
 
         // t3_m_virtual is selected due to expansion of the explicit table expression
         // with hints from descriptor
@@ -374,7 +384,7 @@ class ColumnExpansionTest {
         tableEnv.getConfig()
                 .set(
                         TABLE_COLUMN_EXPANSION_STRATEGY,
-                        Collections.singletonList(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
+                        List.of(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
 
         // t3_m_virtual is selected due to expansion of the explicit table expression
         // with hints from descriptor
@@ -395,5 +405,156 @@ class ColumnExpansionTest {
                         + "GROUP BY t3_s, window_start, window_end",
                 "t3_s",
                 "agg");
+    }
+
+    @Test
+    void testProcessTableFunctionWithOnTime() {
+        tableEnv.getConfig()
+                .set(
+                        TABLE_COLUMN_EXPANSION_STRATEGY,
+                        List.of(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
+
+        // Register PTF that requires on_time
+        tableEnv.createTemporarySystemFunction("singlePtf", PassThroughPtf.class);
+        tableEnv.createTemporarySystemFunction("multiPtf", MultiInputPtf.class);
+
+        // t3_m_virtual is not selected due to missing on_time descriptor
+        assertColumnNames("SELECT * FROM singlePtf(r => TABLE t3)", "t3_s", "t3_i", "out");
+        assertColumnNames("SELECT * FROM singlePtf(TABLE t3)", "t3_s", "t3_i", "out");
+
+        // t3_m_virtual is selected due to expansion of the explicit table expression
+        // with hints from the on_time descriptor
+        assertColumnNames(
+                "SELECT * FROM singlePtf(r => TABLE t3, on_time => DESCRIPTOR(t3_m_virtual))",
+                "t3_s",
+                "t3_i",
+                "t3_m_virtual",
+                "out",
+                "rowtime");
+        assertColumnNames(
+                "SELECT * FROM singlePtf(TABLE t3, DESCRIPTOR(t3_m_virtual))",
+                "t3_s",
+                "t3_i",
+                "t3_m_virtual",
+                "out",
+                "rowtime");
+
+        assertThatThrownBy(
+                        () ->
+                                tableEnv.sqlQuery(
+                                        "SELECT * FROM multiPtf(TABLE t3, TABLE t2, DESCRIPTOR(t3_m_virtual, t2_m_virtual))"))
+                // Message indicates that 't2_m_virtual' was correctly resolved
+                // and passed to PTF type inference
+                .hasRootCauseMessage(
+                        "Unsupported data type for time attribute. The `on_time` argument "
+                                + "must reference a TIMESTAMP or TIMESTAMP_LTZ column (up to "
+                                + "precision 3). However, column 't2_m_virtual' in table "
+                                + "argument 'r2' has data type 'INT'.");
+    }
+
+    @Test
+    void testLateralSnapshotJoinWithOnTimeOnHiddenMetadataColumn() {
+        tableEnv.getConfig()
+                .set(
+                        TABLE_COLUMN_EXPANSION_STRATEGY,
+                        List.of(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
+
+        tableEnv.executeSql(
+                "CREATE TABLE snapshot_probe (\n"
+                        + "  pk STRING,\n"
+                        + "  pts TIMESTAMP(3),\n"
+                        + "  WATERMARK FOR pts AS pts\n"
+                        + ") WITH ('connector' = 'values', 'bounded' = 'false')");
+
+        // The build-side watermark is declared on a virtual metadata column that
+        // EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS hides from SELECT *.
+        tableEnv.executeSql(
+                "CREATE TABLE snapshot_build_hidden (\n"
+                        + "  bk STRING,\n"
+                        + "  bv INT,\n"
+                        + "  rt TIMESTAMP_LTZ(3) METADATA VIRTUAL,\n"
+                        + "  WATERMARK FOR rt AS rt\n"
+                        + ") WITH (\n"
+                        + " 'connector' = 'values',\n"
+                        + " 'bounded' = 'false',\n"
+                        + " 'readable-metadata' = 'rt:TIMESTAMP_LTZ(3)'\n"
+                        + ")");
+
+        final String sql =
+                "SELECT * FROM snapshot_probe JOIN LATERAL SNAPSHOT("
+                        + "input => TABLE snapshot_build_hidden, on_time => DESCRIPTOR(rt), "
+                        + "load_completed_time => CAST(TIMESTAMP '2026-07-01 00:00:00' AS TIMESTAMP_LTZ(3))"
+                        + ") AS s ON snapshot_probe.pk = s.bk";
+
+        // rt is selected due to the on_time descriptor, even though it is a hidden metadata column.
+        assertColumnNames(sql, "pk", "pts", "bk", "bv", "rt");
+        // The row-time attribute named by on_time is recognized, so the join plans as a LATERAL
+        // SNAPSHOT join instead of being rejected for a missing build-side watermark.
+        assertThat(tableEnv.explainSql(sql)).contains("LateralSnapshotJoin");
+    }
+
+    @Test
+    void testLateralSnapshotJoinWithOnTimeOnPushedDownHiddenMetadataColumn() {
+        tableEnv.getConfig()
+                .set(
+                        TABLE_COLUMN_EXPANSION_STRATEGY,
+                        List.of(EXCLUDE_DEFAULT_VIRTUAL_METADATA_COLUMNS));
+
+        tableEnv.executeSql(
+                "CREATE TABLE snapshot_probe (\n"
+                        + "  pk STRING,\n"
+                        + "  pts TIMESTAMP(3),\n"
+                        + "  WATERMARK FOR pts AS pts\n"
+                        + ") WITH ('connector' = 'values', 'bounded' = 'false')");
+
+        // Same hidden-metadata watermark, but enable-watermark-push-down folds it into the source;
+        // disable-lookup keeps the values source a pure scan source so the watermark is pushed into
+        // the scan.
+        tableEnv.executeSql(
+                "CREATE TABLE snapshot_build_pushed (\n"
+                        + "  bk STRING,\n"
+                        + "  bv INT,\n"
+                        + "  rt TIMESTAMP_LTZ(3) METADATA VIRTUAL,\n"
+                        + "  WATERMARK FOR rt AS rt\n"
+                        + ") WITH (\n"
+                        + " 'connector' = 'values',\n"
+                        + " 'bounded' = 'false',\n"
+                        + " 'disable-lookup' = 'true',\n"
+                        + " 'enable-watermark-push-down' = 'true',\n"
+                        + " 'scan.watermark.emit.strategy' = 'on-event',\n"
+                        + " 'readable-metadata' = 'rt:TIMESTAMP_LTZ(3)'\n"
+                        + ")");
+
+        final String sql =
+                "SELECT * FROM snapshot_probe JOIN LATERAL SNAPSHOT("
+                        + "input => TABLE snapshot_build_pushed, on_time => DESCRIPTOR(rt), "
+                        + "load_completed_time => CAST(TIMESTAMP '2026-07-01 00:00:00' AS TIMESTAMP_LTZ(3))"
+                        + ") AS s ON snapshot_probe.pk = s.bk";
+
+        // rt is selected due to the on_time descriptor, even though it is a hidden metadata column.
+        assertColumnNames(sql, "pk", "pts", "bk", "bv", "rt");
+        final String plan = tableEnv.explainSql(sql);
+        assertThat(plan).contains("LateralSnapshotJoin");
+        // watermarkEmitStrategy only appears on the TableSourceScan when the watermark is folded
+        // into the source, confirming the pushed-down row-time attribute reaches the operator.
+        assertThat(plan).contains("watermarkEmitStrategy=[on-event]");
+    }
+
+    @DataTypeHint("ROW<out STRING>")
+    public static class PassThroughPtf extends ProcessTableFunction<Row> {
+        @SuppressWarnings("unused")
+        public void eval(@ArgumentHint({ROW_SEMANTIC_TABLE, PASS_COLUMNS_THROUGH}) Row r) {
+            // dummy
+        }
+    }
+
+    @DataTypeHint("ROW<out STRING>")
+    public static class MultiInputPtf extends ProcessTableFunction<Row> {
+        @SuppressWarnings("unused")
+        public void eval(
+                @ArgumentHint({SET_SEMANTIC_TABLE, OPTIONAL_PARTITION_BY}) Row r1,
+                @ArgumentHint({SET_SEMANTIC_TABLE, OPTIONAL_PARTITION_BY}) Row r2) {
+            // dummy
+        }
     }
 }

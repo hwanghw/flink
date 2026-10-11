@@ -17,7 +17,7 @@
  */
 package org.apache.flink.table.planner.codegen.calls
 
-import org.apache.flink.table.api.ValidationException
+import org.apache.flink.table.api.{TableRuntimeException, ValidationException}
 import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.data.binary.BinaryArrayData
 import org.apache.flink.table.data.util.MapDataUtil
@@ -41,6 +41,7 @@ import org.apache.flink.table.types.logical.utils.LogicalTypeChecks
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks.{getFieldTypes, getPrecision, getScale}
 import org.apache.flink.table.types.logical.utils.LogicalTypeMerging.findCommonType
 import org.apache.flink.table.utils.DateTimeUtils.MILLIS_PER_DAY
+import org.apache.flink.table.utils.EncodingUtils
 import org.apache.flink.types.ColumnList
 import org.apache.flink.util.Preconditions.checkArgument
 
@@ -181,14 +182,22 @@ object ScalarOperatorGens {
         }
 
       case (TIME_WITHOUT_TIME_ZONE, INTERVAL_DAY_TIME) =>
-        generateOperatorIfNotNull(ctx, new TimeType(), left, right) {
+        generateOperatorIfNotNull(
+          ctx,
+          new TimeType(LogicalTypeChecks.getPrecision(left.resultType)),
+          left,
+          right) {
           (l, r) =>
             s"java.lang.Math.toIntExact((($l + ${MILLIS_PER_DAY}L) $op (" +
               s"java.lang.Math.toIntExact($r % ${MILLIS_PER_DAY}L))) % ${MILLIS_PER_DAY}L)"
         }
 
       case (TIME_WITHOUT_TIME_ZONE, INTERVAL_YEAR_MONTH) =>
-        generateOperatorIfNotNull(ctx, new TimeType(), left, right)((l, r) => s"$l")
+        generateOperatorIfNotNull(
+          ctx,
+          new TimeType(LogicalTypeChecks.getPrecision(left.resultType)),
+          left,
+          right)((l, r) => s"$l")
 
       case (TIMESTAMP_WITHOUT_TIME_ZONE | TIMESTAMP_WITH_LOCAL_TIME_ZONE, INTERVAL_DAY_TIME) =>
         generateOperatorIfNotNull(ctx, left.resultType, left, right) {
@@ -262,6 +271,8 @@ object ScalarOperatorGens {
                   case (DATE, TIMESTAMP_WITHOUT_TIME_ZONE) =>
                     val rightTerm = s"$rr.getMillisecond()"
                     s"($ll * ${MILLIS_PER_DAY}L) $op $rightTerm"
+                  case (TIME_WITHOUT_TIME_ZONE, TIME_WITHOUT_TIME_ZONE) =>
+                    s"($ll $op $rr)"
                 }
             }
         }
@@ -609,9 +620,11 @@ object ScalarOperatorGens {
           }
       }
       // both sides are numeric
-      else if (isNumeric(left.resultType) && isNumeric(right.resultType)) {
-        (leftTerm, rightTerm) => s"$leftTerm $operator $rightTerm"
-      }
+      else if (
+        isNumeric(left.resultType) && isNumeric(right.resultType)
+        || isTime(left.resultType) &&
+        isTime(right.resultType)
+      ) { (leftTerm, rightTerm) => s"$leftTerm $operator $rightTerm" }
 
       // both sides are timestamp
       else if (isTimestamp(left.resultType) && isTimestamp(right.resultType)) {
@@ -641,9 +654,10 @@ object ScalarOperatorGens {
           case _ => throw new CodeGenException(s"Unsupported boolean comparison '$operator'.")
         }
       }
-      // both sides are binary type
+      // both sides are binary type or UUID (both are backed by a byte[] and order by the same
+      // unsigned byte-wise comparison)
       else if (
-        isBinaryString(left.resultType) &&
+        (isBinaryString(left.resultType) || isUuid(left.resultType)) &&
         isInteroperable(left.resultType, right.resultType)
       ) {
         val utilName = classOf[SqlFunctionUtils].getCanonicalName
@@ -1018,6 +1032,47 @@ object ScalarOperatorGens {
       case (_, _) =>
         throw new CodeGenException(
           s"Unsupported cast from '${operand.resultType}' to '$targetType'.")
+    }
+  }
+
+  def generateCoalesce(
+      ctx: CodeGeneratorContext,
+      operands: Seq[GeneratedExpression],
+      resultType: LogicalType): GeneratedExpression = {
+    if (operands.size == 1) {
+      generateCast(ctx, operands.head, resultType, nullOnFailure = false)
+    } else {
+      val condition =
+        if (operands.head.resultType.equals(resultType)) {
+          operands.head
+        } else {
+          generateCast(ctx, operands.head, resultType, nullOnFailure = false)
+        }
+      val falseAction = generateCoalesce(ctx, operands.tail, resultType)
+
+      val Seq(resultTerm, nullTerm) = newNames(ctx, "result", "isNull")
+      val resultTypeTerm = primitiveTypeTermForType(resultType)
+      val defaultValue = primitiveDefaultValue(resultType)
+
+      val operatorCode =
+        s"""
+           |$resultTypeTerm $resultTerm = $defaultValue;
+           |// coalesce
+           |${condition.code}
+           |boolean $nullTerm = ${condition.nullTerm};
+           |if (!$nullTerm) {
+           |   $resultTerm = ${condition.resultTerm};
+           |} else {
+           |  ${falseAction.code}
+           |  $nullTerm = ${falseAction.nullTerm};
+           |  if (!$nullTerm) {
+           |    $resultTerm = ${falseAction.resultTerm};
+           |  }
+           |}
+           |// end coalesce
+           |""".stripMargin.trim
+
+      GeneratedExpression(resultTerm, nullTerm, operatorCode, resultType)
     }
   }
 
@@ -1727,16 +1782,17 @@ object ScalarOperatorGens {
       resultTerm: String,
       nullTerm: String,
       tmpValue: String): String = {
+    val escapedFieldName = EncodingUtils.escapeJava(fieldName)
     s"""
        |  if ($variantTerm.isObject()){
-       |    $variantTypeTerm $tmpValue = $variantTerm.getField("$fieldName");
+       |    $variantTypeTerm $tmpValue = $variantTerm.getField("$escapedFieldName");
        |    if ($tmpValue == null) {
        |      $nullTerm = true;
        |    } else {
        |      $resultTerm = $tmpValue;
        |    }
        |  } else {
-       |    throw new org.apache.flink.table.api.TableRuntimeException("String key access on variant requires an object variant, but a non-object variant was provided.");
+       |    throw new ${className[TableRuntimeException]}("String key access on variant requires an object variant, but a non-object variant was provided.");
        |  }
     """.stripMargin
   }
@@ -1793,6 +1849,7 @@ object ScalarOperatorGens {
     }
 
     try {
+      // No escaping here as it will be done in the primitiveLiteralForType according to the type of the literal value.
       val result = castExecutor.cast(literalExpr.literalValue.get)
       val resultTerm = newName(ctx, "stringToTime")
 
@@ -2041,6 +2098,8 @@ object ScalarOperatorGens {
         ctx.addReusableLocalVariable(ty, variablePrefix)
       override def declareTypeSerializer(ty: LogicalType): String =
         ctx.addReusableTypeSerializer(ty)
+      override def declareReusableObject(obj: AnyRef, fieldPrefix: String): String =
+        ctx.addReusableObject(obj, fieldPrefix)
       override def declareClassField(ty: String, field: String, init: String): String = {
         ctx.addReusableMember(s"private $ty $field = $init;")
         field

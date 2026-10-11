@@ -17,11 +17,18 @@
  */
 package org.apache.flink.table.planner.runtime.stream.sql
 
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
+import org.apache.flink.api.common.typeinfo.Types
+import org.apache.flink.connector.datagen.source.{DataGeneratorSource, GeneratorFunction}
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.api.config.ExecutionConfigOptions
+import org.apache.flink.table.api.config.OptimizerConfigOptions
+import org.apache.flink.table.connector.ChangelogMode
 import org.apache.flink.table.planner.expressions.utils.FuncWithOpen
 import org.apache.flink.table.planner.factories.TestValuesTableFactory
+import org.apache.flink.table.planner.factories.TestValuesTableFactory.changelogRow
+import org.apache.flink.table.planner.runtime.stream.sql.JoinITCase.WaitForSinkThenEmit
 import org.apache.flink.table.planner.runtime.utils._
 import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.planner.runtime.utils.StreamingWithMiniBatchTestBase.{MiniBatchMode, MiniBatchOff, MiniBatchOn}
@@ -30,10 +37,12 @@ import org.apache.flink.testutils.junit.extensions.parameterized.{ParameterizedT
 import org.apache.flink.types.Row
 
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assumptions.assumeThat
 import org.junit.jupiter.api.{BeforeEach, TestTemplate}
 import org.junit.jupiter.api.extension.ExtendWith
 
 import java.util
+import java.util.UUID
 
 import scala.collection.{mutable, Seq}
 import scala.collection.JavaConversions._
@@ -131,7 +140,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     env.execute()
 
     val expected = mutable
-      .MutableList(
+      .ListBuffer(
         "1,1,Hi,1,1,0,Hallo,1",
         "1,1,Hi,2,2,1,Hallo Welt,2",
         "1,1,Hi,2,3,2,Hallo Welt wie,1",
@@ -182,7 +191,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = mutable.MutableList("1,2,hi a2,3,4,hi b1", "2,3,hi a3,4,5,null").toList
+    val expected = mutable.ListBuffer("1,2,hi a2,3,4,hi b1", "2,3,hi a3,4,5,null").toList
 
     assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
   }
@@ -190,7 +199,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
   /** test non-window inner join * */
   @TestTemplate
   def testNonWindowInnerJoin(): Unit = {
-    val data1 = new mutable.MutableList[(Int, Long, String)]
+    val data1 = new mutable.ListBuffer[(Int, Long, String)]
     data1.+=((1, 1L, "Hi1"))
     data1.+=((1, 2L, "Hi2"))
     data1.+=((1, 2L, "Hi2"))
@@ -200,7 +209,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     data1.+=((1, 8L, "Hi8"))
     data1.+=((3, 8L, "Hi9"))
 
-    val data2 = new mutable.MutableList[(Int, Long, String)]
+    val data2 = new mutable.ListBuffer[(Int, Long, String)]
     data2.+=((1, 1L, "HiHi"))
     data2.+=((2, 2L, "HeHe"))
     data2.+=((3, 2L, "HeHe"))
@@ -227,7 +236,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     tEnv.sqlQuery(sqlQuery).toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "1,HiHi,Hi2",
       "1,HiHi,Hi2",
       "1,HiHi,Hi3",
@@ -240,7 +249,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
 
   @TestTemplate
   def testIsNullInnerJoinWithNullCond(): Unit = {
-    val data1 = new mutable.MutableList[(Int, Long, String)]
+    val data1 = new mutable.ListBuffer[(Int, Long, String)]
     data1.+=((1, 1L, "Hi1"))
     data1.+=((1, 2L, "Hi2"))
     data1.+=((1, 2L, "Hi2"))
@@ -250,7 +259,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     data1.+=((1, 8L, "Hi8"))
     data1.+=((3, 8L, "Hi9"))
 
-    val data2 = new mutable.MutableList[(Int, Long, String)]
+    val data2 = new mutable.ListBuffer[(Int, Long, String)]
     data2.+=((1, 1L, "HiHi"))
     data2.+=((2, 2L, "HeHe"))
     data2.+=((3, 2L, "HeHe"))
@@ -280,7 +289,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     tEnv.sqlQuery(sqlQuery).toDataStream.addSink(sink)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "1,HiHi,Hi2",
       "1,HiHi,Hi2",
       "1,HiHi,Hi3",
@@ -358,7 +367,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
 
   @TestTemplate
   def testInnerJoinWithBooleanFilterCondition(): Unit = {
-    val data1 = new mutable.MutableList[(Int, Long, String, Boolean)]
+    val data1 = new mutable.ListBuffer[(Int, Long, String, Boolean)]
     data1.+=((1, 1L, "Hi", true))
     data1.+=((2, 2L, "Hello", false))
     data1.+=((3, 2L, "Hello world", true))
@@ -624,6 +633,71 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
   }
 
   @TestTemplate
+  def testInnerMultiJoinWithEqualPk(): Unit = {
+    tEnv.getConfig.getConfiguration
+      .setString(OptimizerConfigOptions.TABLE_OPTIMIZER_MULTI_JOIN_ENABLED.key(), "true")
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A group by a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B group by b1"
+    val query = s"SELECT a1, b1 FROM ($query1) JOIN ($query2) ON a1 = b1"
+
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery(query).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expected = Seq("1,1", "2,2", "3,3")
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
+  def testThreeWayMultiJoinWithoutPk(): Unit = {
+    env.setParallelism(1)
+    val data1 = new mutable.ListBuffer[(Int, Long)]
+    data1.+=((1, 1L))
+    data1.+=((1, 2L))
+    data1.+=((1, 2L))
+    data1.+=((1, 5L))
+    data1.+=((2, 7L))
+    data1.+=((1, 9L))
+    data1.+=((1, 8L))
+    data1.+=((3, 8L))
+
+    val data2 = new mutable.ListBuffer[(Int, Long)]
+    data2.+=((1, 1L))
+    data2.+=((2, 2L))
+    data2.+=((3, 2L))
+    data2.+=((1, 4L))
+
+    val data3 = new mutable.ListBuffer[(Int, Long)]
+    data3.+=((1, 1L))
+    data3.+=((2, 2L))
+    data3.+=((3, 2L))
+    data3.+=((2, 1L))
+
+    val a = failingDataSource(data1).toTable(tEnv, 'a1, 'a2)
+    val b = failingDataSource(data2).toTable(tEnv, 'b1, 'b2)
+    val c = failingDataSource(data3).toTable(tEnv, 'c1, 'c2)
+
+    tEnv.createTemporaryView("Atable", a)
+    tEnv.createTemporaryView("Btable", b)
+    tEnv.createTemporaryView("Ctable", c)
+
+    tEnv.getConfig.getConfiguration
+      .setString(OptimizerConfigOptions.TABLE_OPTIMIZER_MULTI_JOIN_ENABLED.key(), "true")
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM Atable group by a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM Btable group by b1"
+    val query3 = "SELECT SUM(c2) AS c2, c1 FROM Ctable group by c1"
+    val query =
+      s"SELECT a1, b1, c1 FROM ($query1) JOIN ($query2) ON a1 = b1 JOIN ($query3) ON c2 = b2"
+
+    val sink = new TestingRetractSink
+    tEnv.sqlQuery(query).toRetractStream[Row].addSink(sink).setParallelism(1)
+    env.execute()
+
+    val expected = Seq("2,2,3", "3,3,3")
+    assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  @TestTemplate
   def testInnerJoinWithPk(): Unit = {
     val query1 = "SELECT SUM(a2) AS a2, a1 FROM A group by a1"
     val query2 = "SELECT SUM(b2) AS b2, b1 FROM B group by b1"
@@ -741,6 +815,124 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
 
     val expected = Seq("1,1,1,1", "3,2,null,null", "2,2,null,null")
     assertThat(sink.getRetractResults.sorted).isEqualTo(expected.sorted)
+  }
+
+  /** Only a line with a new unique key adds a match for the order, an updated line does not. */
+  @TestTemplate
+  def testLeftJoinOnRowKey(): Unit = {
+    // mini-batch folds the +U/-D pair within a bundle and async state is not fixed yet
+    assumeThat(miniBatch == MiniBatchOff).isTrue
+    assumeThat(enableAsyncState).isFalse
+
+    val lines = Seq(
+      changelogRow("+I", order, "l1", "new"),
+      changelogRow("+I", order, "l2", "new"),
+      changelogRow("+U", order, "l1", "paid"),
+      changelogRow("-D", order, "l1", "paid"),
+      changelogRow("-D", order, "l2", "new")
+    )
+
+    val expected = List(
+      "+I[+I[1, EU], null, null, null]",
+      "-D[+I[1, EU], null, null, null]",
+      "+I[+I[1, EU], +I[1, EU], l1, new]",
+      "+I[+I[1, EU], +I[1, EU], l2, new]",
+      "+I[+I[1, EU], +I[1, EU], l1, paid]",
+      "-D[+I[1, EU], +I[1, EU], l1, paid]",
+      "-D[+I[1, EU], +I[1, EU], l2, new]",
+      "+I[+I[1, EU], null, null, null]"
+    )
+    val results = getRawResultsOfLeftJoinOnRowKey("o.order_key = l.order_key", lines)
+    assertThat(results).isEqualTo(expected)
+  }
+
+  /** An updated line that no longer satisfies the non-equi condition retracts its match. */
+  @TestTemplate
+  def testLeftJoinOnRowKeyWithNonEquiCondition(): Unit = {
+    // mini-batch folds the +U/+U pair within a bundle and async state is not fixed yet
+    assumeThat(miniBatch == MiniBatchOff).isTrue
+    assumeThat(enableAsyncState).isFalse
+
+    val lines = Seq(
+      changelogRow("+I", order, "l1", "new"),
+      changelogRow("+U", order, "l1", "cancelled"),
+      changelogRow("+U", order, "l1", "paid")
+    )
+
+    val expected = List(
+      "+I[+I[1, EU], null, null, null]",
+      "-D[+I[1, EU], null, null, null]",
+      "+I[+I[1, EU], +I[1, EU], l1, new]",
+      "-D[+I[1, EU], +I[1, EU], l1, new]",
+      "+I[+I[1, EU], null, null, null]",
+      "-D[+I[1, EU], null, null, null]",
+      "+I[+I[1, EU], +I[1, EU], l1, paid]"
+    )
+    val results = getRawResultsOfLeftJoinOnRowKey(
+      "o.order_key = l.order_key AND l.status <> o.excluded_status",
+      lines)
+    assertThat(results).isEqualTo(expected)
+  }
+
+  private val order = row(1, "EU")
+
+  /**
+   * Left joins an upsert table of orders with the given upsert changes of their lines, which are
+   * emitted once the sink received the first row, and returns the raw results of the sink.
+   */
+  private def getRawResultsOfLeftJoinOnRowKey(
+      joinCondition: String,
+      lines: Seq[Row]): List[String] = {
+    env.setParallelism(1)
+    val sink = s"sink_${UUID.randomUUID().toString.replace('-', '_')}"
+
+    val ordersId = TestValuesTableFactory.registerData(Seq(row(order, "cancelled")))
+    tEnv.executeSql(s"""
+                       |CREATE TABLE orders (
+                       |  order_key ROW<id INT, region STRING> PRIMARY KEY NOT ENFORCED,
+                       |  excluded_status STRING
+                       |) WITH (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$ordersId',
+                       |  'changelog-mode' = 'I,UA,D'
+                       |)
+                       |""".stripMargin)
+
+    val lineType = Types.ROW_NAMED(
+      Array("order_key", "line_id", "status"),
+      Types.ROW_NAMED(Array("id", "region"), Types.INT, Types.STRING),
+      Types.STRING,
+      Types.STRING)
+    val lineSource =
+      new DataGeneratorSource(new WaitForSinkThenEmit(sink, lines), lines.size, lineType)
+    tEnv.createTemporaryView(
+      "lines",
+      tEnv.fromChangelogStream(
+        env.fromSource(lineSource, WatermarkStrategy.noWatermarks[Row](), "lines"),
+        Schema.newBuilder().primaryKey("order_key", "line_id").build(),
+        ChangelogMode.upsert(false)
+      )
+    )
+
+    tEnv.executeSql(s"""
+                       |CREATE TABLE $sink (
+                       |  order_key ROW<id INT, region STRING>,
+                       |  line_order_key ROW<id INT, region STRING>,
+                       |  line_id STRING,
+                       |  status STRING
+                       |) WITH (
+                       |  'connector' = 'values',
+                       |  'sink-insert-only' = 'false',
+                       |  'sink-changelog-mode-enforced' = 'I,UA,D'
+                       |)
+                       |""".stripMargin)
+
+    val insert =
+      s"INSERT INTO $sink SELECT o.order_key, l.* FROM orders o LEFT JOIN lines l ON $joinCondition"
+    assertThat(tEnv.explainSql(insert, ExplainDetail.CHANGELOG_MODE))
+      .contains("rightInputSpec=[HasUniqueKey], changelogMode=[I,UA,D]")
+    tEnv.executeSql(insert).await()
+    TestValuesTableFactory.getRawResultsAsStrings(sink).toList
   }
 
   @TestTemplate
@@ -1116,12 +1308,12 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
 
   @TestTemplate
   def testNullLeftOuterJoin(): Unit = {
-    val data1 = new mutable.MutableList[(Int, Long)]
+    val data1 = new mutable.ListBuffer[(Int, Long)]
     data1.+=((1, 1L))
     data1.+=((3, 8L))
     data1.+=((4, 2L))
 
-    val data2 = new mutable.MutableList[(Int, Long)]
+    val data2 = new mutable.ListBuffer[(Int, Long)]
     data2.+=((1, 1L))
     data2.+=((2, 2L))
     data2.+=((3, 2L))
@@ -1148,7 +1340,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "1,1,1,1",
       "4,2,null,null",
       "null,8,null,null"
@@ -1159,12 +1351,12 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
 
   @TestTemplate
   def testNullLeftOuterJoinWithNullCond(): Unit = {
-    val data1 = new mutable.MutableList[(Int, Long)]
+    val data1 = new mutable.ListBuffer[(Int, Long)]
     data1.+=((1, 1L))
     data1.+=((3, 8L))
     data1.+=((4, 2L))
 
-    val data2 = new mutable.MutableList[(Int, Long)]
+    val data2 = new mutable.ListBuffer[(Int, Long)]
     data2.+=((1, 1L))
     data2.+=((2, 2L))
     data2.+=((3, 2L))
@@ -1191,7 +1383,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "1,1,1,1",
       "4,2,null,null",
       "null,8,null,2"
@@ -1202,12 +1394,12 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
 
   @TestTemplate
   def testNullRightOuterJoin(): Unit = {
-    val data1 = new mutable.MutableList[(Int, Long)]
+    val data1 = new mutable.ListBuffer[(Int, Long)]
     data1.+=((1, 1L))
     data1.+=((3, 8L))
     data1.+=((4, 2L))
 
-    val data2 = new mutable.MutableList[(Int, Long)]
+    val data2 = new mutable.ListBuffer[(Int, Long)]
     data2.+=((1, 1L))
     data2.+=((2, 2L))
     data2.+=((3, 2L))
@@ -1233,7 +1425,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "1,1,1,1",
       "null,null,2,2",
       "null,null,null,2"
@@ -1244,12 +1436,12 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
 
   @TestTemplate
   def testNullRightOuterJoinWithNullCond(): Unit = {
-    val data1 = new mutable.MutableList[(Int, Long)]
+    val data1 = new mutable.ListBuffer[(Int, Long)]
     data1.+=((1, 1L))
     data1.+=((3, 8L))
     data1.+=((4, 2L))
 
-    val data2 = new mutable.MutableList[(Int, Long)]
+    val data2 = new mutable.ListBuffer[(Int, Long)]
     data2.+=((1, 1L))
     data2.+=((2, 2L))
     data2.+=((3, 2L))
@@ -1276,7 +1468,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "1,1,1,1",
       "null,null,2,2",
       "null,8,null,2"
@@ -1287,12 +1479,12 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
 
   @TestTemplate
   def testNullFullOuterJoin(): Unit = {
-    val data1 = new mutable.MutableList[(Int, Long)]
+    val data1 = new mutable.ListBuffer[(Int, Long)]
     data1.+=((1, 1L))
     data1.+=((3, 8L))
     data1.+=((4, 2L))
 
-    val data2 = new mutable.MutableList[(Int, Long)]
+    val data2 = new mutable.ListBuffer[(Int, Long)]
     data2.+=((1, 1L))
     data2.+=((2, 2L))
     data2.+=((3, 2L))
@@ -1319,7 +1511,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "1,1,1,1",
       "null,null,2,2",
       "4,2,null,null",
@@ -1332,12 +1524,12 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
 
   @TestTemplate
   def testNullFullOuterJoinWithNullCond(): Unit = {
-    val data1 = new mutable.MutableList[(Int, Long)]
+    val data1 = new mutable.ListBuffer[(Int, Long)]
     data1.+=((1, 1L))
     data1.+=((3, 8L))
     data1.+=((4, 2L))
 
-    val data2 = new mutable.MutableList[(Int, Long)]
+    val data2 = new mutable.ListBuffer[(Int, Long)]
     data2.+=((1, 1L))
     data2.+=((2, 2L))
     data2.+=((3, 2L))
@@ -1365,7 +1557,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
     tEnv.sqlQuery(sqlQuery).toRetractStream[Row].addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = mutable.MutableList(
+    val expected = mutable.ListBuffer(
       "1,1,1,1",
       "null,null,2,2",
       "4,2,null,null",
@@ -1377,11 +1569,11 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
 
   @TestTemplate
   def testJoinWithoutWatermark(): Unit = {
-    val data1 = new mutable.MutableList[(Int, Long)]
+    val data1 = new mutable.ListBuffer[(Int, Long)]
     data1.+=((1, 1L))
     data1.+=((2, 2L))
     data1.+=((3, 3L))
-    val data2 = new mutable.MutableList[(Int, Long)]
+    val data2 = new mutable.ListBuffer[(Int, Long)]
     data2.+=((1, -1L))
     data2.+=((2, -2L))
     data2.+=((3, -3L))
@@ -1403,7 +1595,7 @@ class JoinITCase(miniBatch: MiniBatchMode, state: StateBackendMode, enableAsyncS
   def testBigDataOfJoin(): Unit = {
     env.setParallelism(1)
 
-    val data = new mutable.MutableList[(Int, Long, String)]
+    val data = new mutable.ListBuffer[(Int, Long, String)]
     for (i <- 0 until 500) {
       data.+=((i % 10, i, i.toString))
     }
@@ -1680,5 +1872,18 @@ object JoinITCase {
       Array(MiniBatchOn, ROCKSDB_BACKEND, Boolean.box(false)),
       Array(MiniBatchOff, HEAP_BACKEND, Boolean.box(true))
     )
+  }
+
+  /**
+   * Emits the given rows once the sink received its first row, so that the other input goes first.
+   */
+  class WaitForSinkThenEmit(sink: String, rows: Seq[Row])
+    extends GeneratorFunction[java.lang.Long, Row] {
+    override def map(index: java.lang.Long): Row = {
+      while (TestValuesTableFactory.getRawResultsAsStrings(sink).isEmpty) {
+        Thread.sleep(10)
+      }
+      rows(index.toInt)
+    }
   }
 }

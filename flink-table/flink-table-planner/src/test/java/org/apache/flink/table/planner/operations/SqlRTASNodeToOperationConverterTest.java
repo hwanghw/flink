@@ -25,6 +25,7 @@ import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.TableDistribution;
+import org.apache.flink.table.operations.ExplainOperation;
 import org.apache.flink.table.operations.Operation;
 import org.apache.flink.table.operations.ReplaceTableAsOperation;
 import org.apache.flink.table.operations.ddl.CreateTableOperation;
@@ -215,7 +216,7 @@ class SqlRTASNodeToOperationConverterTest extends SqlNodeToOperationConversionTe
         assertThatThrownBy(() -> parseAndConvert(sql))
                 .isInstanceOf(ValidationException.class)
                 .hasMessageContaining(
-                        "Incompatible types for sink column 'a' at position 0. "
+                        "Incompatible types for sink column 'a' at position 1. "
                                 + "The source column has type 'BIGINT NOT NULL', while the target "
                                 + "column has type 'BOOLEAN'.");
     }
@@ -278,6 +279,15 @@ class SqlRTASNodeToOperationConverterTest extends SqlNodeToOperationConversionTe
                         .build();
 
         testCommonReplaceTableAs(sql, tableName, null, tableSchema, null, Collections.emptyList());
+    }
+
+    @Test
+    void testExplainReplaceTableAs() {
+        final Operation operation = parse("EXPLAIN REPLACE TABLE myTable123 AS SELECT 123");
+
+        assertThat(operation).isInstanceOf(ExplainOperation.class);
+        assertThat(((ExplainOperation) operation).getChild())
+                .isInstanceOf(ReplaceTableAsOperation.class);
     }
 
     private void testCommonReplaceTableAs(

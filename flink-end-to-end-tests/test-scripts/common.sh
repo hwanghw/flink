@@ -480,7 +480,8 @@ function internal_check_logs_for_exceptions {
   "WARN  org.apache.pekko.remote.ReliableDeliverySupervisor" \
   "RecipientUnreachableException" \
   "completeExceptionally" \
-  "SerializedCheckpointException.unwrap")
+  "SerializedCheckpointException.unwrap" \
+  "wrapInExecutionException")
 
   local all_allowed_exceptions=("${default_allowed_exceptions[@]}" "${additional_allowed_exceptions[@]}")
 
@@ -519,7 +520,14 @@ function check_logs_for_non_empty_out_files {
     -e "WARNING: Please consider reporting"\
     -e "WARNING: Use --illegal-access"\
     -e "WARNING: All illegal access"\
+    -e "WARNING: A terminally deprecated method"\
+    -e "WARNING: sun.misc.Unsafe::"\
+    -e "WARNING: A restricted method"\
+    -e "WARNING: java.lang.System::"\
+    -e "WARNING: Restricted methods will be blocked"\
+    -e "WARNING: Use --enable-native-access"\
     -e "Picked up JAVA_TOOL_OPTIONS"\
+    -e "^$"\
     $FLINK_LOG_DIR/*.out\
    | grep "." \
    > /dev/null; then
@@ -981,7 +989,11 @@ internal_run_with_timeout() {
 
   (
       command_pid=$BASHPID
-      (sleep "${timeout_in_seconds}" # set a timeout for this command
+      (
+      # Kill the sleep on teardown so it doesn't keep the CI stdout pipe open until timeout.
+      trap 'kill $sleep_pid 2>/dev/null; exit 0' TERM
+      sleep "${timeout_in_seconds}" & sleep_pid=$! # set a timeout for this command
+      wait $sleep_pid
       echo "${command_label:-"The command '${command}'"} (pid: $command_pid) did not finish after $timeout_in_seconds seconds."
       eval "${on_failure}"
       kill "$command_pid") & watchdog_pid=$!

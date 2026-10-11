@@ -85,6 +85,18 @@ class BaseOperation(Operation):
             self.base_metric_group = None
         self.func, self.user_defined_funcs = self.generate_func(serialized_fn)
         self.job_parameters = {p.key: p.value for p in serialized_fn.job_parameters}
+        if serialized_fn.HasField('runtime_context'):
+            rc = serialized_fn.runtime_context
+            self.runtime_context = {
+                'task_name': rc.task_name,
+                'task_name_with_subtasks': rc.task_name_with_subtasks,
+                'number_of_parallel_subtasks': rc.number_of_parallel_subtasks,
+                'max_number_of_parallel_subtasks': rc.max_number_of_parallel_subtasks,
+                'index_of_this_subtask': rc.index_of_this_subtask,
+                'attempt_number': rc.attempt_number,
+            }
+        else:
+            self.runtime_context = {}
 
     def finish(self):
         self._update_gauge(self.base_metric_group)
@@ -104,7 +116,9 @@ class BaseOperation(Operation):
     def open(self):
         for user_defined_func in self.user_defined_funcs:
             if hasattr(user_defined_func, 'open'):
-                user_defined_func.open(FunctionContext(self.base_metric_group, self.job_parameters))
+                user_defined_func.open(FunctionContext(
+                    self.base_metric_group, self.job_parameters,
+                    **self.runtime_context))
 
     def close(self):
         for user_defined_func in self.user_defined_funcs:
@@ -124,24 +138,75 @@ class ScalarFunctionOperation(BaseOperation):
 
     def generate_func(self, serialized_fn):
         """
-        Generates a lambda function based on udfs.
-        :param serialized_fn: serialized function which contains a list of the proto
-                              representation of the Python :class:`ScalarFunction`
-        :return: the generated lambda function
+        Generates a UDF execution function. Uses sequential execution with result references
+        when refIndex is present (CSE mode), otherwise uses lambda-based approach.
         """
-        scalar_functions, variable_dict, user_defined_funcs = reduce(
-            lambda x, y: (
-                ','.join([x[0], y[0]]),
-                dict(chain(x[1].items(), y[1].items())),
-                x[2] + y[2]),
-            [operation_utils.extract_user_defined_function(
-                udf, one_arg_optimization=self._one_arg_optimization)
-                for udf in serialized_fn.udfs])
-        if self._one_result_optimization:
-            func_str = 'lambda value: %s' % scalar_functions
+        is_arrow = all(udf.is_arrow_udf for udf in serialized_fn.udfs)
+        one_arg_optimization = self._one_arg_optimization and not is_arrow
+        udf_infos = [
+            operation_utils.extract_user_defined_function(
+                udf, one_arg_optimization=one_arg_optimization)
+            for udf in serialized_fn.udfs]
+
+        variable_dict = {}
+        user_defined_funcs = []
+        func_strs = []
+        for func_str, var_dict, funcs in udf_infos:
+            variable_dict.update(var_dict)
+            user_defined_funcs.extend(funcs)
+            func_strs.append(func_str)
+
+        if is_arrow:
+            variable_dict['create_record_batch'] = operation_utils.create_record_batch
+
+        output_indices = list(serialized_fn.output_indices)
+        # Result references require sequential evaluation. A non-empty output_indices does too:
+        # it may repeat or reorder results even when none of the UDFs references another result.
+        requires_sequential_execution = (
+            bool(output_indices) or any('results[' in fs for fs in func_strs))
+
+        if not requires_sequential_execution:
+            # Keep original lambda-based approach for backward compatibility
+            scalar_functions = ','.join(func_strs)
+            if is_arrow:
+                func_str = (f'lambda value: create_record_batch('
+                            f'[{scalar_functions}], value.num_rows)')
+            elif self._one_result_optimization:
+                func_str = 'lambda value: %s' % scalar_functions
+            else:
+                func_str = 'lambda value: [%s]' % scalar_functions
+            generate_func = eval(func_str, variable_dict)
+            self._generated_code = func_str
+            return generate_func, user_defined_funcs
+
+        # Sequential execution: each UDF stores its result in results[N] so that
+        # later UDFs can reference it via results[N]. This enables full-tree CSE.
+        #
+        # exec() is required because multi-statement logic cannot be expressed as a
+        # lambda. The generated code is deterministic and built from trusted internal
+        # UDF descriptors only.
+        #
+        # Flattening appends intermediate sub-expressions to the UDF list, and post-order
+        # means a top-level result is not necessarily last, so only the positions listed
+        # in output_indices belong to the operator output.
+        output_indices = output_indices or list(range(len(func_strs)))
+        code_lines = ['def _sequential_execute(value):']
+        code_lines.append('    results = [None] * %d' % len(func_strs))
+        for i, fn in enumerate(func_strs):
+            code_lines.append('    results[%d] = %s' % (i, fn))
+        if is_arrow:
+            outputs = ','.join('results[%d]' % i for i in output_indices)
+            code_lines.append(f'    return create_record_batch([{outputs}], value.num_rows)')
+        elif self._one_result_optimization:
+            code_lines.append('    return results[%d]' % output_indices[0])
         else:
-            func_str = 'lambda value: [%s]' % scalar_functions
-        generate_func = eval(func_str, variable_dict)
+            code_lines.append(
+                '    return [%s]' % ','.join('results[%d]' % i for i in output_indices))
+        code = '\n'.join(code_lines)
+
+        exec(code, variable_dict)
+        generate_func = variable_dict['_sequential_execute']
+        self._generated_code = code
         return generate_func, user_defined_funcs
 
 
@@ -326,11 +391,25 @@ class AbstractStreamGroupAggregateOperation(BaseStatefulOperation):
         self.state_cleaning_enabled = serialized_fn.state_cleaning_enabled
         self.data_view_specs = extract_data_view_specs(serialized_fn.udfs)
         self.job_parameters = {p.key: p.value for p in serialized_fn.job_parameters}
+        if serialized_fn.HasField('runtime_context'):
+            rc = serialized_fn.runtime_context
+            self.runtime_context = {
+                'task_name': rc.task_name,
+                'task_name_with_subtasks': rc.task_name_with_subtasks,
+                'number_of_parallel_subtasks': rc.number_of_parallel_subtasks,
+                'max_number_of_parallel_subtasks': rc.max_number_of_parallel_subtasks,
+                'index_of_this_subtask': rc.index_of_this_subtask,
+                'attempt_number': rc.attempt_number,
+            }
+        else:
+            self.runtime_context = {}
         super(AbstractStreamGroupAggregateOperation, self).__init__(
             serialized_fn, keyed_state_backend)
 
     def open(self):
-        self.group_agg_function.open(FunctionContext(self.base_metric_group, self.job_parameters))
+        self.group_agg_function.open(FunctionContext(
+            self.base_metric_group, self.job_parameters,
+            **self.runtime_context))
 
     def close(self):
         self.group_agg_function.close()

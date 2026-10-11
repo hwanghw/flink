@@ -21,6 +21,7 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.operators.MailboxExecutor;
 import org.apache.flink.api.common.operators.ProcessingTimeService.ProcessingTimeCallback;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.NettyShuffleEnvironmentOptions;
@@ -42,7 +43,10 @@ import org.apache.flink.runtime.checkpoint.SavepointType;
 import org.apache.flink.runtime.checkpoint.SnapshotType;
 import org.apache.flink.runtime.checkpoint.SubTaskInitializationMetricsBuilder;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
+import org.apache.flink.runtime.checkpoint.channel.FetchedChannelState;
+import org.apache.flink.runtime.checkpoint.channel.FetchedChannelStateDrainer;
 import org.apache.flink.runtime.checkpoint.channel.InputChannelInfo;
+import org.apache.flink.runtime.checkpoint.channel.RecoveryCheckpointTrigger;
 import org.apache.flink.runtime.checkpoint.channel.SequentialChannelStateReader;
 import org.apache.flink.runtime.checkpoint.filemerging.FileMergingSnapshotManager;
 import org.apache.flink.runtime.execution.CancelTaskException;
@@ -61,7 +65,9 @@ import org.apache.flink.runtime.io.network.api.writer.SingleRecordWriter;
 import org.apache.flink.runtime.io.network.partition.ChannelStateHolder;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.io.network.partition.consumer.IndexedInputGate;
+import org.apache.flink.runtime.io.network.partition.consumer.InputChannel;
 import org.apache.flink.runtime.io.network.partition.consumer.InputGate;
+import org.apache.flink.runtime.io.network.partition.consumer.RecoverableInputChannel;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.CheckpointableTask;
 import org.apache.flink.runtime.jobgraph.tasks.CoordinatedTask;
@@ -84,6 +90,7 @@ import org.apache.flink.runtime.taskmanager.Task;
 import org.apache.flink.runtime.util.ConfigurationParserUtils;
 import org.apache.flink.streaming.api.graph.NonChainedOutput;
 import org.apache.flink.streaming.api.graph.StreamConfig;
+import org.apache.flink.streaming.api.graph.StreamEdge;
 import org.apache.flink.streaming.api.operators.InternalTimeServiceManager;
 import org.apache.flink.streaming.api.operators.InternalTimeServiceManagerImpl;
 import org.apache.flink.streaming.api.operators.StreamOperator;
@@ -94,6 +101,7 @@ import org.apache.flink.streaming.runtime.io.RecordWriterOutput;
 import org.apache.flink.streaming.runtime.io.StreamInputProcessor;
 import org.apache.flink.streaming.runtime.io.checkpointing.BarrierAlignmentUtil;
 import org.apache.flink.streaming.runtime.io.checkpointing.CheckpointBarrierHandler;
+import org.apache.flink.streaming.runtime.io.recovery.RecordFilterContext;
 import org.apache.flink.streaming.runtime.partitioner.ConfigurableStreamPartitioner;
 import org.apache.flink.streaming.runtime.partitioner.ForwardPartitioner;
 import org.apache.flink.streaming.runtime.partitioner.RebalancePartitioner;
@@ -138,6 +146,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -146,6 +155,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static org.apache.flink.configuration.TaskManagerOptions.BUFFER_DEBLOAT_PERIOD;
 import static org.apache.flink.runtime.metrics.MetricNames.GATE_RESTORE_DURATION;
@@ -156,6 +166,7 @@ import static org.apache.flink.streaming.runtime.tasks.SubtaskCheckpointCoordina
 import static org.apache.flink.util.ExceptionUtils.firstOrSuppressed;
 import static org.apache.flink.util.Preconditions.checkState;
 import static org.apache.flink.util.concurrent.FutureUtils.assertNoException;
+import static org.apache.flink.util.concurrent.FutureUtils.completeAll;
 
 /**
  * Base class for all streaming tasks. A task is the unit of local processing that is deployed and
@@ -301,6 +312,19 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
     /** TODO it might be replaced by the global IO executor on TaskManager level future. */
     private final ExecutorService channelIOExecutor;
 
+    private RecoveryCheckpointTrigger recoveryCheckpointTrigger =
+            RecoveryCheckpointTrigger.NOT_READY;
+
+    /**
+     * Completes when the restore phase may end; set by {@link #restoreStateAndGates}. With
+     * checkpointing during recovery this is the point where the recovery checkpoint trigger is
+     * installed, while draining and consuming the fetched state continue in the background. Used to
+     * defer the lifecycle finish of a task that reaches {@code END_OF_INPUT} during recovery (e.g.
+     * a bounded operator whose input is already fully available) so that it does not suspend the
+     * restore mailbox loop before recovery completes. Accessed only on the mailbox/task thread.
+     */
+    @Nullable private CompletableFuture<Void> recoveryCompletionFuture;
+
     // ========================================================
     //  Final  checkpoint / savepoint
     // ========================================================
@@ -324,6 +348,8 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
     private boolean shouldInterruptOnCancel = true;
 
     @Nullable private final AvailabilityProvider changelogWriterAvailabilityProvider;
+
+    @Nullable private AvailabilityProvider chainAvailabilityProvider = null;
 
     private long initializeStateEndTs;
 
@@ -421,11 +447,13 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
             // Should be closed last.
             resourceCloser.registerCloseable(mailboxProcessor);
 
+            String unspillingThreadName =
+                    String.format("channel-state-unspilling-%s", getTaskNameWithSubtaskAndId());
             this.channelIOExecutor =
                     MdcUtils.scopeToJob(
                             environment.getJobID(),
                             Executors.newSingleThreadExecutor(
-                                    new ExecutorThreadFactory("channel-state-unspilling")));
+                                    new ExecutorThreadFactory(unspillingThreadName)));
             resourceCloser.registerCloseable(channelIOExecutor::shutdown);
 
             this.recordWriter = createRecordWriterDelegate(configuration, environment);
@@ -667,6 +695,24 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
                 notifyEndOfData();
                 return;
             case END_OF_INPUT:
+                if (recoveryCompletionFuture != null && !recoveryCompletionFuture.isDone()) {
+                    // The task consumed all of its input during recovery (e.g. a bounded operator
+                    // whose input is already fully available, as with a blocking batch exchange).
+                    // Do NOT suspend the mailbox processor yet: recovery is still in progress and
+                    // relies on this restore loop to run its remaining mails. Suspending here would
+                    // end the restore loop early and trip "Mailbox loop interrupted before recovery
+                    // was finished" in restoreInternal. Instead suspend only the default action (to
+                    // avoid busy-spinning on repeated END_OF_INPUT) and resume it once recovery
+                    // completes; processInput then re-fires END_OF_INPUT from the main mailbox loop
+                    // and finishes through the normal path below.
+                    MailboxDefaultAction.Suspension suspension = controller.suspendDefaultAction();
+                    recoveryCompletionFuture.whenComplete(
+                            (ign, t) ->
+                                    mainMailboxExecutor.execute(
+                                            suspension::resume,
+                                            "resume default action after recovery"));
+                    return;
+                }
                 // Suspend the mailbox processor, it would be resumed in afterInvoke and finished
                 // after all records processed by the downstream tasks. We also suspend the default
                 // actions to avoid repeat executing the empty default operation (namely process
@@ -677,11 +723,21 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
         }
 
         TaskIOMetricGroup ioMetrics = getEnvironment().getMetricGroup().getIOMetricGroup();
-        PeriodTimer timer;
+        PeriodTimer timer = null;
         CompletableFuture<?> resumeFuture;
-        if (!recordWriter.isAvailable()) {
+        if (chainAvailabilityProvider == null && !recordWriter.isAvailable()) {
+            // No chain-availability operator; downstream is the direct backpressure source.
             timer = new GaugePeriodTimer(ioMetrics.getSoftBackPressuredTimePerSecond());
             resumeFuture = recordWriter.getAvailableFuture();
+        } else if (chainAvailabilityProvider != null && !chainAvailabilityProvider.isAvailable()) {
+            if (!recordWriter.isAvailable()) {
+                // Queue full AND downstream unavailable → backpressure (root cause: downstream).
+                timer = new GaugePeriodTimer(ioMetrics.getSoftBackPressuredTimePerSecond());
+                resumeFuture = recordWriter.getAvailableFuture();
+            } else {
+                // Queue full but downstream available → internal processing; fall back to busy.
+                resumeFuture = chainAvailabilityProvider.getAvailableFuture();
+            }
         } else if (!inputProcessor.isAvailable()) {
             timer = new GaugePeriodTimer(ioMetrics.getIdleTimeMsPerSecond());
             resumeFuture = inputProcessor.getAvailableFuture();
@@ -803,6 +859,7 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
                             ? new FinishedOperatorChain<>(this, recordWriter)
                             : new RegularOperatorChain<>(this, recordWriter);
             mainOperator = operatorChain.getMainOperator();
+            chainAvailabilityProvider = operatorChain.getChainAvailabilityProvider();
 
             getEnvironment()
                     .getTaskStateManager()
@@ -836,6 +893,12 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
             checkState(
                     allGatesRecoveredFuture.isDone(),
                     "Mailbox loop interrupted before recovery was finished.");
+
+            try {
+                allGatesRecoveredFuture.get();
+            } catch (ExecutionException e) {
+                ExceptionUtils.rethrowException(e.getCause());
+            }
 
             // we recovered all the gates, we can close the channel IO executor as it is no longer
             // needed
@@ -876,34 +939,225 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
                 INITIALIZE_STATE_DURATION, initializeStateEndTs - readOutputDataTs);
         IndexedInputGate[] inputGates = getEnvironment().getAllInputGates();
 
-        channelIOExecutor.execute(
+        recoveryCompletionFuture =
+                CheckpointingOptions.isCheckpointingDuringRecoveryEnabled(getJobConfiguration())
+                        ? recoverChannelsWithCheckpointing(reader, inputGates)
+                        : recoverChannelsWithoutCheckpointing(reader, inputGates);
+
+        recoveryCompletionFuture.whenComplete((ign, throwable) -> mailboxProcessor.suspend());
+        return recoveryCompletionFuture;
+    }
+
+    private CompletableFuture<Void> recoverChannelsWithCheckpointing(
+            SequentialChannelStateReader reader, IndexedInputGate[] inputGates) {
+        LOG.info(
+                "Checkpointing during recovery is enabled, recovering the channel state of {} input gate(s).",
+                inputGates.length);
+        if (inputGates.length == 0) {
+            recoveryCheckpointTrigger = RecoveryCheckpointTrigger.NO_OP;
+            return FutureUtils.completedVoidFuture();
+        }
+        return setRecoveryCheckpointTrigger(RecoveryCheckpointTrigger.NOT_READY)
+                .thenApplyAsync(ign -> fetchChannelState(reader, inputGates), channelIOExecutor)
+                .thenCompose(
+                        state ->
+                                requestPartitions(inputGates, state.isPresent())
+                                        .thenApply(channels -> buildDrainer(state, channels)))
+                .thenCompose(
+                        drainerOpt -> {
+                            if (drainerOpt.isEmpty()) {
+                                LOG.info("Channel state recovery finished, nothing to drain.");
+                                return setRecoveryCheckpointTrigger(
+                                        RecoveryCheckpointTrigger.NO_OP);
+                            }
+                            FetchedChannelStateDrainer drainer = drainerOpt.get();
+                            // From here on a checkpoint triggered during recovery is served by the
+                            // drainer instead of being declined as TASK_NOT_READY.
+                            LOG.debug("Installing the drainer as the recovery checkpoint trigger.");
+                            CompletableFuture<Void> triggerInstalled =
+                                    setRecoveryCheckpointTrigger(drainer);
+                            triggerInstalled
+                                    .thenRunAsync(() -> drain(drainer), channelIOExecutor)
+                                    .thenCompose(
+                                            ign ->
+                                                    completeAll(
+                                                            Arrays.stream(inputGates)
+                                                                    .map(
+                                                                            InputGate
+                                                                                    ::getStateConsumedFuture)
+                                                                    .collect(Collectors.toList())))
+                                    .thenCompose(
+                                            ign -> {
+                                                LOG.info(
+                                                        "Channel state recovery finished, all recovered data has been consumed.");
+                                                return setRecoveryCheckpointTrigger(
+                                                        RecoveryCheckpointTrigger.NO_OP);
+                                            })
+                                    .exceptionally(
+                                            t -> {
+                                                asyncExceptionHandler.handleAsyncException(
+                                                        "Unable to finalize recovered channel state consumption",
+                                                        t);
+                                                return null;
+                                            });
+                            return triggerInstalled;
+                        });
+    }
+
+    @SuppressWarnings("OptionalUsedAsFieldOrParameterType") // intentional: simplify call-site
+    private Optional<FetchedChannelStateDrainer> buildDrainer(
+            Optional<FetchedChannelState> state, List<RecoverableInputChannel> channels) {
+        return state.map(s -> new FetchedChannelStateDrainer(s, channels));
+    }
+
+    private CompletableFuture<Void> setRecoveryCheckpointTrigger(
+            RecoveryCheckpointTrigger trigger) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        mainMailboxExecutor.execute(
+                () -> {
+                    recoveryCheckpointTrigger = trigger;
+                    future.complete(null);
+                },
+                "update recoveryCheckpointTrigger to " + trigger);
+        return future;
+    }
+
+    private CompletableFuture<Void> recoverChannelsWithoutCheckpointing(
+            SequentialChannelStateReader reader, IndexedInputGate[] inputGates) {
+        LOG.info(
+                "Checkpointing during recovery is disabled, recovering the channel state of {} input gate(s).",
+                inputGates.length);
+        recoveryCheckpointTrigger = RecoveryCheckpointTrigger.NO_OP;
+        // Feed recovered channel state on the IO thread. This is intentionally NOT part of the
+        // completion gate below: a gate's stateConsumedFuture only completes once the consumer (the
+        // default action, running in the restore mailbox loop) has drained the end-of-state
+        // sentinel that readInputChannelState pushes, so gating on stateConsumedFuture already
+        // implies the read has finished. Including the read future in the gate would defer
+        // suspend() past the restore loop's first default action, letting input be processed before
+        // recovery completes -- causing record loss and "Mailbox loop interrupted before recovery
+        // was finished". Read failures are surfaced via asyncExceptionHandler inside
+        // readInputChannelState.
+        channelIOExecutor.execute(() -> readInputChannelState(reader, inputGates));
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        for (InputGate inputGate : inputGates) {
+            CompletableFuture<Void> stateConsumed = inputGate.getStateConsumedFuture();
+            futures.add(stateConsumed);
+            // Convert and request partitions for each gate as soon as ITS OWN recovered state is
+            // drained, independent of the other gates. Deferring conversion until every gate has
+            // drained deadlocks selective-reading multi-input operators: such an operator only
+            // drains the selected input's end-of-state sentinel, so an unselected gate would never
+            // drain (it is read only after conversion) while conversion would wait for it to drain
+            // first. suspend() is still gated on completeAll(futures) below.
+            stateConsumed.thenRun(
+                    () ->
+                            mainMailboxExecutor.execute(
+                                    () -> inputGate.requestPartitions(false),
+                                    "Input gate request partitions"));
+        }
+        return completeAll(futures);
+    }
+
+    private void readInputChannelState(
+            SequentialChannelStateReader reader, IndexedInputGate[] inputGates) {
+        try {
+            long readStartTs = SystemClock.getInstance().absoluteTimeMillis();
+            checkState(reader.readInputData(inputGates, createRecordFilterContext()).isEmpty());
+
+            for (IndexedInputGate gate : inputGates) {
+                gate.finishReadRecoveredState();
+            }
+            LOG.info(
+                    "Fed the recovered channel state into the input channels in {} ms.",
+                    SystemClock.getInstance().absoluteTimeMillis() - readStartTs);
+        } catch (Exception e) {
+            asyncExceptionHandler.handleAsyncException(
+                    "Unable to set up recovered channel state", e);
+        }
+    }
+
+    private Optional<FetchedChannelState> fetchChannelState(
+            SequentialChannelStateReader reader, IndexedInputGate[] inputGates) {
+        try {
+            Optional<FetchedChannelState> state =
+                    reader.readInputData(inputGates, createRecordFilterContext());
+            if (state.isPresent()) {
+                // The task owns the spill files until a drainer releases them; registering here
+                // deletes them on cleanUp() if recovery aborts anywhere between fetch and drain
+                // (the drainer never gets built, a mailbox mail is rejected or dropped, drain() is
+                // never scheduled). close() is idempotent, so a completed drain makes this a no-op.
+                // If cleanUp() already ran, the registry closes the state right here instead.
+                resourceCloser.registerCloseable(state.get());
+                LOG.info(
+                        "Fetched and filtered the recovered channel state into {} spill file(s).",
+                        state.get().files().size());
+            } else {
+                LOG.info("There is no channel state to recover.");
+            }
+            return state;
+        } catch (Throwable t) {
+            asyncExceptionHandler.handleAsyncException(
+                    "Unable to set up recovered channel state", t);
+            return Optional.empty();
+        }
+    }
+
+    private void drain(FetchedChannelStateDrainer drainer) {
+        try (FetchedChannelStateDrainer ignored = drainer) {
+            try {
+                LOG.debug("Draining the recovered channel state into the input channels.");
+                long drainStartTs = SystemClock.getInstance().absoluteTimeMillis();
+                drainer.drain();
+                LOG.info(
+                        "Drained the recovered channel state in {} ms.",
+                        SystemClock.getInstance().absoluteTimeMillis() - drainStartTs);
+            } catch (Throwable t) {
+                asyncExceptionHandler.handleAsyncException(
+                        "Unable to drain recovered channel state", t);
+            }
+        } catch (Throwable closeError) {
+            asyncExceptionHandler.handleAsyncException(
+                    "Unable to close FetchedChannelStateDrainer after drain", closeError);
+        }
+    }
+
+    private CompletableFuture<List<RecoverableInputChannel>> requestPartitions(
+            IndexedInputGate[] inputGates, boolean needsRecovery) {
+        CompletableFuture<List<RecoverableInputChannel>> future = new CompletableFuture<>();
+        mainMailboxExecutor.execute(
                 () -> {
                     try {
-                        reader.readInputData(inputGates);
-                    } catch (Exception e) {
-                        asyncExceptionHandler.handleAsyncException(
-                                "Unable to read channel state", e);
+                        for (InputGate inputGate : inputGates) {
+                            inputGate.requestPartitions(needsRecovery);
+                        }
+                        future.complete(collectPhysicalChannels(inputGates));
+                    } catch (Throwable t) {
+                        future.completeExceptionally(t);
+                        throw t;
                     }
-                });
+                },
+                "Input gate request partitions");
+        return future;
+    }
 
-        // We wait for all input channel state to recover before we go into RUNNING state, and thus
-        // start checkpointing. If we implement incremental checkpointing of input channel state
-        // we must make sure it supports CheckpointType#FULL_CHECKPOINT
-        List<CompletableFuture<?>> recoveredFutures = new ArrayList<>(inputGates.length);
-        for (InputGate inputGate : inputGates) {
-            recoveredFutures.add(inputGate.getStateConsumedFuture());
-
-            inputGate
-                    .getStateConsumedFuture()
-                    .thenRun(
-                            () ->
-                                    mainMailboxExecutor.execute(
-                                            inputGate::requestPartitions,
-                                            "Input gate request partitions"));
+    private static List<RecoverableInputChannel> collectPhysicalChannels(InputGate[] inputGates) {
+        List<RecoverableInputChannel> channels = new ArrayList<>();
+        for (InputGate gate : inputGates) {
+            int numberOfInputChannels = gate.getNumberOfInputChannels();
+            for (int i = 0; i < numberOfInputChannels; i++) {
+                InputChannel channel = gate.getChannel(i);
+                if (channel instanceof RecoverableInputChannel) {
+                    channels.add((RecoverableInputChannel) channel);
+                }
+            }
         }
+        return channels;
+    }
 
-        return CompletableFuture.allOf(recoveredFutures.toArray(new CompletableFuture[0]))
-                .thenRun(mailboxProcessor::suspend);
+    public RecoveryCheckpointTrigger getRecoveryCheckpointTrigger() {
+        return cpId -> {
+            checkState(mailboxProcessor.isMailboxThread());
+            return recoveryCheckpointTrigger.snapshotAndInsertBarriers(cpId);
+        };
     }
 
     private void ensureNotCanceled() {
@@ -1157,6 +1411,11 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
     }
 
     private boolean taskIsAvailable() {
+        if (chainAvailabilityProvider != null) {
+            return chainAvailabilityProvider.isAvailable()
+                    && (changelogWriterAvailabilityProvider == null
+                            || changelogWriterAvailabilityProvider.isAvailable());
+        }
         return recordWriter.isAvailable()
                 && (changelogWriterAvailabilityProvider == null
                         || changelogWriterAvailabilityProvider.isAvailable());
@@ -1952,6 +2211,95 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
     @Override
     public final Environment getEnvironment() {
         return environment;
+    }
+
+    /**
+     * Creates a RecordFilterContext for filtering recovered channel state buffers.
+     *
+     * <p>This method builds the complete context using information available in StreamTask,
+     * including input configurations for all network inputs.
+     *
+     * @return A RecordFilterContext with input configurations. The context may have empty
+     *     inputConfigs (e.g., for source tasks) or enabled=false when filtering is not needed.
+     */
+    protected RecordFilterContext createRecordFilterContext() {
+        boolean checkpointingDuringRecoveryEnabled =
+                CheckpointingOptions.isCheckpointingDuringRecoveryEnabled(getJobConfiguration());
+        if (!checkpointingDuringRecoveryEnabled) {
+            return RecordFilterContext.disabled();
+        }
+
+        ClassLoader cl = getUserCodeClassLoader();
+        StreamConfig.InputConfig[] inputs = configuration.getInputs(cl);
+        List<StreamEdge> inEdges = configuration.getInPhysicalEdges(cl);
+
+        // Create array sized to match the number of physical input gates.
+        // For source tasks, this will be 0. For tasks with network inputs, each physical gate
+        // must have a corresponding config entry.
+        int numGates = getEnvironment().getAllInputGates().length;
+
+        if (numGates > 0 && inEdges.isEmpty()) {
+            // The task has input gates but the StreamConfig carries no physical edges. This happens
+            // for dynamically connected inputs -- e.g. reading a cached intermediate result under
+            // the AdaptiveBatchScheduler -- where the physical connection (and thus the partitioner
+            // needed to build per-gate filter configs) is determined by the scheduler at runtime.
+            // Such jobs are batch and have no unaligned-checkpoint channel state to filter, so
+            // disable record filtering rather than failing the precondition below.
+            return RecordFilterContext.disabled();
+        }
+
+        RecordFilterContext.InputFilterConfig[] inputConfigs =
+                new RecordFilterContext.InputFilterConfig[numGates];
+
+        Preconditions.checkState(
+                numGates == inEdges.size(),
+                "Number of input gates (%s) does not match number of physical edges (%s)",
+                numGates,
+                inEdges.size());
+
+        // Iterate through all physical edges (inEdges) instead of logical inputs.
+        // This is critical for Union scenarios where multiple physical gates map to one logical
+        // input. The order of inEdges matches the order of physical input gates.
+        int numberOfChannels = getEnvironment().getTaskInfo().getNumberOfParallelSubtasks();
+        for (int gateIndex = 0; gateIndex < inEdges.size(); gateIndex++) {
+            StreamEdge edge = inEdges.get(gateIndex);
+            // Calculate logical input index from typeNumber
+            // typeNumber = 0 means single input, typeNumber >= 1 means multi-input (1-indexed)
+            int inputIndex = edge.getTypeNumber() == 0 ? 0 : edge.getTypeNumber() - 1;
+
+            Preconditions.checkState(
+                    inputIndex < inputs.length
+                            && inputs[inputIndex] instanceof StreamConfig.NetworkInputConfig,
+                    "Physical edge at gateIndex %s has invalid inputIndex %s or non-network input",
+                    gateIndex,
+                    inputIndex);
+
+            StreamConfig.NetworkInputConfig networkInput =
+                    (StreamConfig.NetworkInputConfig) inputs[inputIndex];
+            TypeSerializer<?> typeSerializer = networkInput.getTypeSerializer();
+            StreamPartitioner<?> partitioner = edge.getPartitioner();
+
+            inputConfigs[gateIndex] =
+                    new RecordFilterContext.InputFilterConfig(
+                            typeSerializer, partitioner, numberOfChannels);
+        }
+
+        for (int i = 0; i < inputConfigs.length; i++) {
+            Preconditions.checkState(
+                    inputConfigs[i] != null,
+                    "InputFilterConfig at index %s is null. "
+                            + "All physical gates must have corresponding configurations.",
+                    i);
+        }
+
+        return new RecordFilterContext(
+                inputConfigs,
+                getEnvironment().getTaskStateManager().getInputRescalingDescriptor(),
+                getEnvironment().getTaskInfo().getIndexOfThisSubtask(),
+                getEnvironment().getTaskInfo().getMaxNumberOfParallelSubtasks(),
+                getEnvironment().getIOManager().getSpillingDirectoriesPaths(),
+                true,
+                ConfigurationParserUtils.getPageSize(getEnvironment().getJobConfiguration()));
     }
 
     /** Check whether records can be emitted in batch. */
