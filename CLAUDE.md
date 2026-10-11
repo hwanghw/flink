@@ -451,6 +451,9 @@ Linked from many of the module CLAUDE.md files. These are working / explanatory 
 | `flink-iceberg-sink-connector-deep-dive.md` | external Iceberg sink + `flink-connectors` framework |
 | `flink-iceberg-source-connector-deep-dive.md` | external Iceberg source (FLIP-27) + `flink-connectors` framework |
 | `flink-cassandra-connector-wal-exactly-once-architecture.md` | external Cassandra + `flink-connectors` framework |
+| `flink-json-kafka-to-parquet-rowdata-vs-avro.md` | `flink-formats` (avro/parquet/json), `flink-table` (RowData/RowType), Kafka→Parquet pipeline design; RowData vs Avro vs Arrow, schema evolution, no-data-loss restart |
+| `flink-sql-json-processing-and-rest-sink.md` | `flink-table` (SQL/JSON functions, VARIANT, UDFs, DynamicTableSink), `flink-json`, `flink-connector-base` (AsyncSink), `flink-models`; Flink SQL JSON conversion + custom REST sink + tool evaluation |
+| `flink-async-io-deep-dive.md` | `flink-streaming-java` (`AsyncWaitOperator`, ordered/unordered `StreamElementQueue`, retry), `flink-runtime` (mailbox, processing-time timers), `flink-table-runtime` (`TableKeyedAsyncWaitOperator`); threading model, watermark fencing, checkpoint/exactly-once semantics, timeout-vs-retry races |
 | `flink-sink-patterns-comparison.md` | sinks across `flink-streaming-java`, `flink-connectors` |
 | `flink-sink-v2-vs-legacy-architecture-deep-dive.md` | Sink V2 (`SinkWriterOperator` / `CommitterOperator` / `Committer.commit` call chain) vs legacy chain-of-operators; uses Iceberg v2.1 and v1.20 as worked example |
 | `flink-window-event-assignment-and-state-lifecycle.md` | `flink-runtime` window machinery |
